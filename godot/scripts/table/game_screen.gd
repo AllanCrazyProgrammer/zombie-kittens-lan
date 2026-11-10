@@ -79,6 +79,17 @@ var _pressing := false
 var _dragging := false
 var hover_changes := 0      # para la prueba automática
 const DRAG_START_PX := 22.0
+## Llevar una carta al centro para jugarla
+var _carry := ""                 # id de la carta que el dedo lleva fuera de la mano ("" = ninguna)
+var _carry_over := false         # el dedo está sobre la zona de juego
+var _carry_prev := Vector3.ZERO
+var _sel_before: Array[String] = []
+var _drop_ring: MeshInstance3D
+var _drop_mat: StandardMaterial3D
+var drops := 0                   # para la prueba automática: cartas soltadas en el centro
+const PLAY_ZONE_CENTER := Vector3(0, 0, -0.25)
+const PLAY_ZONE_RADIUS := 1.25
+const CARRY_HEIGHT := 0.32
 var _toasts: VBoxContainer
 
 
@@ -112,6 +123,23 @@ func _ready() -> void:
 	_turn_light.omni_range = 1.6
 	_turn_light.visible = false
 	add_child(_turn_light)
+	_drop_ring = MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = PLAY_ZONE_RADIUS - 0.06
+	torus.outer_radius = PLAY_ZONE_RADIUS
+	torus.rings = 64
+	torus.ring_segments = 6
+	_drop_ring.mesh = torus
+	_drop_mat = StandardMaterial3D.new()
+	_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_drop_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_drop_ring.material_override = _drop_mat
+	_drop_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_drop_ring.position = PLAY_ZONE_CENTER + Vector3(0, 0.02, 0)
+	_drop_ring.scale = Vector3(1, 0.3, 1)
+	_drop_ring.visible = false
+	add_child(_drop_ring)
 	_build_hud()
 	session.updated.connect(_refresh)
 	session.error.connect(func(msg: String) -> void: _toast(msg, true))
@@ -121,6 +149,9 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_time += delta
 	_hand_root.position.y = sin(_time * 1.4) * 0.006
+	if _drop_ring.visible:
+		var pulse := 0.5 + 0.5 * sin(_time * 7.0)
+		_drop_mat.albedo_color = Color(0.71, 0.95, 0.23, 0.55 + 0.35 * pulse) if _carry_over else Color(1, 1, 1, 0.18 + 0.12 * pulse)
 	for id: String in _seats:
 		var av: Sprite3D = _seats[id].avatar
 		var is_cur: bool = not _v.is_empty() and _v.cur == id
@@ -149,6 +180,14 @@ func debug_playable_card() -> Card3D:
 func debug_hand_ends() -> Array:
 	var hand := _sorted_hand()
 	return [] if hand.size() < 2 else [_hand[hand[0].id], _hand[hand[-1].id]]
+
+
+func debug_zoom_visible() -> bool:
+	return _zoom.visible
+
+
+func debug_carry() -> String:
+	return "%s sobre la zona=%s" % [_carry, str(_carry_over)]
 
 
 func debug_selection() -> Array:
@@ -285,6 +324,9 @@ func _sync_hand() -> void:
 	for i in count:
 		var n: Card3D = _hand[hand[i].id]
 		var ang := deg_to_rad((float(i) - (count - 1) / 2.0) * spread)
+		if hand[i].id == _carry:
+			n.set_meta("slot", Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius))
+			continue
 		var pos := Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius)
 		n.set_meta("slot", pos)       # lugar en el abanico (sin levantar), para saber qué carta está bajo el dedo
 		var selected := _sel.has(hand[i].id)
@@ -655,6 +697,12 @@ func _input(event: InputEvent) -> void:
 			_dragging = false
 			_press_pos = event.position
 			_press_card = _hand_card_at(event.position) if _pressing else ""
+			_sel_before = _sel.duplicate()
+		elif _pressing and _carry != "":
+			_pressing = false
+			_dragging = false
+			_drop_carry()
+			_update_zoom()
 		elif _pressing:
 			_pressing = false
 			var target := _hover
@@ -664,11 +712,113 @@ func _input(event: InputEvent) -> void:
 			# Soltar sobre otra carta distinta de la inicial la elige (la inicial ya se eligió al tocarla)
 			if was_drag and target != "" and target != _press_card and _hand.has(target):
 				_on_card_tapped(_hand[target])
+			_update_zoom()
 	elif event is InputEventMouseMotion and _pressing and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
 		if not _dragging and event.position.distance_to(_press_pos) >= DRAG_START_PX:
 			_dragging = true
-		if _dragging:
+			_update_zoom()
+		if _carry != "":
+			_move_carry(event.position)
+		elif _dragging and event.position.y < _hand_top_y() - 30.0:
+			# El dedo salió de la mano hacia arriba: se lleva la carta (la que se tocó o la resaltada)
+			var id := _hover if _hover != "" else _press_card
+			if id != "" and _hand.has(id):
+				_start_carry(id, event.position)
+		elif _dragging:
 			_set_hover(_hand_card_at(event.position))
+
+
+## Altura en pantalla del borde superior de la mano.
+func _hand_top_y() -> float:
+	return world.camera.unproject_position(_hand_pivot.to_global(Vector3(0, 0.14, -0.2 - SIZE_Z * HAND_SCALE))).y
+
+
+## Punto de la mesa (a cierta altura) bajo el dedo.
+func _table_point(screen_pos: Vector2, height: float) -> Vector3:
+	var cam := world.camera
+	var from := cam.project_ray_origin(screen_pos)
+	var dir := cam.project_ray_normal(screen_pos)
+	if absf(dir.y) < 0.001:
+		return from
+	return from + dir * ((height - from.y) / dir.y)
+
+
+func _start_carry(id: String, screen_pos: Vector2) -> void:
+	_carry = id
+	# Si la carta era parte de una pareja o trío ya elegidos, se lleva el combo; si no, solo esa carta
+	if _sel_before.has(id):
+		_sel = _sel_before.duplicate()
+	else:
+		_sel.clear()
+		_sel.append(id)
+	_hover = ""
+	var n: Card3D = _hand[id]
+	n.kill_motion()
+	n.set_glow(0.2)
+	_carry_prev = n.global_position
+	_drop_ring.visible = true
+	Sfx.play("card", -4.0)
+	Input.vibrate_handheld(15)
+	_sync_hand()
+	_update_hud()          # el panel de abajo describe la carta que se lleva
+	_move_carry(screen_pos)
+
+
+func _move_carry(screen_pos: Vector2) -> void:
+	var n: Card3D = _hand.get(_carry)
+	if n == null:
+		_carry = ""
+		_drop_ring.visible = false
+		return
+	var p := _table_point(screen_pos, CARRY_HEIGHT)
+	var vel := p - _carry_prev
+	_carry_prev = p
+	n.global_position = n.global_position.lerp(p, 0.65)
+	# La carta se inclina hacia la cámara y se ladea un poco según hacia dónde se mueve
+	var tilt := clampf(-vel.x * 2.2, -0.35, 0.35)
+	n.global_rotation = Vector3(deg_to_rad(38.0), 0.0, tilt)
+	n.scale = Vector3.ONE * HAND_SCALE * 1.12
+	var on_table := Vector2(p.x - PLAY_ZONE_CENTER.x, p.z - PLAY_ZONE_CENTER.z).length() < PLAY_ZONE_RADIUS + 0.35
+	var over := on_table and screen_pos.y < _hand_top_y() - 30.0
+	if over != _carry_over:
+		_carry_over = over
+		if over:
+			Input.vibrate_handheld(10)
+
+
+## Soltar la carta: en el centro se juega; fuera, vuelve a la mano.
+func _drop_carry() -> void:
+	var id := _carry
+	var over := _carry_over
+	_carry = ""
+	_carry_over = false
+	_drop_ring.visible = false
+	if not _hand.has(id):
+		_sync_hand()
+		return
+	if not over:
+		_sync_hand()
+		_update_hud()
+		return
+	drops += 1
+	var playable := false
+	if _sel.size() == 1:
+		playable = _v.playable.has(id)
+		if not playable:
+			var c := {}
+			for x: Dictionary in _v.hand:
+				if x.id == id:
+					c = x
+			_toast(_why_not(c), true)
+	else:
+		var cs := _combo_state()
+		playable = not cs.is_empty() and not cs.has("err")
+		if not playable:
+			_toast(cs.get("err", "Ese combo no se puede jugar ahora."), true)
+	if playable:
+		_play_selected()      # igual que tocar JUGAR (pide objetivo si hace falta)
+	_sync_hand()
+	_update_hud()
 
 
 func _on_card_tapped(card: Card3D) -> void:
@@ -1003,12 +1153,13 @@ func _update_hud() -> void:
 	_update_zoom.call_deferred()
 
 
-## Muestra en grande, entre los rivales y la mano, la última carta seleccionada.
+## Muestra en grande, entre los rivales y la mano, la última carta seleccionada (no mientras se arrastra).
 func _update_zoom() -> void:
 	if not is_inside_tree():
 		return
 	var type := ""
-	var show_id: String = _hover if _hover != "" else (_sel[-1] if _sel.size() > 0 else "")
+	# Solo con una carta elegida y el dedo quieto: mientras se arrastra (por la mano o al tablero) se oculta
+	var show_id: String = "" if (_dragging or _carry != "") else (_sel[-1] if _sel.size() > 0 else "")
 	if show_id != "" and _v.over == null and _modal_root.get_child_count() == 0:
 		for c: Dictionary in _v.hand:
 			if c.id == show_id:
@@ -1044,6 +1195,27 @@ func _update_zoom() -> void:
 		t.tween_property(_zoom, "modulate:a", 1.0, 0.12)
 
 
+## Por qué una carta (sola) no se puede jugar ahora.
+func _why_not(c: Dictionary) -> String:
+	if c.is_empty():
+		return "No se puede jugar ahora."
+	if CardDB.defs[c.type].cat:
+		return "Selecciona otra igual para jugar una pareja."
+	if c.type == "zombie":
+		return "Se usa sola cuando sacas un Gatito Explosivo."
+	if c.type == "nope":
+		return "Úsala cuando alguien juegue una carta."
+	if c.type == "clairvoyance":
+		return "Úsala cuando otro juegue un Gatito Zombi."
+	if not _me().alive:
+		return "Estás muerto: solo Nop y cartas ⚡."
+	if _v.cur != _v.you:
+		return "Espera tu turno."
+	if c.type in ["attack_dead", "grave_robber", "feed_dead"] and _v.deadN == 0:
+		return "Necesita que haya jugadores muertos."
+	return "No se puede jugar ahora."
+
+
 func _build_selection_info() -> void:
 	var cards := _sel_cards()
 	if cards.is_empty() or _v.over != null:
@@ -1064,22 +1236,7 @@ func _build_selection_info() -> void:
 		desc = CardDB.defs[c.type].short
 		can = _v.playable.has(c.id)
 		if not can:
-			var why := "No se puede jugar ahora."
-			if CardDB.defs[c.type].cat:
-				why = "Selecciona otra igual para jugar una pareja."
-			elif c.type == "zombie":
-				why = "Se usa sola cuando sacas un Gatito Explosivo."
-			elif c.type == "nope":
-				why = "Úsala cuando alguien juegue una carta."
-			elif c.type == "clairvoyance":
-				why = "Úsala cuando otro juegue un Gatito Zombi."
-			elif not _me().alive:
-				why = "Estás muerto: solo Nop y cartas ⚡."
-			elif _v.cur != _v.you:
-				why = "Espera tu turno."
-			elif c.type in ["attack_dead", "grave_robber", "feed_dead"] and _v.deadN == 0:
-				why = "Necesita que haya jugadores muertos."
-			desc += "\n→ " + why
+			desc += "\n→ " + _why_not(c)
 	else:
 		var cs := _combo_state()
 		title = "Pareja" if cards.size() == 2 else "Trío"
