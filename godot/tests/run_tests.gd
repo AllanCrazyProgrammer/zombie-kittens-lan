@@ -14,6 +14,7 @@ var _fails := 0
 
 func _init() -> void:
 	var t0 := Time.get_ticks_msec()
+	_test_versions()
 	_test_rng_and_setup()
 	_test_traces()
 	_test_simulations()
@@ -95,6 +96,19 @@ static func _count(g: Game) -> int:
 	if g.prompt != null:
 		n += (1 if g.prompt.has("card") else 0) + (g.prompt.eks.size() if g.prompt.has("eks") else 0) + (g.prompt.pool.size() if g.prompt.has("pool") else 0)
 	return n
+
+
+func _test_versions() -> void:
+	print("Versiones")
+	var U := preload("res://scripts/autoload/updater.gd")
+	var cases := [["2.1.0", "2.0.0", true], ["v2.1.0", "2.0.0", true], ["1.10.0", "1.9.3", true], ["2.0.0", "2.0.0", false],
+		["2.0", "2.0.0", false], ["1.1.0", "2.0.0", false], ["v3.0.0-beta", "2.9", true], ["2.0.0", "2.0.1", false]]
+	var bad := 0
+	for c: Array in cases:
+		if not _check(U.is_newer(c[0], c[1]) == c[2], "%s > %s debería ser %s" % c):
+			bad += 1
+	if bad == 0:
+		_ok("comparación de versiones (%d casos)" % cases.size())
 
 
 func _test_rng_and_setup() -> void:

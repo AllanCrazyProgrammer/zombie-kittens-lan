@@ -443,6 +443,36 @@ func _tap(window_pos: Vector2) -> void:
 		await get_tree().process_frame
 
 
+## Arrastra con el botón/dedo apretado de `from` a `to`. hold=true deja el dedo puesto (sin soltar);
+## hold=false solo suelta en `to`.
+func _drag(from: Vector2, to: Vector2, hold: bool) -> void:
+	if hold:
+		var down := InputEventMouseButton.new()
+		down.button_index = MOUSE_BUTTON_LEFT
+		down.pressed = true
+		down.position = from
+		down.global_position = from
+		Input.parse_input_event(down)
+		await get_tree().process_frame
+		for k in range(1, 25):
+			var m := InputEventMouseMotion.new()
+			m.position = from.lerp(to, k / 24.0)
+			m.global_position = m.position
+			m.button_mask = MOUSE_BUTTON_MASK_LEFT
+			Input.parse_input_event(m)
+			await get_tree().process_frame
+			await get_tree().process_frame
+		return
+	var up := InputEventMouseButton.new()
+	up.button_index = MOUSE_BUTTON_LEFT
+	up.pressed = false
+	up.position = to
+	up.global_position = to
+	Input.parse_input_event(up)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+
 func _tap_control(c: Control) -> void:
 	await _tap(get_viewport().get_final_transform() * c.get_global_rect().get_center())
 
@@ -517,6 +547,24 @@ func _ui_test(dir: String) -> void:
 		await _wait(0.8)
 		await _save_shot(dir + "/t4_robo.png")
 		report.append("robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, (_session as LocalMatch).game.draw.size(), hand_before, (_session as LocalMatch).game.P("p0").hand.size()])
+	# Arrastrar el dedo por la mano, de la primera a la última carta (cuando la mano está libre, sin ventanas)
+	for _i in 120:
+		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
+			break
+		await _wait(0.5)
+	if _game.debug_can_draw():
+		var ends: Array = _game.debug_hand_ends()
+		if ends.size() == 2:
+			var vt := get_viewport().get_final_transform()
+			var a_pos: Vector2 = vt * _world.camera.unproject_position(ends[0].to_global(Vector3(-0.2, 0, -0.32)))
+			var b_pos: Vector2 = vt * _world.camera.unproject_position(ends[1].to_global(Vector3(0.1, 0, -0.32)))
+			var before: int = _game.hover_changes
+			await _drag(a_pos, b_pos, true)
+			await _save_shot(dir + "/t6_arrastre.png")
+			var mid_hover: String = _game.debug_hover()
+			await _drag(b_pos, b_pos, false)
+			await _wait(0.4)
+			report.append("arrastre: %d cartas resaltadas | resaltada al final del recorrido=%s | selección tras soltar=%s (esperada %s)" % [_game.hover_changes - before, mid_hover, str(_game.debug_selection()), ends[1].card_id])
 	# Historial
 	var hist := _find_button(self, "HISTORIAL")
 	report.append("botón HISTORIAL visible: %s" % str(hist != null))
