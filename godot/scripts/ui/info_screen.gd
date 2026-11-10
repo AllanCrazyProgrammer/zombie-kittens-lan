@@ -62,6 +62,16 @@ func _ready() -> void:
 		_fill_rules(body)
 	else:
 		_fill_cards(body)
+	_let_touches_through(body)
+
+
+## Los paneles e imágenes "se quedan" con el toque por defecto, y entonces el dedo no llega a la lista
+## y no se puede deslizar. Aquí se les indica que lo dejen pasar.
+func _let_touches_through(n: Node) -> void:
+	if n is Control and n.mouse_filter == Control.MOUSE_FILTER_STOP:
+		n.mouse_filter = Control.MOUSE_FILTER_PASS
+	for c in n.get_children():
+		_let_touches_through(c)
 
 
 func _fill_rules(body: VBoxContainer) -> void:
