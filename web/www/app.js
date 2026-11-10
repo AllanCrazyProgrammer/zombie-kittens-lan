@@ -17,6 +17,7 @@
     sel: [], seq: 0, log: [], modal: null, ins: [0, 0], giveSel: null, fresh: true,
     info: { ip: '', port: 8765, local: true, native: !!Native, static: !!window.ZK_STATIC }, found: [], conn: 'off', joinHost: '',
     isSolo: false, solo: Object.assign({ n: 2, level: 'normal', deck: 'official' }, store.get('solo', {})),
+    version: (window.Android && Android.version && Android.version()) || '', update: null, updateProgress: null, updateMsg: null,
   };
   const LEVELS = { easy: ['😺', 'Fácil', 'Juega casi al azar. Ideal para aprender.'], normal: ['😼', 'Normal', 'Esquiva cuando el riesgo sube y usa sus cartas con cabeza.'], hard: ['😈', 'Difícil', 'Recuerda el mazo, te roba los Zombis y te deja el explosivo arriba.'], mix: ['🎲', 'Mixta', 'Cada rival con una dificultad distinta.'] };
   if (!S.token) { S.token = Math.random().toString(36).slice(2) + Date.now().toString(36); store.set('token', S.token); }
@@ -256,10 +257,17 @@
       <button class="avatar big" data-act="avatar" aria-label="Cambiar gato">${K.avatar(S.avatar)}<i>↻</i></button>
       <label><span>Tu nombre</span><input id="name" maxlength="14" placeholder="Gatito" value="${esc(S.name)}" autocomplete="off"></label></div>`;
   }
+  function updateHTML() {
+    const u = S.update, p = S.updateProgress, m = S.updateMsg;
+    if (p != null) return `<div class="update"><b>Descargando… ${p}%</b><div class="upbar"><i style="width:${p}%"></i></div></div>`;
+    if (u) return `<div class="update has"><div><b>⬆️ Versión ${esc(u.version)} disponible</b><span>${esc((u.notes || 'Mejoras y correcciones.').slice(0, 120))}</span></div>${btn('Actualizar', 'installUpdate', 'primary sm')}</div>`;
+    return `<div class="update"><span>${m ? esc(m) : 'Versión instalada: ' + esc(S.version || '?')}</span>${btn('Buscar actualizaciones', 'checkUpdate', 'sm')}</div>`;
+  }
   screens.home = () => {
     const host = S.info.local;
     return `<div class="screen home"><div class="home-art">${K.logo()}<p class="tag">Explota. Revive. Vuelve a explotar.</p></div>
       ${profileHTML()}
+      ${S.info.native ? updateHTML() : ''}
       <div class="menu">
         ${S.info.static ? btn('🤖 Jugar contra la IA', 'solo', 'primary xl') : ''}
         ${!S.info.static && host ? btn('🏠 Crear partida', 'create', 'primary') : ''}
@@ -547,6 +555,12 @@
 
   const A = {
     home() { leave(); S.screen = 'home'; },
+    checkUpdate() { S.updateMsg = 'Buscando actualización…'; if (window.Android && Android.checkUpdate) Android.checkUpdate(true); },
+    installUpdate() {
+      if (!S.update || !window.Android) return;
+      S.updateMsg = null; S.updateProgress = 0;
+      Android.installUpdate(S.update.url);
+    },
     avatar() { S.avatar = (S.avatar + 1) % 8; store.set('avatar', S.avatar); },
     create() { saveName(); startHost(0); },
     solo() { saveName(); leave(); S.screen = 'solo'; },
@@ -643,6 +657,10 @@
 
   /* ----- puente con la app Android ----- */
   window.ZKNative = {
+    update(info) { S.update = info; S.updateMsg = null; if (S.screen === 'home') render(); },
+    updateNone(hasRelease) { S.updateMsg = hasRelease ? 'Ya tienes la última versión.' : 'Todavía no hay versiones publicadas.'; if (S.screen === 'home') render(); },
+    updateError(msg) { S.updateProgress = null; S.updateMsg = String(msg); toast(String(msg), 'bad'); if (S.screen === 'home') render(); },
+    updateProgress(p) { S.updateProgress = p; if (p === null) S.updateMsg = null; if (S.screen === 'home') render(); },
     found(list) { S.found = Array.isArray(list) ? list.filter((f) => !(f.host === S.info.ip && S.mode === 'host')) : []; if (S.screen === 'join') render(); },
     back() {
       if (S.modal) { S.modal = null; render(); return true; }

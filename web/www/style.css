@@ -157,3 +157,8 @@ body.shake #app { animation: shake .55s; }
 .levels { display: flex; flex-direction: column; gap: 8px; } .levels button { display: flex; align-items: center; gap: 12px; text-align: left; background: var(--panel); border: 2px solid var(--line); border-radius: 14px; padding: 9px 12px; } .levels i { font-style: normal; font-size: 30px; } .levels b { font-family: Bangers, Impact, sans-serif; font-weight: 400; font-size: 21px; letter-spacing: .04em; display: block; } .levels span { font-size: 12.5px; color: var(--dim); line-height: 1.2; display: block; }
 .seg button.on, .levels button.on { border-color: var(--toxic); background: #2f4a1a; box-shadow: 0 0 0 2px var(--toxic); } .seg button.on span, .levels button.on span { color: #dff5b0; }
 .pill.lvl { cursor: pointer; background: var(--panel2); color: var(--ink); }
+.update { display: flex; align-items: center; gap: 10px; background: #150a3080; border: 2px dashed var(--line); border-radius: 14px; padding: 9px 12px; font-size: 13.5px; color: var(--dim); }
+.update > span, .update > div { flex: 1; min-width: 0; } .update span { display: block; }
+.update.has { border: 2px solid var(--toxic2); background: #2f4a1a80; color: #dff5b0; } .update b { display: block; color: var(--ink); font-size: 14.5px; } .update.has span { color: #dff5b0; font-size: 12.5px; line-height: 1.2; }
+.update .btn { flex: 0 0 auto; }
+.upbar { height: 10px; border-radius: 99px; background: #150a30; overflow: hidden; margin-top: 6px; } .upbar i { display: block; height: 100%; background: linear-gradient(90deg, var(--toxic2), var(--toxic)); transition: width .2s; }

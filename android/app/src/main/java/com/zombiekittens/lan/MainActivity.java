@@ -81,6 +81,7 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new Bridge(), "Android");
         setContentView(web);
         web.loadUrl("http://127.0.0.1:" + server.port() + "/");
+        checkForUpdate(false);
     }
 
     @Override
@@ -100,9 +101,90 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
+    /* ---------------- actualizaciones ---------------- */
+
+    private void js(String code) {
+        runOnUiThread(() -> { if (web != null) web.evaluateJavascript(code, null); });
+    }
+
+    /** Busca una versión nueva en GitHub. manual=true avisa también cuando no hay nada o no hay red. */
+    private void checkForUpdate(boolean manual) {
+        new Thread(() -> {
+            try {
+                String cur = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+                org.json.JSONObject o = UpdateManager.fetchLatest();
+                if (o != null && UpdateManager.isNewer(o.getString("version"), cur)) {
+                    js("window.ZKNative && window.ZKNative.update(" + o + ")");
+                } else if (manual) {
+                    js("window.ZKNative && window.ZKNative.updateNone(" + (o == null ? "false" : "true") + ")");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Actualización: " + e.getMessage());
+                if (manual) js("window.ZKNative && window.ZKNative.updateError(" + org.json.JSONObject.quote(String.valueOf(e.getMessage())) + ")");
+            }
+        }).start();
+    }
+
+    /** Descarga el APK nuevo al caché de la app y abre el instalador del sistema. */
+    private void downloadAndInstall(String url) {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            // Android pide permiso expreso para instalar desde la app: llevamos al usuario a ese ajuste
+            runOnUiThread(() -> {
+                js("window.ZKNative && window.ZKNative.updateError('Activa \"Instalar apps desconocidas\" para Zombie Kittens y vuelve a tocar Actualizar.')");
+                android.content.Intent i = new android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:" + getPackageName()));
+                startActivity(i);
+            });
+            return;
+        }
+        new Thread(() -> {
+            try {
+                java.io.File dir = new java.io.File(getCacheDir(), "updates");
+                dir.mkdirs();
+                java.io.File f = new java.io.File(dir, "update.apk");
+                java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setInstanceFollowRedirects(true);
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(20000);
+                long total = c.getContentLengthLong(), done = 0;
+                int lastPct = -1;
+                try (java.io.InputStream in = c.getInputStream(); java.io.OutputStream out = new java.io.FileOutputStream(f)) {
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        done += n;
+                        if (total > 0) {
+                            int pct = (int) (done * 100 / total);
+                            if (pct != lastPct) { lastPct = pct; js("window.ZKNative && window.ZKNative.updateProgress(" + pct + ")"); }
+                        }
+                    }
+                } finally {
+                    c.disconnect();
+                }
+                android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", f);
+                runOnUiThread(() -> {
+                    android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                    i.setDataAndType(uri, "application/vnd.android.package-archive");
+                    i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                    js("window.ZKNative && window.ZKNative.updateProgress(null)");
+                });
+            } catch (Exception e) {
+                Log.w(TAG, "Descarga de actualización", e);
+                js("window.ZKNative && window.ZKNative.updateError(" + org.json.JSONObject.quote("No se pudo descargar la actualización. Revisa tu conexión.") + ")");
+            }
+        }).start();
+    }
+
     /* ---------------- puente JavaScript ---------------- */
 
     private class Bridge {
+        @JavascriptInterface public String version() {
+            try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return ""; }
+        }
+        @JavascriptInterface public void checkUpdate(boolean manual) { checkForUpdate(manual); }
+        @JavascriptInterface public void installUpdate(String url) { downloadAndInstall(url); }
         @JavascriptInterface public void advertise(String name) { runOnUiThread(() -> startAdvertise(name)); }
         @JavascriptInterface public void stopAdvertise() { runOnUiThread(MainActivity.this::stopAdvertise); }
         @JavascriptInterface public void discover() { runOnUiThread(MainActivity.this::startDiscover); }
