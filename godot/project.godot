@@ -4,7 +4,7 @@ config_version=5
 [application]
 
 config/name="Zombie Kittens"
-config/version="2.0.0"
+config/version="2.1.0"
 config/icon="res://assets/icon/icon.png"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Mobile")
@@ -14,6 +14,7 @@ config/features=PackedStringArray("4.7", "Mobile")
 CardDB="*res://scripts/autoload/card_db.gd"
 Sfx="*res://scripts/autoload/sfx.gd"
 Net="*res://scripts/autoload/net.gd"
+Updater="*res://scripts/autoload/updater.gd"
 
 [display]
 

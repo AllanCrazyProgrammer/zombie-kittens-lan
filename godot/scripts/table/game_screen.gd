@@ -71,6 +71,14 @@ var _fx_root: Control
 var _zoom: Control             # carta seleccionada, en grande, para apreciar el arte y leer el texto
 var _zoom_pic: TextureRect
 var _zoom_type := ""
+## Arrastrar el dedo por la mano: la carta bajo el dedo se resalta (y se ve en grande); al soltar, se elige
+var _hover := ""
+var _press_pos := Vector2.ZERO
+var _press_card := ""
+var _pressing := false
+var _dragging := false
+var hover_changes := 0      # para la prueba automática
+const DRAG_START_PX := 22.0
 var _toasts: VBoxContainer
 
 
@@ -135,6 +143,20 @@ func debug_playable_card() -> Card3D:
 			if c.type != "nope":
 				return _hand.get(c.id)
 	return null
+
+
+## Para la prueba automática: dos cartas de la mano, la primera y la última del abanico.
+func debug_hand_ends() -> Array:
+	var hand := _sorted_hand()
+	return [] if hand.size() < 2 else [_hand[hand[0].id], _hand[hand[-1].id]]
+
+
+func debug_selection() -> Array:
+	return _sel.duplicate()
+
+
+func debug_hover() -> String:
+	return _hover
 
 
 func debug_deck_card() -> Card3D:
@@ -264,11 +286,16 @@ func _sync_hand() -> void:
 		var n: Card3D = _hand[hand[i].id]
 		var ang := deg_to_rad((float(i) - (count - 1) / 2.0) * spread)
 		var pos := Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius)
+		n.set_meta("slot", pos)       # lugar en el abanico (sin levantar), para saber qué carta está bajo el dedo
 		var selected := _sel.has(hand[i].id)
+		var hovered: bool = _hover == hand[i].id
 		if selected:
 			pos += Vector3(0, 0.1, -0.2)
-		n.set_glow(0.16 if selected else 0.0)
-		n.fly_to(pos, Vector3(0, -ang, 0), 0.3, hand_scale * (1.08 if selected else 1.0))
+		elif hovered:
+			pos += Vector3(0, 0.07, -0.12)
+		n.set_glow(0.16 if selected else (0.1 if hovered else 0.0))
+		var grow := 1.08 if selected else (1.05 if hovered else 1.0)
+		n.fly_to(pos, Vector3(0, -ang, 0), 0.12 if hovered else 0.3, hand_scale * grow)
 
 
 func _sync_discard() -> void:
@@ -573,6 +600,75 @@ func _on_deck_tapped(_c: Card3D) -> void:
 	if _my_turn() and _idle():
 		_sel.clear()
 		_act({"a": "draw"})
+
+
+# ---------------------------------------------------------------- arrastrar el dedo por la mano
+
+## Carta de la mano que está bajo un punto de la pantalla ("" si ninguna).
+func _hand_card_at(screen_pos: Vector2) -> String:
+	var cam := world.camera
+	var from := cam.project_ray_origin(screen_pos)
+	var q := PhysicsRayQueryParameters3D.create(from, from + cam.project_ray_normal(screen_pos) * 30.0)
+	q.collide_with_areas = true
+	q.collide_with_bodies = false
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return ""
+	var card := (hit.collider as Node).get_parent() as Card3D
+	if card == null or not _hand.has(card.card_id):
+		return ""
+	# El dedo está sobre la mano: se elige la carta cuyo lugar en el abanico quede más cerca en horizontal.
+	# (Si se usara solo lo que toca el rayo, la carta levantada taparía a sus vecinas y se saltarían cartas.)
+	var best := card.card_id
+	var best_d := INF
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		if not n.has_meta("slot"):
+			continue
+		var sx := cam.unproject_position(_hand_pivot.to_global(n.get_meta("slot"))).x
+		var d := absf(sx - screen_pos.x)
+		if d < best_d:
+			best_d = d
+			best = id
+	return best
+
+
+func _set_hover(id: String) -> void:
+	if id == _hover:
+		return
+	_hover = id
+	if id != "":
+		hover_changes += 1
+		Sfx.play("tap", -14.0, 0.15)
+		Input.vibrate_handheld(8)
+	_sync_hand()
+	_update_zoom()
+
+
+func _input(event: InputEvent) -> void:
+	if _v.is_empty() or _v.over != null or _modal_root.get_child_count() > 0:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			# Si el dedo empieza sobre un botón de la interfaz, no es un arrastre por la mano
+			_pressing = get_viewport().gui_get_hovered_control() == null
+			_dragging = false
+			_press_pos = event.position
+			_press_card = _hand_card_at(event.position) if _pressing else ""
+		elif _pressing:
+			_pressing = false
+			var target := _hover
+			var was_drag := _dragging
+			_dragging = false
+			_set_hover("")
+			# Soltar sobre otra carta distinta de la inicial la elige (la inicial ya se eligió al tocarla)
+			if was_drag and target != "" and target != _press_card and _hand.has(target):
+				_on_card_tapped(_hand[target])
+	elif event is InputEventMouseMotion and _pressing and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
+		if not _dragging and event.position.distance_to(_press_pos) >= DRAG_START_PX:
+			_dragging = true
+		if _dragging:
+			_set_hover(_hand_card_at(event.position))
 
 
 func _on_card_tapped(card: Card3D) -> void:
@@ -912,9 +1008,10 @@ func _update_zoom() -> void:
 	if not is_inside_tree():
 		return
 	var type := ""
-	if _sel.size() > 0 and _v.over == null and _modal_root.get_child_count() == 0:
+	var show_id: String = _hover if _hover != "" else (_sel[-1] if _sel.size() > 0 else "")
+	if show_id != "" and _v.over == null and _modal_root.get_child_count() == 0:
 		for c: Dictionary in _v.hand:
-			if c.id == _sel[-1]:
+			if c.id == show_id:
 				type = c.type
 	if type == "":
 		_zoom.visible = false

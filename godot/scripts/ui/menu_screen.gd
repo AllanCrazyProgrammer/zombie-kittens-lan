@@ -59,6 +59,7 @@ func _ready() -> void:
 	margin.add_child(panel)
 	_box = UIKit.vbox(14)
 	panel.add_child(_box)
+	Updater.changed.connect(_on_update_state)
 	_build()
 
 
@@ -136,7 +137,28 @@ func _go(p: String) -> void:
 	show_page(p)
 
 
+## Aviso arriba del menú cuando hay una versión nueva publicada.
+func _update_banner() -> void:
+	if Updater.state != "available":
+		return
+	var panel := UIKit.panel(Color("23401a"), UIKit.C.toxic, Vector2(22, 14))
+	var row := UIKit.hbox(14)
+	panel.add_child(row)
+	var txt := UIKit.label("¡Hay una versión nueva! (%s)" % Updater.latest.version, 34, Color("ecffd0"), false, true)
+	txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(txt)
+	var b := _add("DESCARGAR", "primary", Updater.open_download, 34, row)
+	b.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_box.add_child(panel)
+
+
+func _on_update_state() -> void:
+	if page == "home" or page == "settings":
+		_build()
+
+
 func _build_home() -> void:
+	_update_banner()
 	var row := UIKit.hbox(18)
 	_box.add_child(row)
 	var av := Button.new()
@@ -166,7 +188,7 @@ func _build_home() -> void:
 	_add("Cómo jugar", "normal", _open_info.bind("rules"), 38, learn)
 	_add("Cartas", "normal", _open_info.bind("cards"), 38, learn)
 	_add("Ajustes", "normal", _go.bind("settings"), 38)
-	_note("Godot · v%s" % ProjectSettings.get_setting("application/config/version"), 24)
+	_note("Versión %s" % Updater.installed_version(), 24)
 
 
 func _audio_row() -> void:
@@ -209,6 +231,20 @@ func _build_settings() -> void:
 	var q := _quality()
 	_add("Gráficos: " + {"high": "calidad alta", "medium": "calidad media", "low": "calidad baja"}[q], "normal", _next_quality, 40)
 	_note({"high": "Todos los efectos: sombras, brillo y suavizado de bordes.", "medium": "Menos sombras y sin suavizado. Buen equilibrio si el juego va lento.", "low": "Sin sombras ni brillo y menor resolución. Para teléfonos modestos o para ahorrar batería."}[q], 28)
+	var info: String = {
+		"idle": "", "checking": "Buscando actualizaciones…",
+		"latest": "Tienes la versión más reciente (%s)." % Updater.installed_version(),
+		"available": "Hay una versión nueva: %s" % Updater.latest.get("version", ""),
+		"error": "No se pudo revisar si hay actualizaciones. ¿Tienes internet?",
+	}[Updater.state]
+	if Updater.state == "available":
+		_add("DESCARGAR VERSIÓN %s" % Updater.latest.version, "primary", Updater.open_download, 40)
+	else:
+		var chk := _add("Buscar actualizaciones", "normal", Updater.check, 38)
+		chk.disabled = Updater.state == "checking"
+	if info != "":
+		_note(info, 28, UIKit.C.toxic if Updater.state == "available" else UIKit.C.dim)
+	_note("Versión instalada: %s" % Updater.installed_version(), 24)
 	_add("Volver", "ghost", _go.bind("home"), 38)
 
 
