@@ -1,159 +1,228 @@
 extends Node3D
-## Escena de demostración: mesa 3D con cartas de prueba. Valida motor, modelos, materiales y efectos
-## antes de portar las reglas. Tocar una carta la voltea; el Gatito Explosivo y el Zombi tienen su efecto.
-
-const TITLE_FONT := preload("res://assets/fonts/Bangers-Regular.ttf")
-const DEMO_HAND := ["zombie", "nope", "attack", "see_future", "exploding"]
+## Raíz de la aplicación: escenario 3D permanente + menú o partida encima.
+##
+## Argumentos de depuración (tras "--"):
+##   --auto [rivales] [nivel]   arranca una partida en la que la IA también juega por el humano
+##   --seed N                   semilla del reparto
+##   --shots carpeta [cada_s]   guarda capturas periódicas (para revisar la interfaz sin tocar la pantalla)
+##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
+##   --quit-after s             cierra tras s segundos
 
 var _world: TableWorld
-var _hint: Label
-var _hand: Array[Card3D] = []
-var _time: float = 0.0
-var _hand_root: Node3D
-var _hand_pivot: Node3D
-## Separación vertical entre cartas vecinas de la mano (el grosor de la carta es 0.006)
-const HAND_STEP := 0.012
+var _menu: MenuScreen
+var _game: GameScreen
+var _session: LocalMatch
+var _last_opts := {}
+var _shots_dir := ""
+var _shot_every := 3.0
+var _shot_t := 0.0
+var _shot_n := 0
+var _quit_after := -1.0
+var _elapsed := 0.0
 
 
 func _ready() -> void:
 	_world = TableWorld.new()
 	add_child(_world)
-	_build_cards()
-	_build_ui()
 	# Compila los shaders de partículas al arrancar (lejos de la vista) para que la primera explosión no dé un tirón
 	Vfx.explosion(self, Vector3(0, -60, 0))
+	get_viewport().size_changed.connect(_fit_view)
+	_fit_view()
 	var args := OS.get_cmdline_user_args()
-	var i := args.find("--shot")
+	var i := args.find("--shots")
 	if i >= 0 and i + 1 < args.size():
-		_take_shot(args[i + 1], args.has("--boom"))
+		_shots_dir = args[i + 1]
+		if i + 2 < args.size() and args[i + 2].is_valid_float():
+			_shot_every = float(args[i + 2])
+	i = args.find("--quit-after")
+	if i >= 0 and i + 1 < args.size():
+		_quit_after = float(args[i + 1])
+	i = args.find("--uitest")
+	if i >= 0 and i + 1 < args.size():
+		_show_menu()
+		_ui_test(args[i + 1])
+		return
+	i = args.find("--auto")
+	if i >= 0:
+		var opts := {"autoplay": true, "rivals": 2, "level": "normal", "name": "Allan"}
+		if i + 1 < args.size() and args[i + 1].is_valid_int():
+			opts.rivals = int(args[i + 1])
+		if i + 2 < args.size() and not args[i + 2].begins_with("--"):
+			opts.level = args[i + 2]
+		var s := args.find("--seed")
+		if s >= 0 and s + 1 < args.size():
+			opts.seed = int(args[s + 1])
+		if args.has("--slow"):
+			opts.me_delay = 5200
+		_start_game(opts)
+	else:
+		_show_menu()
 
 
 func _process(delta: float) -> void:
-	_time += delta
-	# La mano "respira" toda junta: al moverse como un bloque, las cartas nunca se cruzan entre sí
-	_hand_root.position.y = sin(_time * 1.4) * 0.006
-	_hand_root.rotation.x = sin(_time * 0.9) * 0.004
+	_elapsed += delta
+	if _shots_dir != "":
+		_shot_t += delta
+		if _shot_t >= _shot_every:
+			_shot_t = 0.0
+			_shot_n += 1
+			_save_shot("%s/shot_%02d.png" % [_shots_dir, _shot_n])
+			if _game:
+				print("shot %02d: %s" % [_shot_n, _game.debug_state()])
+	if _quit_after > 0.0 and _elapsed >= _quit_after:
+		get_tree().quit()
 
 
-func _add_card(type: String, up: bool, pos: Vector3, yaw: float) -> Card3D:
-	var c := Card3D.new().setup(type, up)
-	c.position = pos
-	c.rotation_degrees.y = yaw
-	c.tapped.connect(_on_card_tapped)
-	add_child(c)
-	return c
-
-
-## Coloca las cartas de la mano en abanico. Cada carta gira sobre un pivote común situado bajo la mesa
-## (como al abrir un abanico real) y queda un escalón más alta que la anterior, con margen de sobra para que
-## ni la inclinación ni el giro las hagan atravesarse.
-func _layout_hand() -> void:
-	var n := _hand.size()
-	if n == 0:
-		return
-	var spread := minf(9.5, 40.0 / maxf(1.0, n - 1.0))   # grados entre cartas
-	var radius := 2.3
-	for i in n:
-		var k := float(i) - (n - 1) / 2.0
-		var ang := deg_to_rad(k * spread)
-		var c := _hand[i]
-		c.position = Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius)
-		c.rotation = Vector3(0, -ang, 0)
-
-
-func _build_cards() -> void:
-	_hand_root = Node3D.new()
-	_hand_root.position = Vector3(0, 0, 1.28)
-	# Toda la mano se inclina hacia la cámara como un solo plano
-	_hand_pivot = Node3D.new()
-	_hand_pivot.rotation_degrees.x = 9.0
-	_hand_pivot.position.y = 0.05
-	_hand_root.add_child(_hand_pivot)
-	add_child(_hand_root)
-	for t: String in DEMO_HAND:
-		var c := Card3D.new().setup(t, true)
-		c.scale = Vector3.ONE * 0.86
-		c.tapped.connect(_on_card_tapped)
-		_hand_pivot.add_child(c)
-		_hand.append(c)
-	_layout_hand()
-	for i in 14:
-		_add_card("cat_a", false, Vector3(-0.5, 0.01 + i * 0.007, -0.3), randf_range(-3.0, 3.0))
-	_add_card("attack_dead", true, Vector3(0.44, 0.012, -0.34), 14)
-	_add_card("skip", true, Vector3(0.54, 0.024, -0.27), -8)
-
-
-func _build_ui() -> void:
-	var layer := CanvasLayer.new()
-	layer.layer = 2
-	add_child(layer)
-	var title := Label.new()
-	title.text = "ZOMBIE KITTENS"
-	title.add_theme_font_override("font", TITLE_FONT)
-	title.add_theme_font_size_override("font_size", 124)
-	title.add_theme_color_override("font_color", Color("b6f23a"))
-	title.add_theme_color_override("font_outline_color", Color("0d0820"))
-	title.add_theme_constant_override("outline_size", 30)
-	title.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-	title.add_theme_constant_override("shadow_offset_y", 10)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
-	title.offset_top = 100
-	layer.add_child(title)
-
-	_hint = Label.new()
-	_hint.text = "Toca una carta"
-	_hint.add_theme_font_override("font", TITLE_FONT)
-	_hint.add_theme_font_size_override("font_size", 54)
-	_hint.add_theme_color_override("font_color", Color("f4efff"))
-	_hint.add_theme_color_override("font_outline_color", Color("0d0820"))
-	_hint.add_theme_constant_override("outline_size", 16)
-	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hint.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	_hint.offset_top = -230
-	_hint.offset_bottom = -160
-	layer.add_child(_hint)
-
-	var ver := Label.new()
-	ver.text = "Godot · v%s" % ProjectSettings.get_setting("application/config/version")
-	ver.add_theme_font_size_override("font_size", 30)
-	ver.add_theme_color_override("font_color", Color("b3a6dc"))
-	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	ver.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-	ver.offset_top = -110
-	ver.offset_bottom = -70
-	layer.add_child(ver)
-
-
-func _on_card_tapped(card: Card3D) -> void:
-	if card.face_up and card.type == "exploding":
-		_explode(card)
-		return
-	if card.face_up and card.type == "zombie":
-		Vfx.zombie_rise(self, card.global_position + Vector3(0, 0.1, 0))
-		_world.flash(Color("b6f23a"), 0.35)
-		_world.shake(0.35)
-		_hint.text = "¡Gatito Zombi!"
-		return
-	card.flip()
-	await get_tree().create_timer(0.45).timeout
-	_hint.text = CardDB.display_name(card.type) if card.face_up else "Carta boca abajo"
-
-
-func _explode(card: Card3D) -> void:
-	_hint.text = "¡BOOM!"
-	Vfx.explosion(self, card.global_position + Vector3(0, 0.1, 0))
-	_world.flash(Color("ffd9a0"), 0.8)
-	_world.shake(1.0)
-	Input.vibrate_handheld(250)
-
-
-func _take_shot(path: String, boom: bool) -> void:
-	await get_tree().create_timer(1.5).timeout
-	if boom:
-		_explode(_hand[4])
-		for _i in 14:
-			await get_tree().process_frame
+func _save_shot(path: String) -> void:
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png(path)
+
+
+## En pantallas menos alargadas sube la mesa para dejar sitio a los controles de abajo.
+func _fit_view() -> void:
+	var size := get_viewport().get_visible_rect().size
+	var aspect := size.y / maxf(1.0, size.x)
+	_world.set_view_offset(clampf(aspect - 2.0, -0.5, 0.3) * 1.1)
+
+
+func _show_menu() -> void:
+	_end_game()
+	_menu = MenuScreen.new()
+	_menu.start_requested.connect(_start_game)
+	add_child(_menu)
+
+
+func _end_game() -> void:
+	if _game:
+		_game.queue_free()
+		_game = null
+	if _session:
+		_session.queue_free()
+		_session = null
+
+
+func _start_game(opts: Dictionary) -> void:
+	if _menu:
+		_menu.queue_free()
+		_menu = null
+	_end_game()
+	_last_opts = opts
+	_session = LocalMatch.new()
+	add_child(_session)
+	_session.start(opts)
+	_game = GameScreen.new().setup(_session, _world)
+	_game.exit_requested.connect(_show_menu)
+	_game.rematch_requested.connect(func() -> void: _start_game(_last_opts))
+	add_child(_game)
+
+
+# ---------------------------------------------------------------- prueba automática de toques (--uitest carpeta)
+# Simula toques reales en pantalla: menú → jugar → elegir carta → jugarla → robar del mazo.
+
+func _find_button(n: Node, text: String) -> Button:
+	if n is Button and n.text == text and n.is_visible_in_tree():
+		return n
+	for c in n.get_children():
+		var r := _find_button(c, text)
+		if r:
+			return r
+	return null
+
+
+func _tap(window_pos: Vector2) -> void:
+	for pressed: bool in [true, false]:
+		var e := InputEventMouseButton.new()
+		e.button_index = MOUSE_BUTTON_LEFT
+		e.pressed = pressed
+		e.position = window_pos
+		e.global_position = window_pos
+		Input.parse_input_event(e)
+		await get_tree().process_frame
+		await get_tree().process_frame
+
+
+func _tap_control(c: Control) -> void:
+	await _tap(get_viewport().get_final_transform() * c.get_global_rect().get_center())
+
+
+func _tap_3d(n: Node3D, local_offset: Vector3 = Vector3.ZERO) -> void:
+	await _tap(get_viewport().get_final_transform() * _world.camera.unproject_position(n.to_global(local_offset)))
+
+
+func _wait(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+func _ui_test(dir: String) -> void:
+	var report: Array = []
+	await _wait(1.2)
+	await _save_shot(dir + "/t1_menu.png")
+	var b := _find_button(self, "4")
+	if b:
+		await _tap_control(b)
+	await _wait(0.3)
+	report.append("menú: rivales = %s" % str(_menu._opts.rivals))
+	await _tap_control(_find_button(self, "¡JUGAR!"))
+	await _wait(1.5)
+	report.append("partida creada: %s" % str(_game != null))
+	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
+	var card: Card3D = null
+	for _i in 180:
+		if _game.debug_can_draw():
+			card = _game.debug_playable_card()
+			if card:
+				break
+			await _tap_3d(_game.debug_deck_card())      # sin carta jugable: roba y sigue esperando
+		await _wait(0.5)
+		if _session.game.over != null:
+			break
+	if card:
+		var before: int = _session.game.discard.size()
+		await _wait(0.5)
+		await _tap_3d(card, Vector3(-0.24, 0, -0.3))   # esquina superior izquierda: la parte que no tapa la carta vecina
+		await _wait(0.6)
+		await _save_shot(dir + "/t2_seleccion.png")
+		report.append("carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
+		var play := _find_button(self, "JUGAR")
+		report.append("botón JUGAR visible: %s" % str(play != null))
+		if play:
+			await _tap_control(play)
+		await _wait(0.4)
+		await _save_shot(dir + "/t3_jugada.png")
+		report.append("descarte %d → %d" % [before, _session.game.discard.size()])
+		# Si la carta abre una ventana (p. ej. Ver el Futuro), se cierra con su botón
+		await _wait(1.6)
+		var ok := _find_button(self, "Entendido")
+		if ok:
+			await _save_shot(dir + "/t3b_ventana.png")
+			report.append("ventana tras jugar: %s" % _game.debug_state())
+			await _tap_control(ok)
+			await _wait(0.4)
+	else:
+		report.append("no hubo carta jugable")
+	# Robar tocando el mazo
+	for _i in 120:
+		if _session.game.over != null or _game.debug_can_draw():
+			break
+		await _wait(0.5)
+	if _session.game.over == null:
+		var hand_before: int = _session.game.P("p0").hand.size()
+		var deck_before: int = _session.game.draw.size()
+		await _tap_3d(_game.debug_deck_card())
+		await _wait(0.8)
+		await _save_shot(dir + "/t4_robo.png")
+		report.append("robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, _session.game.draw.size(), hand_before, _session.game.P("p0").hand.size()])
+	# Menú → salir
+	var menu := _find_button(self, "MENÚ")
+	if menu and _session.game.over == null:
+		await _tap_control(menu)
+		await _wait(0.4)
+		var exit := _find_button(self, "Salir al menú")
+		report.append("ventana de salida: %s" % str(exit != null))
+		if exit:
+			await _tap_control(exit)
+			await _wait(0.5)
+			report.append("de vuelta en el menú: %s" % str(_menu != null and _game == null))
+	for line: String in report:
+		print("UITEST " + line)
 	get_tree().quit()

@@ -43,6 +43,11 @@ func _process(delta: float) -> void:
 		_lantern_lights[i].light_energy = 2.6 * f
 
 
+## Desplaza la vista en vertical (pantallas menos alargadas: sube la mesa para dejar sitio a los controles).
+func set_view_offset(v: float) -> void:
+	camera.v_offset = v
+
+
 ## Sacudida de cámara (0..1) para explosiones y golpes.
 func shake(amount: float) -> void:
 	_shake = clampf(maxf(_shake, amount), 0.0, 1.0)

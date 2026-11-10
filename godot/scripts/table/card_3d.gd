@@ -11,10 +11,13 @@ const CARD_SHADER := preload("res://shaders/card.gdshader")
 const FOIL := {"zombie": 0.16, "exploding": 0.18, "nope": 0.1}
 
 var type: String = ""
+## Identificador de la carta en la partida (vacío en cartas decorativas)
+var card_id: String = ""
 var face_up: bool = true
 var _busy: bool = false
 var _body: Node3D
 var _front: ShaderMaterial
+var _move: Tween
 
 
 func setup(card_type: String, up: bool = true) -> Card3D:
@@ -38,6 +41,32 @@ func setup(card_type: String, up: bool = true) -> Card3D:
 	area.input_event.connect(_on_input)
 	add_child(area)
 	return self
+
+
+## Mueve la carta suavemente a una posición/rotación (en el espacio de su padre).
+func fly_to(pos: Vector3, rot: Vector3, time: float = 0.28, target_scale: float = -1.0) -> Tween:
+	if _move:
+		_move.kill()
+	_move = create_tween().set_parallel(true).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_move.tween_property(self, "position", pos, time)
+	_move.tween_property(self, "rotation", rot, time)
+	if target_scale > 0.0:
+		_move.tween_property(self, "scale", Vector3.ONE * target_scale, time)
+	return _move
+
+
+## Cambia de padre conservando su lugar en el mundo (para volar entre la mano, el mazo y el descarte).
+func move_under(new_parent: Node3D) -> void:
+	var gt := global_transform
+	if get_parent():
+		get_parent().remove_child(self)
+	new_parent.add_child(self)
+	global_transform = gt
+
+
+func set_face_up(up: bool) -> void:
+	face_up = up
+	_body.rotation.z = 0.0 if up else PI
 
 
 func flip() -> void:
