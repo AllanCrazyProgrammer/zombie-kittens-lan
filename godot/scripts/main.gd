@@ -495,10 +495,10 @@ func _ui_test(dir: String) -> void:
 	if b:
 		await _tap_control(b)
 	await _wait(0.3)
-	report.append("menú: rivales = %s" % str(_menu._opts.rivals))
+	_say(report, "menú: rivales = %s" % str(_menu._opts.rivals))
 	await _tap_control(_find_button(self, "¡JUGAR!"))
 	await _wait(1.5)
-	report.append("partida creada: %s" % str(_game != null))
+	_say(report, "partida creada: %s" % str(_game != null))
 	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
 	var card: Card3D = null
 	for _i in 180:
@@ -516,37 +516,85 @@ func _ui_test(dir: String) -> void:
 		await _tap_3d(card, Vector3(-0.24, 0, -0.3))   # esquina superior izquierda: la parte que no tapa la carta vecina
 		await _wait(0.6)
 		await _save_shot(dir + "/t2_seleccion.png")
-		report.append("carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
+		_say(report, "carta grande visible con la carta elegida y el dedo quieto: %s" % str(_game.debug_zoom_visible()))
+		_say(report, "carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
 		var play := _find_button(self, "JUGAR")
-		report.append("botón JUGAR visible: %s" % str(play != null))
+		_say(report, "botón JUGAR visible: %s" % str(play != null))
 		if play:
 			await _tap_control(play)
 		await _wait(0.4)
 		await _save_shot(dir + "/t3_jugada.png")
-		report.append("descarte %d → %d" % [before, (_session as LocalMatch).game.discard.size()])
+		_say(report, "descarte %d → %d" % [before, (_session as LocalMatch).game.discard.size()])
 		# Si la carta abre una ventana (p. ej. Ver el Futuro), se cierra con su botón
 		await _wait(1.6)
 		var ok := _find_button(self, "Entendido")
 		if ok:
 			await _save_shot(dir + "/t3b_ventana.png")
-			report.append("ventana tras jugar: %s" % _game.debug_state())
+			_say(report, "ventana tras jugar: %s" % _game.debug_state())
 			await _tap_control(ok)
 			await _wait(0.4)
 	else:
-		report.append("no hubo carta jugable")
+		_say(report, "no hubo carta jugable")
 	# Robar tocando el mazo
 	for _i in 120:
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
-	report.append("antes de robar: me toca y puedo robar = %s (%s)" % [str(_game.debug_can_draw()), _game.debug_state()])
+	_say(report, "antes de robar: me toca y puedo robar = %s (%s)" % [str(_game.debug_can_draw()), _game.debug_state()])
 	if (_session as LocalMatch).game.over == null:
 		var hand_before: int = (_session as LocalMatch).game.P("p0").hand.size()
 		var deck_before: int = (_session as LocalMatch).game.draw.size()
 		await _tap_3d(_game.debug_deck_card())
 		await _wait(0.8)
 		await _save_shot(dir + "/t4_robo.png")
-		report.append("robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, (_session as LocalMatch).game.draw.size(), hand_before, (_session as LocalMatch).game.P("p0").hand.size()])
+		_say(report, "robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, (_session as LocalMatch).game.draw.size(), hand_before, (_session as LocalMatch).game.P("p0").hand.size()])
+	# Llevar una carta al centro y soltarla: debe jugarse sin tocar JUGAR
+	var lm := _session as LocalMatch
+	var carried: Card3D = null
+	for _i in 160:
+		if lm.game.over != null:
+			break
+		if _game.debug_can_draw():
+			carried = _game.debug_playable_card()
+			if carried:
+				break
+			await _tap_3d(_game.debug_deck_card())
+		await _wait(0.5)
+	if carried:
+		var vt := get_viewport().get_final_transform()
+		var from_pos: Vector2 = vt * _world.camera.unproject_position(carried.to_global(Vector3(0, 0, -0.32)))
+		var center: Vector2 = vt * _world.camera.unproject_position(Vector3(0, 0.3, -0.25))
+		var discard_before: int = lm.game.discard.size()
+		var hand_before: int = lm.game.P("p0").hand.size()
+		await _drag(from_pos, center, true)
+		await _save_shot(dir + "/t7_llevando.png")
+		var mid := _game.debug_carry()
+		_say(report, "carta grande visible mientras se lleva al tablero: %s" % str(_game.debug_zoom_visible()))
+		await _drag(center, center, false)
+		await _wait(1.2)
+		_say(report, "soltar en el centro: llevando=[%s] | %s | descarte %d → %d | mano %d → %d | %s" % [mid, carried.type, discard_before, lm.game.discard.size(), hand_before, lm.game.P("p0").hand.size(), _game.debug_state()])
+		var ok_btn := _find_button(self, "Entendido")
+		if ok_btn:
+			await _tap_control(ok_btn)
+			await _wait(0.3)
+		# Sacarla y regresarla a la mano sin soltar en el centro: no debe jugarse
+		for _i in 120:
+			if lm.game.over != null or _game.debug_can_draw():
+				break
+			await _wait(0.5)
+		var ends2: Array = _game.debug_hand_ends()
+		if _game.debug_can_draw() and ends2.size() == 2:
+			var c2: Card3D = ends2[0]
+			var p2: Vector2 = vt * _world.camera.unproject_position(c2.to_global(Vector3(0, 0, -0.32)))
+			var hb: int = lm.game.P("p0").hand.size()
+			var db: int = lm.game.discard.size()
+			await _drag(p2, center, true)
+			await _drag(center, p2, true)
+			await _drag(p2, p2, false)
+			await _wait(0.8)
+			_say(report, "regresarla a la mano: mano %d → %d | descarte %d → %d" % [hb, lm.game.P("p0").hand.size(), db, lm.game.discard.size()])
+	else:
+		_say(report, "no hubo carta jugable para llevar al centro")
 	# Arrastrar el dedo por la mano, de la primera a la última carta (cuando la mano está libre, sin ventanas)
 	for _i in 120:
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
@@ -562,17 +610,18 @@ func _ui_test(dir: String) -> void:
 			await _drag(a_pos, b_pos, true)
 			await _save_shot(dir + "/t6_arrastre.png")
 			var mid_hover: String = _game.debug_hover()
+			_say(report, "carta grande visible mientras se arrastra por la mano: %s" % str(_game.debug_zoom_visible()))
 			await _drag(b_pos, b_pos, false)
 			await _wait(0.4)
-			report.append("arrastre: %d cartas resaltadas | resaltada al final del recorrido=%s | selección tras soltar=%s (esperada %s)" % [_game.hover_changes - before, mid_hover, str(_game.debug_selection()), ends[1].card_id])
+			_say(report, "arrastre: %d cartas resaltadas | resaltada al final del recorrido=%s | selección tras soltar=%s (esperada %s)" % [_game.hover_changes - before, mid_hover, str(_game.debug_selection()), ends[1].card_id])
 	# Historial
 	var hist := _find_button(self, "HISTORIAL")
-	report.append("botón HISTORIAL visible: %s" % str(hist != null))
+	_say(report, "botón HISTORIAL visible: %s" % str(hist != null))
 	if hist and (_session as LocalMatch).game.over == null:
 		await _tap_control(hist)
 		await _wait(0.5)
 		await _save_shot(dir + "/t5_historial.png")
-		report.append("historial: %s | %d entradas" % [_game.debug_state(), _game.debug_history_size()])
+		_say(report, "historial: %s | %d entradas" % [_game.debug_state(), _game.debug_history_size()])
 		var close := _find_button(self, "Cerrar")
 		if close:
 			await _tap_control(close)
@@ -587,11 +636,16 @@ func _ui_test(dir: String) -> void:
 			await _tap_control(leave)
 			await _wait(0.4)
 		var exit := _find_button(self, "Salir al menú")
-		report.append("ventana de salida: %s" % str(exit != null))
+		_say(report, "ventana de salida: %s" % str(exit != null))
 		if exit:
 			await _tap_control(exit)
 			await _wait(0.5)
-			report.append("de vuelta en el menú: %s" % str(_menu != null and _game == null))
-	for line: String in report:
-		print("UITEST " + line)
+			_say(report, "de vuelta en el menú: %s" % str(_menu != null and _game == null))
+	print("UITEST fin")
 	get_tree().quit()
+
+
+## Anota un resultado de la prueba y lo imprime al momento (por si la prueba se corta por tiempo).
+func _say(report: Array, line: String) -> void:
+	report.append(line)
+	print("UITEST " + line)

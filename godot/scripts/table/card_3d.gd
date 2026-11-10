@@ -55,6 +55,13 @@ func fly_to(pos: Vector3, rot: Vector3, time: float = 0.28, target_scale: float 
 	return _move
 
 
+## Detiene cualquier movimiento animado (para que la carta pueda seguir al dedo).
+func kill_motion() -> void:
+	if _move:
+		_move.kill()
+		_move = null
+
+
 ## Cambia de padre conservando su lugar en el mundo (para volar entre la mano, el mazo y el descarte).
 func move_under(new_parent: Node3D) -> void:
 	var gt := global_transform
