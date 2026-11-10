@@ -11,6 +11,8 @@ const DECK_POS := Vector3(-0.5, 0, -0.3)
 const DISCARD_POS := Vector3(0.5, 0, -0.3)
 const HAND_STEP := 0.012
 const HAND_SCALE := 0.86
+## Media altura de una carta (del centro al borde superior)
+const SIZE_Z := 0.441
 const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
 
 var session: GameSession
@@ -63,6 +65,9 @@ var _buttons: HBoxContainer
 var _info_slot: VBoxContainer
 var _modal_root: Control
 var _fx_root: Control
+var _zoom: Control             # carta seleccionada, en grande, para apreciar el arte y leer el texto
+var _zoom_pic: TextureRect
+var _zoom_type := ""
 var _toasts: VBoxContainer
 
 
@@ -717,6 +722,27 @@ func _build_hud() -> void:
 	_buttons.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bv.add_child(_buttons)
 
+	# Carta seleccionada en grande. No intercepta toques: se puede seguir tocando la mano debajo.
+	_zoom = Control.new()
+	_zoom.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_zoom.visible = false
+	root.add_child(_zoom)
+	var shadow := ColorRect.new()
+	shadow.color = Color(0, 0, 0, 0.5)
+	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shadow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shadow.offset_left = 14
+	shadow.offset_top = 18
+	shadow.offset_right = 14
+	shadow.offset_bottom = 18
+	_zoom.add_child(shadow)
+	_zoom_pic = TextureRect.new()
+	_zoom_pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_zoom_pic.stretch_mode = TextureRect.STRETCH_SCALE
+	_zoom_pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_zoom_pic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_zoom.add_child(_zoom_pic)
+
 	_fx_root = Control.new()
 	_fx_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_fx_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -870,6 +896,47 @@ func _update_hud() -> void:
 		_build_tip()
 	_build_selection_info()
 	_build_modal()
+	_update_zoom.call_deferred()
+
+
+## Muestra en grande, entre los rivales y la mano, la última carta seleccionada.
+func _update_zoom() -> void:
+	if not is_inside_tree():
+		return
+	var type := ""
+	if _sel.size() > 0 and _v.over == null and _modal_root.get_child_count() == 0:
+		for c: Dictionary in _v.hand:
+			if c.id == _sel[-1]:
+				type = c.type
+	if type == "":
+		_zoom.visible = false
+		_zoom_type = ""
+		return
+	var screen := get_viewport().get_visible_rect().size
+	# Espacio libre: debajo de las fichas de rivales y encima de la mano (según dónde cae en pantalla)
+	var top := _risk.get_global_rect().end.y + 18.0
+	var hand_edge := _hand_pivot.to_global(Vector3(0, 0.14, -0.2 - SIZE_Z * HAND_SCALE))
+	# unproject_position ya devuelve coordenadas de la interfaz (no de la ventana)
+	var bottom := world.camera.unproject_position(hand_edge).y - 18.0
+	var h := clampf(bottom - top, screen.y * 0.36, screen.y * 0.52)   # en pantallas cortas puede tapar un poco la mano
+	var w := h * 5.0 / 7.0
+	if w > screen.x * 0.74:
+		w = screen.x * 0.74
+		h = w * 7.0 / 5.0
+	_zoom.size = Vector2(w, h)
+	_zoom.position = Vector2((screen.x - w) / 2.0, top + maxf(0.0, (bottom - top - h) / 2.0))
+	_zoom.pivot_offset = _zoom.size / 2.0
+	_zoom.visible = true
+	if type != _zoom_type:
+		_zoom_type = type
+		_zoom_pic.texture = CardDB.texture(type)
+		_zoom.scale = Vector2(0.72, 0.72)
+		_zoom.modulate.a = 0.0
+		_zoom.rotation_degrees = -4.0
+		var t := _zoom.create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		t.tween_property(_zoom, "scale", Vector2.ONE, 0.2)
+		t.tween_property(_zoom, "rotation_degrees", 0.0, 0.2)
+		t.tween_property(_zoom, "modulate:a", 1.0, 0.12)
 
 
 func _build_selection_info() -> void:
