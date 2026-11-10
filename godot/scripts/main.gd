@@ -205,6 +205,7 @@ func _ui_test(dir: String) -> void:
 		if _session.game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
+	report.append("antes de robar: me toca y puedo robar = %s (%s)" % [str(_game.debug_can_draw()), _game.debug_state()])
 	if _session.game.over == null:
 		var hand_before: int = _session.game.P("p0").hand.size()
 		var deck_before: int = _session.game.draw.size()
