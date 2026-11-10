@@ -31,7 +31,8 @@ escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a
 Las reglas, la IA y el multijugador siguen estando solo en la versión web/Android original.
 
 - Modelos 3D: `Blender --background --python tools/blender/build_models.py`
-- Texturas de cartas: `node tools/godot/build-card-textures.js`
+- Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
+- Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
 
 ## Estructura

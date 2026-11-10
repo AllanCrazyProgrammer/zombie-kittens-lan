@@ -9,6 +9,10 @@ var _world: TableWorld
 var _hint: Label
 var _hand: Array[Card3D] = []
 var _time: float = 0.0
+var _hand_root: Node3D
+var _hand_pivot: Node3D
+## Separación vertical entre cartas vecinas de la mano (el grosor de la carta es 0.006)
+const HAND_STEP := 0.012
 
 
 func _ready() -> void:
@@ -26,9 +30,9 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_time += delta
-	# La mano "respira": cada carta flota un poco, desfasada de las demás
-	for i in _hand.size():
-		_hand[i].position.y = 0.03 + i * 0.008 + sin(_time * 1.6 + i * 0.9) * 0.004
+	# La mano "respira" toda junta: al moverse como un bloque, las cartas nunca se cruzan entre sí
+	_hand_root.position.y = sin(_time * 1.4) * 0.006
+	_hand_root.rotation.x = sin(_time * 0.9) * 0.004
 
 
 func _add_card(type: String, up: bool, pos: Vector3, yaw: float) -> Card3D:
@@ -40,18 +44,43 @@ func _add_card(type: String, up: bool, pos: Vector3, yaw: float) -> Card3D:
 	return c
 
 
-func _build_cards() -> void:
-	var n := DEMO_HAND.size()
+## Coloca las cartas de la mano en abanico. Cada carta gira sobre un pivote común situado bajo la mesa
+## (como al abrir un abanico real) y queda un escalón más alta que la anterior, con margen de sobra para que
+## ni la inclinación ni el giro las hagan atravesarse.
+func _layout_hand() -> void:
+	var n := _hand.size()
+	if n == 0:
+		return
+	var spread := minf(9.5, 40.0 / maxf(1.0, n - 1.0))   # grados entre cartas
+	var radius := 2.3
 	for i in n:
 		var k := float(i) - (n - 1) / 2.0
-		var c := _add_card(DEMO_HAND[i], true, Vector3(k * 0.4, 0.03 + i * 0.008, 1.3 + absf(k) * 0.07), -k * 7.0)
-		c.scale = Vector3.ONE * 0.9
-		c.rotation_degrees.x = 7.0
+		var ang := deg_to_rad(k * spread)
+		var c := _hand[i]
+		c.position = Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius)
+		c.rotation = Vector3(0, -ang, 0)
+
+
+func _build_cards() -> void:
+	_hand_root = Node3D.new()
+	_hand_root.position = Vector3(0, 0, 1.28)
+	# Toda la mano se inclina hacia la cámara como un solo plano
+	_hand_pivot = Node3D.new()
+	_hand_pivot.rotation_degrees.x = 9.0
+	_hand_pivot.position.y = 0.05
+	_hand_root.add_child(_hand_pivot)
+	add_child(_hand_root)
+	for t: String in DEMO_HAND:
+		var c := Card3D.new().setup(t, true)
+		c.scale = Vector3.ONE * 0.86
+		c.tapped.connect(_on_card_tapped)
+		_hand_pivot.add_child(c)
 		_hand.append(c)
+	_layout_hand()
 	for i in 14:
 		_add_card("cat_a", false, Vector3(-0.5, 0.01 + i * 0.007, -0.3), randf_range(-3.0, 3.0))
-	_add_card("attack_dead", true, Vector3(0.47, 0.012, -0.32), 14)
-	_add_card("skip", true, Vector3(0.52, 0.02, -0.28), -8)
+	_add_card("attack_dead", true, Vector3(0.44, 0.012, -0.34), 14)
+	_add_card("skip", true, Vector3(0.54, 0.024, -0.27), -8)
 
 
 func _build_ui() -> void:

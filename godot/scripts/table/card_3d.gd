@@ -8,7 +8,7 @@ const MODEL := preload("res://assets/models/card.glb")
 const SIZE := Vector3(0.63, 0.006, 0.882)
 const CARD_SHADER := preload("res://shaders/card.gdshader")
 ## Cartas especiales con más brillo tornasol
-const FOIL := {"zombie": 0.3, "exploding": 0.32, "nope": 0.16}
+const FOIL := {"zombie": 0.16, "exploding": 0.18, "nope": 0.1}
 
 var type: String = ""
 var face_up: bool = true
