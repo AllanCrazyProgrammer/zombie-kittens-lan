@@ -1,0 +1,9 @@
+<resources>
+    <color name="night">#170C33</color>
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/night</item>
+        <item name="android:statusBarColor">@color/night</item>
+        <item name="android:navigationBarColor">@color/night</item>
+        <item name="android:colorAccent">#B6F23A</item>
+    </style>
+</resources>
