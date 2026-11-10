@@ -517,11 +517,27 @@ func _ui_test(dir: String) -> void:
 		await _wait(0.8)
 		await _save_shot(dir + "/t4_robo.png")
 		report.append("robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, (_session as LocalMatch).game.draw.size(), hand_before, (_session as LocalMatch).game.P("p0").hand.size()])
+	# Historial
+	var hist := _find_button(self, "HISTORIAL")
+	report.append("botón HISTORIAL visible: %s" % str(hist != null))
+	if hist and (_session as LocalMatch).game.over == null:
+		await _tap_control(hist)
+		await _wait(0.5)
+		await _save_shot(dir + "/t5_historial.png")
+		report.append("historial: %s | %d entradas" % [_game.debug_state(), _game.debug_history_size()])
+		var close := _find_button(self, "Cerrar")
+		if close:
+			await _tap_control(close)
+			await _wait(0.3)
 	# Menú → salir
 	var menu := _find_button(self, "MENÚ")
 	if menu and (_session as LocalMatch).game.over == null:
 		await _tap_control(menu)
 		await _wait(0.4)
+		var leave := _find_button(self, "Salir de la partida")
+		if leave:
+			await _tap_control(leave)
+			await _wait(0.4)
 		var exit := _find_button(self, "Salir al menú")
 		report.append("ventana de salida: %s" % str(exit != null))
 		if exit:
