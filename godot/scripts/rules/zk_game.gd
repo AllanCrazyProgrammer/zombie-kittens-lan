@@ -840,6 +840,23 @@ func _auto_prompt(now: int) -> void:
 			_do_dig(P(pr.player), true, now)
 
 
+## Huella barata del estado: si cambia, hay algo nuevo que mostrar a los jugadores.
+func signature() -> String:
+	var s := "%d|%d|%d|%d|%d|%d|%s" % [seq, cur, turns_left, draw.size(), discard.size(), stack.size(), "o" if over != null else ""]
+	var t: Variant = top()
+	if t != null:
+		s += "|%d/%d/%d" % [t.id, t.nopes, t.passed.size()]
+	if prompt != null:
+		s += "|" + prompt.type + str(prompt.get("revived")) + str(prompt.get("pendingPos") != null)
+		if prompt.has("waiting"):
+			s += str(prompt.waiting.size())
+		if prompt.has("watchers"):
+			s += str(prompt.watchers.size())
+	for p in players:
+		s += "1" if p.connected else "0"
+	return s
+
+
 # ---------------------------------------------------------------- vista por jugador (oculta la información secreta)
 
 func view(player_id: String, now: int) -> Dictionary:

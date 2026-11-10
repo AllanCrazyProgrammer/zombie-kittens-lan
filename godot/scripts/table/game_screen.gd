@@ -5,18 +5,15 @@ extends Node3D
 
 signal exit_requested
 signal rematch_requested
+signal lobby_requested
 
 const DECK_POS := Vector3(-0.5, 0, -0.3)
 const DISCARD_POS := Vector3(0.5, 0, -0.3)
 const HAND_STEP := 0.012
 const HAND_SCALE := 0.86
 const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
-const AVATARS := [
-	preload("res://assets/avatars/cat_0.png"), preload("res://assets/avatars/cat_1.png"), preload("res://assets/avatars/cat_2.png"),
-	preload("res://assets/avatars/cat_3.png"), preload("res://assets/avatars/cat_4.png"), preload("res://assets/avatars/cat_5.png"),
-]
 
-var session: LocalMatch
+var session: GameSession
 var world: TableWorld
 var _v: Dictionary = {}
 var _sel: Array[String] = []
@@ -54,7 +51,7 @@ var _fx_root: Control
 var _toasts: VBoxContainer
 
 
-func setup(p_session: LocalMatch, p_world: TableWorld) -> GameScreen:
+func setup(p_session: GameSession, p_world: TableWorld) -> GameScreen:
 	session = p_session
 	world = p_world
 	return self
@@ -86,6 +83,7 @@ func _ready() -> void:
 	add_child(_turn_light)
 	_build_hud()
 	session.updated.connect(_refresh)
+	session.error.connect(func(msg: String) -> void: _toast(msg, true))
 	_refresh()
 
 
@@ -275,19 +273,8 @@ func _sync_discard() -> void:
 			_discard_nodes.erase(id)
 
 
-func _avatar(id: Variant) -> Texture2D:
-	for i in _v.players.size():
-		if _v.players[i].id == id:
-			return AVATARS[i % AVATARS.size()]
-	return AVATARS[0]
-
-
-## El mismo avatar recortado al gato (sin el margen transparente), para las fichas de la interfaz.
-func _avatar_icon(id: Variant) -> Texture2D:
-	var at := AtlasTexture.new()
-	at.atlas = _avatar(id)
-	at.region = Rect2(100, 84, 312, 424)
-	return at
+func _avatar_index(id: Variant) -> int:
+	return int(_player(id).get("avatar", 0))
 
 
 ## Lugar de un jugador sobre la mesa (mi mano o el asiento del rival).
@@ -314,7 +301,7 @@ func _sync_seats() -> void:
 			root.rotation.y = -a + PI
 			add_child(root)
 			var av := Sprite3D.new()
-			av.texture = _avatar(p.id)
+			av.texture = UIKit.avatar(_avatar_index(p.id))
 			av.pixel_size = 0.0017
 			av.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 			av.shaded = false
@@ -768,11 +755,7 @@ func _update_hud() -> void:
 		var ch := UIKit.hbox(6)
 		chip.add_child(ch)
 		if n <= 4:
-			var pic := TextureRect.new()
-			pic.texture = _avatar_icon(p.id)
-			pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-			pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-			pic.custom_minimum_size = Vector2(84, 108)
+			var pic := UIKit.avatar_icon(_avatar_index(p.id))
 			pic.modulate = Color.WHITE if p.alive else Color(0.4, 0.4, 0.5)
 			ch.add_child(pic)
 		var cv := UIKit.vbox(0)
@@ -786,7 +769,7 @@ func _update_hud() -> void:
 		var info_l := UIKit.label(info, 32, UIKit.C.dim)
 		info_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		cv.add_child(info_l)
-		var state: String = "MUERTO" if not p.alive else (("juega ×%d" % v.turnsLeft) if is_cur and v.turnsLeft > 1 else ("su turno" if is_cur else LEVEL_NAMES.get(session.level_of(p.id), "")))
+		var state: String = "sin conexión" if (not p.connected and not p.bot) else "MUERTO" if not p.alive else (("juega ×%d" % v.turnsLeft) if is_cur and v.turnsLeft > 1 else ("su turno" if is_cur else LEVEL_NAMES.get(session.level_of(p.id), "")))
 		var state_l := UIKit.label(state, 30, UIKit.C.red if not p.alive else (UIKit.C.toxic if is_cur else UIKit.C.dim))
 		state_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		cv.add_child(state_l)
@@ -802,11 +785,7 @@ func _update_hud() -> void:
 	_clear(_me_bar)
 	var screen := get_viewport().get_visible_rect().size
 	if screen.y / maxf(1.0, screen.x) >= 2.0 and _sel.is_empty():
-		var pic := TextureRect.new()
-		pic.texture = _avatar_icon(v.you)
-		pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		pic.custom_minimum_size = Vector2(110, 150)
+		var pic := UIKit.avatar_icon(_avatar_index(v.you), Vector2(110, 150))
 		pic.modulate = Color.WHITE if me.alive else Color(0.4, 0.4, 0.5)
 		_me_bar.add_child(pic)
 		var who := UIKit.vbox(0)
@@ -997,8 +976,15 @@ func _build_modal() -> void:
 		var won: bool = v.over.winner == v.you
 		var box := _open_modal("¡GANASTE!" if won else "Ganó " + _pname(v.over.winner), UIKit.C.toxic if won else UIKit.C.gold)
 		_text(box, "Eres el último gatito con vida." if won else "Fue el último gatito con vida.")
-		_add_btn(box, "JUGAR OTRA VEZ", "primary", func() -> void: rematch_requested.emit(), 54)
-		_add_btn(box, "Volver al menú", "ghost", func() -> void: exit_requested.emit())
+		if not session.is_network():
+			_add_btn(box, "JUGAR OTRA VEZ", "primary", func() -> void: rematch_requested.emit(), 54)
+			_add_btn(box, "Volver al menú", "ghost", func() -> void: exit_requested.emit())
+		elif session.is_host():
+			_add_btn(box, "VOLVER A LA SALA", "primary", func() -> void: lobby_requested.emit(), 54)
+			_add_btn(box, "Cerrar la sala", "ghost", func() -> void: exit_requested.emit())
+		else:
+			_text(box, "Esperando a que el anfitrión abra la sala…", 30, UIKit.C.dim)
+			_add_btn(box, "Salir de la sala", "ghost", func() -> void: exit_requested.emit())
 		return
 	var pr: Variant = v.prompt
 	if pr != null and pr.mine:
@@ -1054,7 +1040,7 @@ func _build_modal() -> void:
 			_add_btn(box, "Entendido", "primary", _close_modal)
 		"exit":
 			var box := _open_modal("¿Salir de la partida?")
-			_text(box, "Se perderá la partida en curso.")
+			_text(box, "Se perderá la partida en curso." if not session.is_network() else ("Eres el anfitrión: la partida termina para todos." if session.is_host() else "Podrás volver a entrar mientras la partida siga."))
 			_add_btn(box, "Seguir jugando", "primary", _close_modal)
 			_add_btn(box, "Salir al menú", "danger", func() -> void: exit_requested.emit())
 
@@ -1205,6 +1191,11 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 
 
 # ---------------------------------------------------------------- avisos
+
+## Aviso breve desde fuera de la pantalla (p. ej. "Reconectando…").
+func notice(text: String, bad: bool = false) -> void:
+	_toast(text, bad)
+
 
 func _popup(text: String, color: Color) -> void:
 	var l := UIKit.label(text, 150, color, true)

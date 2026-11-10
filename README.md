@@ -28,7 +28,7 @@ Android (*Un jugador contra la IA*), y en las salas en red el anfitrión puede t
 
 La carpeta `godot/` es la reescritura del juego en Godot 4 con mesa 3D. Hoy contiene solo la base:
 escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a Android.
-Ya se puede jugar una partida completa de un jugador contra la IA (1 a 4 rivales, tres dificultades). Falta el multijugador en red, los menús de reglas y la guía de cartas, que siguen solo en la versión web/Android original.
+Ya se puede jugar contra la IA y en red local: un teléfono crea la sala y los demás la encuentran solos en la misma Wi-Fi (o escriben su dirección). Hay reconexión, y el anfitrión puede añadir rivales de IA. Faltan los menús de reglas y la guía de cartas, que siguen solo en la versión web/Android original.
 
 - Modelos 3D: `Blender --background --python tools/blender/build_models.py`
 - Sonidos y música (síntesis): `python3 tools/audio/gen_audio.py`
@@ -37,6 +37,7 @@ Ya se puede jugar una partida completa de un jugador contra la IA (1 a 4 rivales
 - Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
 - Partida de demostración (la IA juega por ti) con capturas: `godot --path godot -- --auto 2 normal --slow --shots carpeta 3 --quit-after 120`
+- Prueba de red con dos copias en la misma máquina: `godot --path godot -- --nettest host 2 --token A` y `godot --path godot -- --nettest discover --token B` (añade `--drop 5` para probar la reconexión)
 - Prueba de toques (menú, elegir carta, jugar, robar, salir): `godot --path godot -- --uitest carpeta`
 - Pruebas de reglas e IA: `godot --headless --path godot -s tests/run_tests.gd` (las partidas de referencia se regeneran con `node tools/godot/gen-traces.js`)
 

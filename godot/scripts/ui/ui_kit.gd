@@ -9,6 +9,10 @@ const C := {
 	"ink": Color("f4efff"), "dim": Color("b3a6dc"), "toxic": Color("b6f23a"), "toxic_dark": Color("4e7a10"),
 	"red": Color("ff4055"), "gold": Color("ffd23a"), "cream": Color("fbf5e6"), "dark": Color("150a22"),
 }
+const AVATARS := [
+	preload("res://assets/avatars/cat_0.png"), preload("res://assets/avatars/cat_1.png"), preload("res://assets/avatars/cat_2.png"),
+	preload("res://assets/avatars/cat_3.png"), preload("res://assets/avatars/cat_4.png"), preload("res://assets/avatars/cat_5.png"),
+]
 static var _bold: FontVariation
 static var _grabber: Texture2D
 
@@ -143,6 +147,39 @@ static func slider(max_value: int, value: int) -> HSlider:
 	s.add_theme_stylebox_override("grabber_area", box(C.red, C.red, 12, 0, Vector2.ZERO))
 	s.add_theme_stylebox_override("grabber_area_highlight", box(C.red, C.red, 12, 0, Vector2.ZERO))
 	return s
+
+
+static func avatar(index: int) -> Texture2D:
+	return AVATARS[posmod(index, AVATARS.size())]
+
+
+## Avatar recortado al gato (sin el margen transparente), para fichas y listas.
+static func avatar_icon(index: int, size: Vector2 = Vector2(84, 108)) -> TextureRect:
+	var at := AtlasTexture.new()
+	at.atlas = avatar(index)
+	at.region = Rect2(100, 84, 312, 424)
+	var pic := TextureRect.new()
+	pic.texture = at
+	pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	pic.custom_minimum_size = size
+	pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return pic
+
+
+static func line_edit(text: String, placeholder: String, size: int = 44) -> LineEdit:
+	var e := LineEdit.new()
+	e.text = text
+	e.placeholder_text = placeholder
+	e.add_theme_font_override("font", bold())
+	e.add_theme_font_size_override("font_size", size)
+	e.add_theme_color_override("font_color", C.ink)
+	e.add_theme_color_override("font_placeholder_color", C.dim)
+	e.add_theme_stylebox_override("normal", box(Color("150a30"), C.line, 22, 4, Vector2(22, 14)))
+	e.add_theme_stylebox_override("focus", box(Color("150a30"), C.toxic, 22, 4, Vector2(22, 14)))
+	e.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	e.custom_minimum_size = Vector2(0, size * 2.0)
+	return e
 
 
 static func card_image(type: String, height: int = 420) -> TextureRect:
