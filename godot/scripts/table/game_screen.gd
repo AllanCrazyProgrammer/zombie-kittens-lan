@@ -30,6 +30,9 @@ var _modal := {}           # ventana propia de la interfaz (elegir objetivo, ver
 var _ins: Array[int] = [0, 0]
 var _give_sel := ""
 var _log_last := ""
+## Historial de la partida: [{text, kind}] (kind: "turn" separador, "me" privado, "" normal). El más nuevo al final.
+var _history: Array[Dictionary] = []
+const HISTORY_MAX := 300
 var _time := 0.0
 var _timers: Array = []    # [barra, fin_ms, total_ms]
 var _modal_title := ""
@@ -486,6 +489,7 @@ func _process_events() -> void:
 		_seq = e.seq
 		if e.has("text") and not e.has("to"):
 			_log_last = e.text
+		_record(e)
 		match e.type:
 			"start":
 				Sfx.play("shuffle")
@@ -685,6 +689,10 @@ func _build_hud() -> void:
 	_turn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_turn_panel.add_child(_turn)
 	bar.add_child(_turn_panel)
+	var hist := UIKit.button("HISTORIAL", "normal", 34)
+	hist.size_flags_horizontal = Control.SIZE_SHRINK_END
+	hist.pressed.connect(_open_history)
+	bar.add_child(hist)
 	_opps = UIKit.hbox(12)
 	_opps.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	tv.add_child(_opps)
@@ -1122,6 +1130,8 @@ func _build_modal() -> void:
 				var p := int(_modal.positions[i])
 				_text(box, "Explosivo %s: %s" % [str(i + 1) if _modal.positions.size() > 1 else "", "arriba del todo" if p == 0 else "debajo de %d carta%s" % [p, "s" if p > 1 else ""]], 38, UIKit.C.gold)
 			_add_btn(box, "Entendido", "primary", _close_modal)
+		"history":
+			_build_history(_open_modal("Historial"))
 		"menu":
 			var box := _open_modal("Menú")
 			_add_btn(box, "Seguir jugando", "primary", _close_modal)
@@ -1242,6 +1252,74 @@ func _confirm_give() -> void:
 func _pick_give(cid: String) -> void:
 	_give_sel = cid
 	_update_hud()
+
+
+# ---------------------------------------------------------------- historial
+
+## Guarda en el historial lo que pasó, en palabras. Los eventos sin texto (robar, cambio de turno,
+## ver el futuro) se redactan aquí para que el historial cuente toda la partida.
+func _record(e: Dictionary) -> void:
+	var text := ""
+	var kind := ""
+	match e.type:
+		"turn":
+			text = "Tu turno" if e.player == _v.you else "Turno de " + _pname(e.player)
+			kind = "turn"
+		"draw":
+			text = "Robas una carta." if e.player == _v.you else "%s roba una carta." % _pname(e.player)
+		"future":
+			var names: Array = e.cards.map(func(t: String) -> String: return CardDB.display_name(t))
+			text = "Viste el futuro: " + ", ".join(PackedStringArray(names)) + "."
+			kind = "me"
+		_:
+			text = e.get("text", "")
+			if e.has("to"):
+				kind = "me"
+	if text == "":
+		return
+	_history.append({"text": text, "kind": kind})
+	if _history.size() > HISTORY_MAX:
+		_history.pop_front()
+
+
+func _open_history() -> void:
+	_modal = {"type": "history"}
+	_update_hud()
+
+
+func _build_history(box: VBoxContainer) -> void:
+	_text(box, "Los turnos más recientes arriba. En verde, lo que solo tú viste.", 28, UIKit.C.dim)
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.custom_minimum_size = Vector2(0, get_viewport().get_visible_rect().size.y * 0.55)
+	box.add_child(scroll)
+	var list := UIKit.vbox(8)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
+	if _history.is_empty():
+		_text(list, "Aún no pasa nada.", 32, UIKit.C.dim)
+	# Se agrupa por turno: los turnos más recientes arriba y, dentro de cada turno, en el orden en que pasó
+	var blocks: Array = [{"title": "Inicio", "items": []}]
+	for h: Dictionary in _history:
+		if h.kind == "turn":
+			blocks.append({"title": h.text, "items": []})
+		else:
+			blocks[-1].items.append(h)
+	for bi in range(blocks.size() - 1, -1, -1):
+		var b: Dictionary = blocks[bi]
+		if b.items.is_empty() and bi != blocks.size() - 1:
+			continue
+		var t := UIKit.label("— %s —" % b.title, 36, UIKit.C.gold, true)
+		t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		list.add_child(t)
+		for h: Dictionary in b.items:
+			list.add_child(UIKit.label(h.text, 30, Color("c8ff8a") if h.kind == "me" else UIKit.C.ink, false, true))
+	_add_btn(box, "Cerrar", "primary", _close_modal)
+
+
+## Para la prueba automática.
+func debug_history_size() -> int:
+	return _history.size()
 
 
 func _close_modal() -> void:

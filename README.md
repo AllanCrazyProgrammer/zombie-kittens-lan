@@ -3,7 +3,16 @@
 Versión digital hecha por fans (uso personal) del juego de cartas **Zombie Kittens**, para jugar
 de 2 a 5 personas en la misma red Wi-Fi, cada quien en su teléfono. Arte original dibujado por código.
 
-## Instalar en Android
+## Descargar
+
+La forma más fácil: descarga el APK de la última versión en
+[Releases](https://github.com/AllanCrazyProgrammer/zombie-kittens-lan/releases/latest) e instálalo en tu Android
+(tendrás que permitir "instalar apps de origen desconocido").
+
+- **Zombie Kittens 2.x** (Godot, mesa 3D): la versión actual.
+- **Zombie Kittens LAN 1.x** (web/Android original): sigue disponible en la release v1.1.0.
+
+## Instalar la versión original (1.x) en Android
 
 1. Copia `ZombieKittensLAN.apk` al teléfono (o `adb install -r ZombieKittensLAN.apk` con el cable USB).
 2. Ábrelo y permite "instalar apps de origen desconocido" si lo pide.
@@ -34,6 +43,7 @@ Ya se puede jugar contra la IA y en red local: un teléfono crea la sala y los d
 - Sonidos y música (síntesis): `python3 tools/audio/gen_audio.py`
 - Avatares de los jugadores: `Blender --background --python tools/blender/render_card_art.py -- --avatars`
 - Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
+- Ícono de la app: `node tools/godot/build-icon.js`
 - Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
 - Partida de demostración (la IA juega por ti) con capturas: `godot --path godot -- --auto 2 normal --slow --shots carpeta 3 --quit-after 120`
