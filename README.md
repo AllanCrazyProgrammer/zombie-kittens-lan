@@ -43,6 +43,7 @@ Ya se puede jugar contra la IA y en red local: un teléfono crea la sala y los d
 - Sonidos y música (síntesis): `python3 tools/audio/gen_audio.py`
 - Avatares de los jugadores: `Blender --background --python tools/blender/render_card_art.py -- --avatars`
 - Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
+- Ícono de la app: `node tools/godot/build-icon.js`
 - Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
 - Partida de demostración (la IA juega por ti) con capturas: `godot --path godot -- --auto 2 normal --slow --shots carpeta 3 --quit-after 120`
