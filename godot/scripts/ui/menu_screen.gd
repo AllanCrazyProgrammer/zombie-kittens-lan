@@ -84,6 +84,18 @@ func _build() -> void:
 	var il := UIKit.label(info, 28, UIKit.C.dim, false, true)
 	il.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_box.add_child(il)
+	var audio := UIKit.hbox(12)
+	_box.add_child(audio)
+	var sb := UIKit.button("Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", 34)
+	sb.pressed.connect(func() -> void:
+		Sfx.set_sfx(not Sfx.sfx_on)
+		_build())
+	audio.add_child(sb)
+	var mb := UIKit.button("Música: sí" if Sfx.music_on else "Música: no", "normal", 34)
+	mb.pressed.connect(func() -> void:
+		Sfx.set_music(not Sfx.music_on)
+		_build())
+	audio.add_child(mb)
 	var play := UIKit.button("¡JUGAR!", "primary", 68)
 	play.pressed.connect(func() -> void: start_requested.emit(_opts.duplicate()))
 	_box.add_child(play)

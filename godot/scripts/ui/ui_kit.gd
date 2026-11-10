@@ -80,6 +80,7 @@ static func button(text: String, kind: String = "normal", size: int = 46) -> But
 		b.add_theme_color_override(c, fg)
 	b.add_theme_color_override("font_disabled_color", Color("8a86a0"))
 	b.custom_minimum_size = Vector2(0, size * 2.1)
+	b.pressed.connect(func() -> void: Sfx.play("tap", -6.0))
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return b
 

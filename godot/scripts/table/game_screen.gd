@@ -11,6 +11,10 @@ const DISCARD_POS := Vector3(0.5, 0, -0.3)
 const HAND_STEP := 0.012
 const HAND_SCALE := 0.86
 const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
+const AVATARS := [
+	preload("res://assets/avatars/cat_0.png"), preload("res://assets/avatars/cat_1.png"), preload("res://assets/avatars/cat_2.png"),
+	preload("res://assets/avatars/cat_3.png"), preload("res://assets/avatars/cat_4.png"), preload("res://assets/avatars/cat_5.png"),
+]
 
 var session: LocalMatch
 var world: TableWorld
@@ -30,6 +34,12 @@ var _log_last := ""
 var _time := 0.0
 var _timers: Array = []    # [barra, fin_ms, total_ms]
 var _modal_title := ""
+var _seats := {}           # id del rival -> {pos, root, avatar, cards}
+var _turn_light: OmniLight3D
+var _ek: Card3D            # el Gatito Explosivo recién sacado, mientras se decide su destino
+var _fxq: Array[Callable] = []
+var _fx_running := false
+var _me_bar: HBoxContainer
 
 var _turn: Label
 var _turn_panel: PanelContainer
@@ -68,6 +78,12 @@ func _ready() -> void:
 	_deck_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	_deck_label.no_depth_test = true
 	add_child(_deck_label)
+	_turn_light = OmniLight3D.new()
+	_turn_light.light_color = UIKit.C.toxic
+	_turn_light.light_energy = 2.4
+	_turn_light.omni_range = 1.6
+	_turn_light.visible = false
+	add_child(_turn_light)
 	_build_hud()
 	session.updated.connect(_refresh)
 	_refresh()
@@ -76,6 +92,10 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_time += delta
 	_hand_root.position.y = sin(_time * 1.4) * 0.006
+	for id: String in _seats:
+		var av: Sprite3D = _seats[id].avatar
+		var is_cur: bool = not _v.is_empty() and _v.cur == id
+		av.scale = Vector3.ONE * (1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0))
 	var now := session.now()
 	for t: Array in _timers:
 		if is_instance_valid(t[0]):
@@ -116,6 +136,7 @@ func _refresh() -> void:
 		_give_sel = ""
 	if _modal.get("type", "") in ["target", "named"] and _sel.is_empty():
 		_modal = {}
+	_sync_seats()
 	_process_events()
 	_sync_deck()
 	_sync_hand()
@@ -213,7 +234,10 @@ func _sync_hand() -> void:
 			tw.chain().tween_callback(n.queue_free)
 	# Abanico: pivote común bajo la mesa, cada carta un escalón más alta que la anterior
 	var count := hand.size()
-	var spread := minf(9.0, 33.0 / maxf(1.0, count - 1.0))
+	# Con muchas cartas el abanico se abre un poco más y las cartas se encogen para que se puedan tocar
+	var total := clampf(33.0 + (count - 7) * 2.0, 33.0, 40.0)
+	var spread := minf(9.0, total / maxf(1.0, count - 1.0))
+	var hand_scale := clampf(HAND_SCALE - (count - 7) * 0.025, 0.72, HAND_SCALE)
 	var radius := 2.3
 	for i in count:
 		var n: Card3D = _hand[hand[i].id]
@@ -223,7 +247,7 @@ func _sync_hand() -> void:
 		if selected:
 			pos += Vector3(0, 0.1, -0.2)
 		n.set_glow(0.16 if selected else 0.0)
-		n.fly_to(pos, Vector3(0, -ang, 0), 0.3, HAND_SCALE)
+		n.fly_to(pos, Vector3(0, -ang, 0), 0.3, hand_scale * (1.08 if selected else 1.0))
 
 
 func _sync_discard() -> void:
@@ -239,7 +263,7 @@ func _sync_discard() -> void:
 			n = Card3D.new().setup(d.type, true)
 			n.card_id = d.id
 			add_child(n)
-			n.position = Vector3(randf_range(-0.7, 0.7), 1.3, -2.8)
+			n.position = _pos_of(d.by) + Vector3(0, 0.25, 0)
 			n.scale = Vector3.ONE * 0.5
 			_discard_nodes[d.id] = n
 		if not n.has_meta("yaw"):
@@ -251,6 +275,202 @@ func _sync_discard() -> void:
 			_discard_nodes.erase(id)
 
 
+func _avatar(id: Variant) -> Texture2D:
+	for i in _v.players.size():
+		if _v.players[i].id == id:
+			return AVATARS[i % AVATARS.size()]
+	return AVATARS[0]
+
+
+## El mismo avatar recortado al gato (sin el margen transparente), para las fichas de la interfaz.
+func _avatar_icon(id: Variant) -> Texture2D:
+	var at := AtlasTexture.new()
+	at.atlas = _avatar(id)
+	at.region = Rect2(100, 84, 312, 424)
+	return at
+
+
+## Lugar de un jugador sobre la mesa (mi mano o el asiento del rival).
+func _pos_of(id: Variant) -> Vector3:
+	if _seats.has(id):
+		return _seats[id].pos
+	return Vector3(0, 0.15, 1.35)
+
+
+## Rivales sentados al otro lado de la mesa: avatar, abanico de cartas boca abajo y luz de turno.
+func _sync_seats() -> void:
+	var n: int = _v.players.size()
+	var my_idx := 0
+	for i in n:
+		if _v.players[i].id == _v.you:
+			my_idx = i
+	for k in range(1, n):
+		var p: Dictionary = _v.players[(my_idx + k) % n]
+		if not _seats.has(p.id):
+			var a := 0.0 if n == 2 else deg_to_rad(lerpf(-36.0, 36.0, float(k - 1) / float(n - 2)))
+			var dir := Vector3(sin(a), 0, -cos(a))
+			var root := Node3D.new()
+			root.position = dir * 1.42 + Vector3(0, 0.02, 0.05)
+			root.rotation.y = -a + PI
+			add_child(root)
+			var av := Sprite3D.new()
+			av.texture = _avatar(p.id)
+			av.pixel_size = 0.0017
+			av.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			av.shaded = false
+			av.position = dir * 2.02 + Vector3(0, 0.36, 0.05)
+			add_child(av)
+			_seats[p.id] = {"pos": root.position, "root": root, "avatar": av, "cards": []}
+		var seat: Dictionary = _seats[p.id]
+		seat.avatar.modulate = Color.WHITE if p.alive else Color(0.5, 0.5, 0.62)
+		seat.avatar.rotation.z = 0.0 if p.alive else 0.5
+		var cards: Array = seat.cards
+		var want := mini(int(p.count), 7)
+		while cards.size() > want:
+			cards.pop_back().queue_free()
+		while cards.size() < want:
+			var c := Card3D.new().setup("back", false)
+			c.scale = Vector3.ONE * 0.4
+			seat.root.add_child(c)
+			cards.append(c)
+		for i in cards.size():
+			var off := float(i) - (cards.size() - 1) / 2.0
+			cards[i].position = Vector3(off * 0.1, 0.006 * i, absf(off) * 0.012)
+			cards[i].rotation.y = -off * 0.09
+	_turn_light.visible = _seats.has(_v.cur) and _v.over == null
+	if _turn_light.visible:
+		_turn_light.position = _seats[_v.cur].pos + Vector3(0, 0.45, 0)
+
+
+## Carta "fantasma" que vuela de un sitio a otro (robos, regalos, robar del mazo de un rival).
+func _ghost(from: Vector3, to: Vector3) -> void:
+	var c := Card3D.new().setup("back", false)
+	add_child(c)
+	c.position = from
+	c.scale = Vector3.ONE * 0.45
+	var tw := c.fly_to(to, Vector3(0, randf_range(-0.4, 0.4), 0), 0.4, 0.42)
+	tw.chain().tween_callback(c.queue_free)
+
+
+# ---------------------------------------------------------------- efectos en secuencia
+
+## Encola un efecto que debe verse completo antes del siguiente (p. ej. revelar el explosivo y luego explotar).
+func _enqueue(step: Callable) -> void:
+	_fxq.append(step)
+	if not _fx_running:
+		_run_fx()
+
+
+func _run_fx() -> void:
+	_fx_running = true
+	while not _fxq.is_empty():
+		var step: Callable = _fxq.pop_front()
+		await step.call()
+	_fx_running = false
+	_update_hud()
+
+
+## El Gatito Explosivo sale del mazo, se voltea y queda temblando frente a la cámara.
+func _fx_reveal() -> void:
+	if _ek:
+		_ek.queue_free()
+	_ek = Card3D.new().setup("exploding", false)
+	add_child(_ek)
+	_ek.position = _deck_top()
+	_ek.scale = Vector3.ONE * HAND_SCALE
+	Sfx.play("fuse")
+	world.shake(0.3)
+	_ek.fly_to(Vector3(0, 0.95, 0.3), Vector3(deg_to_rad(54.0), 0, 0), 0.45, 1.3)
+	_ek.flip()
+	await get_tree().create_timer(0.95).timeout
+
+
+func _fx_die(player_id: String, mine: bool) -> void:
+	var at := _pos_of(player_id) + Vector3(0, 0.25, 0)
+	if _ek:
+		at = _ek.global_position
+		_ek.queue_free()
+		_ek = null
+	Vfx.explosion(self, at)
+	Vfx.shockwave(self, at)
+	Sfx.play("explosion", 2.0, 0.0)
+	world.flash(Color("ffd9a0"), 0.8)
+	world.shake(1.0)
+	Input.vibrate_handheld(350)
+	_popup("¡EXPLOTASTE!" if mine else "¡BOOM!", UIKit.C.red)
+	# Un instante de cámara lenta para sentir el golpe
+	Engine.time_scale = 0.35
+	await get_tree().create_timer(0.16, true, false, true).timeout
+	Engine.time_scale = 1.0
+	await get_tree().create_timer(0.55).timeout
+
+
+func _fx_over(won: bool) -> void:
+	Sfx.play("win" if won else "lose", 0.0, 0.0)
+	if won:
+		_confetti()
+
+
+func _exit_tree() -> void:
+	Engine.time_scale = 1.0
+
+
+func _slashes() -> void:
+	var size := get_viewport().get_visible_rect().size
+	for i in 3:
+		var r := ColorRect.new()
+		r.color = Color(1, 1, 1, 0.92)
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.size = Vector2(size.x * 1.7, 16)
+		r.position = Vector2(-size.x * 0.35, size.y * (0.34 + 0.09 * i))
+		r.rotation = -0.38
+		r.scale = Vector2(0.0, 1.0)
+		_fx_root.add_child(r)
+		var t := r.create_tween()
+		t.tween_interval(0.05 * i)
+		t.tween_property(r, "scale:x", 1.0, 0.1)
+		t.tween_property(r, "modulate:a", 0.0, 0.28)
+		t.tween_callback(r.queue_free)
+
+
+func _jiggle_deck() -> void:
+	for c in _deck_cards:
+		var home := c.position
+		var t := c.create_tween()
+		for _k in 3:
+			t.tween_property(c, "position", home + Vector3(randf_range(-0.12, 0.12), 0, randf_range(-0.08, 0.08)), 0.07)
+		t.tween_property(c, "position", home, 0.08)
+
+
+func _confetti() -> void:
+	var size := get_viewport().get_visible_rect().size
+	var p := CPUParticles2D.new()
+	p.position = Vector2(size.x / 2.0, -20)
+	p.amount = 140
+	p.lifetime = 3.2
+	p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	p.emission_rect_extents = Vector2(size.x / 2.0, 10)
+	p.direction = Vector2(0, 1)
+	p.spread = 30.0
+	p.gravity = Vector2(0, 520)
+	p.initial_velocity_min = 120.0
+	p.initial_velocity_max = 380.0
+	p.angular_velocity_min = -360.0
+	p.angular_velocity_max = 360.0
+	p.scale_amount_min = 10.0
+	p.scale_amount_max = 18.0
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.33, 0.66, 1.0])
+	g.colors = PackedColorArray([UIKit.C.toxic, UIKit.C.gold, Color("ff7fb0"), Color("49e0e6")])
+	p.color_initial_ramp = g
+	_fx_root.add_child(p)
+	var t := p.create_tween()
+	t.tween_interval(4.5)
+	t.tween_callback(func() -> void: p.emitting = false)
+	t.tween_interval(3.5)
+	t.tween_callback(p.queue_free)
+
+
 func _process_events() -> void:
 	var me: String = _v.you
 	for e: Dictionary in _v.events:
@@ -260,31 +480,64 @@ func _process_events() -> void:
 		if e.has("text") and not e.has("to"):
 			_log_last = e.text
 		match e.type:
+			"start":
+				Sfx.play("shuffle")
+			"play":
+				Sfx.play("card")
+			"draw":
+				Sfx.play("draw", -3.0)
+				if e.player != me:
+					_ghost(_deck_top(), _pos_of(e.player))
 			"turn":
 				if e.player == me and _v.over == null:
 					_popup("¡TU TURNO!", UIKit.C.toxic)
+					Sfx.play("turn")
 					Input.vibrate_handheld(40)
 			"nope":
+				Sfx.play("yup" if e.yup else "nope")
 				_popup("¡SIP!" if e.yup else "¡NOP!", UIKit.C.toxic if e.yup else UIKit.C.red)
+				world.flash(UIKit.C.toxic if e.yup else UIKit.C.red, 0.22, 0.3)
 			"attack":
+				Sfx.play("attack")
+				_slashes()
+				world.shake(0.4)
 				if e.target == me:
 					_popup("¡TE ATACAN! ×%d" % int(e.n), UIKit.C.red)
-					world.shake(0.5)
+					Sfx.play("alarm")
 					Input.vibrate_handheld(150)
+			"shuffle":
+				Sfx.play("shuffle")
+				_jiggle_deck()
+			"steal":
+				Sfx.play("steal")
+				_ghost(_pos_of(e.target), _pos_of(e.player))
+				if e.target == me and e.has("card"):
+					_toast(e.text, true)
+			"gave":
+				Sfx.play("steal", -4.0)
+				_ghost(_pos_of(e.player), _pos_of(e.target))
 			"boom":
-				world.shake(0.35)
+				_enqueue(_fx_reveal)
 			"died":
-				Vfx.explosion(self, DECK_POS + Vector3(0.5, 0.2, 0.3))
-				world.flash(Color("ffd9a0"), 0.75)
-				world.shake(1.0)
-				Input.vibrate_handheld(300)
-				_popup("¡EXPLOTASTE!" if e.player == me else "¡BOOM!", UIKit.C.red)
+				_enqueue(_fx_die.bind(e.player, e.player == me))
 			"zombie":
-				Vfx.zombie_rise(self, DISCARD_POS + Vector3(0, 0.15, 0))
-				world.flash(UIKit.C.toxic, 0.3)
+				Sfx.play("zombie")
+				Vfx.zombie_rise(self, _ek.global_position if _ek else DISCARD_POS + Vector3(0, 0.15, 0))
+				world.flash(UIKit.C.toxic, 0.14)
 				world.shake(0.3)
 				_popup("¡ZOMBI!", UIKit.C.toxic)
+			"inserted":
+				if _ek:
+					# El explosivo vuelve boca abajo al mazo
+					var c := _ek
+					_ek = null
+					c.flip()
+					var tw := c.fly_to(_deck_top(), Vector3.ZERO, 0.45, HAND_SCALE)
+					tw.chain().tween_callback(c.queue_free)
+					Sfx.play("card")
 			"revived":
+				Sfx.play("revive")
+				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
 				if e.target == me:
 					_popup("¡REVIVISTE!", UIKit.C.toxic)
 			"future":
@@ -293,9 +546,8 @@ func _process_events() -> void:
 				_modal = {"type": "clair", "positions": e.positions, "len": e.len}
 			"got", "lost":
 				_toast(e.text, e.type == "lost")
-			"steal":
-				if e.target == me and e.has("card"):
-					_toast(e.text, true)
+			"over":
+				_enqueue(_fx_over.bind(e.winner == me))
 
 
 # ================================================================ entrada del jugador
@@ -447,6 +699,10 @@ func _build_hud() -> void:
 	var bv := UIKit.vbox(14)
 	bv.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bottom.add_child(bv)
+	_me_bar = UIKit.hbox(16)
+	_me_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_me_bar.alignment = BoxContainer.ALIGNMENT_CENTER
+	bv.add_child(_me_bar)
 	_info_slot = UIKit.vbox(0)
 	_info_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bv.add_child(_info_slot)
@@ -509,8 +765,19 @@ func _update_hud() -> void:
 		var chip := UIKit.panel(Color("241a38") if not p.alive else UIKit.C.panel, UIKit.C.toxic if is_cur else UIKit.C.line, Vector2(10, 10))
 		chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		var ch := UIKit.hbox(6)
+		chip.add_child(ch)
+		if n <= 4:
+			var pic := TextureRect.new()
+			pic.texture = _avatar_icon(p.id)
+			pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+			pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+			pic.custom_minimum_size = Vector2(84, 108)
+			pic.modulate = Color.WHITE if p.alive else Color(0.4, 0.4, 0.5)
+			ch.add_child(pic)
 		var cv := UIKit.vbox(0)
-		chip.add_child(cv)
+		cv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ch.add_child(cv)
 		var name_l := UIKit.label(p.name, 44, UIKit.C.dim if not p.alive else UIKit.C.ink, true)
 		name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		name_l.clip_text = true
@@ -530,6 +797,23 @@ func _update_hud() -> void:
 		alive += 1 if p.alive else 0
 	var eks := alive - 1
 	_risk.text = "Explosivos: %d en %d cartas  ·  riesgo %d%%" % [eks, v.draw, int(round(100.0 * eks / maxi(1, v.draw)))]
+
+	# Barra del jugador: solo donde sobra espacio bajo la mesa
+	_clear(_me_bar)
+	var screen := get_viewport().get_visible_rect().size
+	if screen.y / maxf(1.0, screen.x) >= 2.0 and _sel.is_empty():
+		var pic := TextureRect.new()
+		pic.texture = _avatar_icon(v.you)
+		pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		pic.custom_minimum_size = Vector2(110, 150)
+		pic.modulate = Color.WHITE if me.alive else Color(0.4, 0.4, 0.5)
+		_me_bar.add_child(pic)
+		var who := UIKit.vbox(0)
+		who.alignment = BoxContainer.ALIGNMENT_CENTER
+		who.add_child(UIKit.label(me.name, 46, UIKit.C.ink, true))
+		who.add_child(UIKit.label(("%d cartas en la mano" % me.count) if me.alive else "MUERTO · %d cartas" % me.count, 30, UIKit.C.dim if me.alive else UIKit.C.red))
+		_me_bar.add_child(who)
 
 	# Zona inferior: estado + botones
 	_clear(_buttons)
@@ -707,6 +991,8 @@ func _build_modal() -> void:
 	_clear(_modal_root)
 	_modal_title = ""
 	var v := _v
+	if _fx_running and (v.over != null or (v.prompt != null and v.prompt.mine and v.prompt.type == "explode")):
+		return      # primero se ve la animación; _run_fx vuelve a llamar al terminar
 	if v.over != null:
 		var won: bool = v.over.winner == v.you
 		var box := _open_modal("¡GANASTE!" if won else "Ganó " + _pname(v.over.winner), UIKit.C.toxic if won else UIKit.C.gold)

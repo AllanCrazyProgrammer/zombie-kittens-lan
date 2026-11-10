@@ -192,7 +192,7 @@ func _table() -> void:
 	add_child(em)
 
 	# Faroles sobre la mesa, con luz parpadeante
-	for p: Vector3 in [Vector3(-1.5, 0, -1.0), Vector3(1.5, 0, -1.0)]:
+	for p: Vector3 in [Vector3(-1.82, 0, 0.25), Vector3(1.82, 0, 0.25)]:
 		var l: Node3D = LANTERN.instantiate()
 		l.position = p
 		l.scale = Vector3.ONE * 1.5

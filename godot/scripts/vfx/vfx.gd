@@ -149,9 +149,34 @@ static func burst(parent: Node3D, at: Vector3, fire: Array, sparks: Color, power
 	tw.tween_callback(root.queue_free)
 
 
+## Onda expansiva: un anillo que crece a ras de la mesa y se desvanece.
+static func shockwave(parent: Node3D, at: Vector3, color: Color = Color(1.0, 0.72, 0.3)) -> void:
+	var ring := MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.88
+	torus.outer_radius = 1.0
+	torus.rings = 48
+	torus.ring_segments = 6
+	ring.mesh = torus
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.albedo_color = color
+	ring.material_override = m
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	ring.position = Vector3(at.x, 0.03, at.z)
+	ring.scale = Vector3(0.15, 0.15, 0.15)
+	parent.add_child(ring)
+	var t := ring.create_tween().set_parallel(true).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	t.tween_property(ring, "scale", Vector3(4.5, 0.4, 4.5), 0.6)
+	t.tween_property(m, "albedo_color:a", 0.0, 0.6)
+	t.chain().tween_callback(ring.queue_free)
+
+
 static func explosion(parent: Node3D, at: Vector3) -> void:
 	burst(parent, at, [Color(1, 1, 0.8, 0.5), Color(1, 0.75, 0.15, 0.45), Color(1, 0.3, 0.05, 0.35), Color(0.4, 0.05, 0.0, 0.0)], Color(1, 0.8, 0.3, 1), 1.3)
 
 
 static func zombie_rise(parent: Node3D, at: Vector3) -> void:
-	burst(parent, at, [Color(0.9, 1, 0.6, 0.5), Color(0.6, 1, 0.2, 0.45), Color(0.2, 0.7, 0.1, 0.35), Color(0.0, 0.2, 0.0, 0.0)], Color(0.75, 1, 0.3, 1), 0.9)
+	burst(parent, at, [Color(0.9, 1, 0.6, 0.5), Color(0.6, 1, 0.2, 0.45), Color(0.2, 0.7, 0.1, 0.35), Color(0.0, 0.2, 0.0, 0.0)], Color(0.75, 1, 0.3, 1), 0.55)

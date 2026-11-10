@@ -31,6 +31,8 @@ escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a
 Ya se puede jugar una partida completa de un jugador contra la IA (1 a 4 rivales, tres dificultades). Falta el multijugador en red, los menús de reglas y la guía de cartas, que siguen solo en la versión web/Android original.
 
 - Modelos 3D: `Blender --background --python tools/blender/build_models.py`
+- Sonidos y música (síntesis): `python3 tools/audio/gen_audio.py`
+- Avatares de los jugadores: `Blender --background --python tools/blender/render_card_art.py -- --avatars`
 - Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
 - Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`

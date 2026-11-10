@@ -283,7 +283,7 @@ def stars(n=40, seed=3, color="#ffffff"):
 
 
 # ---------------------------------------------------------------- escena base
-def stage(sky_top, sky_bottom, ground, key="#fff2dc", rim="#b6f23a", fill="#8fa0ff", hills=None, key_power=300, rim_power=420):
+def stage(sky_top, sky_bottom, ground, key="#fff2dc", rim="#b6f23a", fill="#8fa0ff", hills=None, key_power=300, rim_power=420, bare=False):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
@@ -317,10 +317,11 @@ def stage(sky_top, sky_bottom, ground, key="#fff2dc", rim="#b6f23a", fill="#8fa0
     nt.links.new(ramp.outputs[0], bg.inputs[0]); nt.links.new(bg.outputs[0], out.inputs[0])
     bg.inputs[1].default_value = 1.0
     # suelo y colinas que tapan el horizonte
-    bpy.ops.mesh.primitive_plane_add(size=80, location=(0, 0, 0))
-    bpy.context.object.data.materials.append(mat(ground, 0.9))
-    H = mat(hills or ground, 0.95)
-    sphere((-3.2, 7.5, -0.6), (4.5, 3, 2.0), H); sphere((3.6, 9, -0.8), (5.5, 3, 2.4), H); sphere((0, 12, -1.0), (9, 3, 2.6), H)
+    if not bare:
+        bpy.ops.mesh.primitive_plane_add(size=80, location=(0, 0, 0))
+        bpy.context.object.data.materials.append(mat(ground, 0.9))
+        H = mat(hills or ground, 0.95)
+        sphere((-3.2, 7.5, -0.6), (4.5, 3, 2.0), H); sphere((3.6, 9, -0.8), (5.5, 3, 2.4), H); sphere((0, 12, -1.0), (9, 3, 2.6), H)
     # luces
     def area(loc, power, color, size, target=(0, 0, 0.6)):
         l = bpy.data.lights.new("l", "AREA"); l.energy = power; l.color = hexc(color); l.size = size
@@ -637,6 +638,39 @@ SCENES = {
     "clone": s_clone, "grave_robber": s_grave_robber, "favor": s_favor, "dig_deeper": s_dig_deeper,
     "clairvoyance": s_clairvoyance, "cat_a": s_cat_a, "cat_b": s_cat_b, "cat_c": s_cat_c, "cat_d": s_cat_d,
 }
+# Avatares de los jugadores: busto de gato sobre fondo transparente (godot/assets/avatars/cat_N.png)
+AVATARS = [
+    dict(fur="#3a2a6a", ear="#ff86b3", eye="#ffe14a"),
+    dict(fur="#ff8a3d", belly="#ffd0a8", ear="#ffb0c8", eye="#7ee06a"),
+    dict(fur="#f1e6d2", belly="#ffffff", ear="#ff9fbf", eye="#49c2e6", whiskers="#8a7a7a"),
+    dict(fur="#8d8fa8", belly="#c8cade", ear="#ffd0e0", eye="#ffe14a"),
+    dict(fur="#2a2230", ear="#e11d2e", eye="#ff4d5e", mouth="fangs"),
+    dict(fur="#b06a3a", belly="#e0a878", ear="#ffc9a0", eye="#9be22d"),
+]
+
+
+def render_avatars():
+    out = os.path.join(ROOT, "godot", "assets", "avatars")
+    os.makedirs(out, exist_ok=True)
+    for i, look in enumerate(AVATARS):
+        stage("#000000", "#000000", "#000000", rim="#b6f23a", key_power=120, rim_power=160, bare=True)
+        sc = bpy.context.scene
+        sc.render.film_transparent = True
+        sc.render.resolution_x = sc.render.resolution_y = 512
+        sc.camera.data.lens = 60
+        sc.camera.data.dof.use_dof = False
+        sc.camera.location = (0, -2.9, 0.86)
+        sc.camera.rotation_euler = (Vector((0, 0, 0.74)) - Vector(sc.camera.location)).to_track_quat("-Z", "Y").to_euler()
+        cat(tail=False, **look)
+        sc.render.filepath = os.path.join(out, "cat_%d.png" % i)
+        bpy.ops.render.render(write_still=True)
+        print("AVATAR", i)
+
+
+if "--avatars" in argv:
+    render_avatars()
+    sys.exit(0)
+
 for name, fn in SCENES.items():
     if ONLY and name not in ONLY:
         continue
