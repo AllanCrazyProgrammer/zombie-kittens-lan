@@ -1,0 +1,173 @@
+{
+  "zombie": {
+    "name": "Gatito Zombi",
+    "kind": "Salvación",
+    "short": "En vez de explotar, esconde el Gatito Explosivo en el mazo… y revive a un jugador muerto.",
+    "long": "La carta más poderosa. Si sacas un Gatito Explosivo puedes (no es obligatorio) jugarla en lugar de morir. Si hay jugadores muertos DEBES elegir a uno para revivirlo. Luego colocas en secreto tu explosivo (y el del jugador revivido, cada uno donde quieras) dentro del mazo. Tu turno termina. Nadie puede anularla con Nop.",
+    "color": "#5fa329",
+    "now": false,
+    "cat": false
+  },
+  "nope": {
+    "name": "Nop",
+    "kind": "En cualquier momento",
+    "short": "Anula cualquier acción, excepto un Gatito Explosivo o un Gatito Zombi.",
+    "long": "Juégala en cualquier momento antes de que una acción comience, aunque no sea tu turno: la carta anulada se pierde. Puedes jugar un Nop sobre otro Nop para cancelarlo (¡un \"Sip\"!). También anula combos especiales. Los jugadores muertos también pueden jugarla.",
+    "color": "#d61f45",
+    "now": true,
+    "cat": false
+  },
+  "attack": {
+    "name": "Ataque (2x)",
+    "kind": "Acción",
+    "short": "Termina tu turno sin robar. El siguiente jugador juega 2 turnos seguidos.",
+    "long": "Termina tu turno sin robar y obliga al siguiente jugador a jugar 2 turnos seguidos. Los ataques se apilan: si la víctima juega otro Ataque, sus turnos pendientes pasan al siguiente jugador MÁS 2 turnos extra (2 → 4 → 6…).",
+    "color": "#e2571f",
+    "now": false,
+    "cat": false
+  },
+  "attack_dead": {
+    "name": "Ataque de los Muertos",
+    "kind": "Acción",
+    "short": "Termina tu turno sin robar. El siguiente juega 3 turnos por cada jugador muerto.",
+    "long": "Termina tu turno sin robar. El siguiente jugador debe jugar 3 turnos por cada jugador Muerto. No puedes jugarla si no hay muertos. Se apila con otros ataques igual que Ataque (2x).",
+    "color": "#2f6b2a",
+    "now": false,
+    "cat": false
+  },
+  "skip": {
+    "name": "Saltar",
+    "kind": "Acción",
+    "short": "Termina tu turno inmediatamente sin robar carta.",
+    "long": "Termina tu turno sin robar. Si te atacaron, solo cancela 1 de tus turnos pendientes: con 2 turnos necesitas 2 cartas de Saltar.",
+    "color": "#2a7fe0",
+    "now": false,
+    "cat": false
+  },
+  "super_skip": {
+    "name": "Súper Salto",
+    "kind": "Acción",
+    "short": "Termina tu turno sin robar. Si debías jugar varios turnos, termínalos TODOS.",
+    "long": "Termina tu turno sin robar carta. Si debías jugar varios turnos (porque te atacaron), los termina todos de una vez.",
+    "color": "#6a35e0",
+    "now": false,
+    "cat": false
+  },
+  "see_future": {
+    "name": "Ver el Futuro (3x)",
+    "kind": "Acción",
+    "short": "Mira en secreto las 3 cartas de arriba del mazo.",
+    "long": "Mira en privado las 3 cartas superiores del mazo y déjalas en el mismo orden. No se las muestres a nadie.",
+    "color": "#9a3ce0",
+    "now": false,
+    "cat": false
+  },
+  "dig_deeper": {
+    "name": "Cava Más Hondo",
+    "kind": "Acción",
+    "short": "Roba la carta de arriba y mírala. Si no la quieres, DEBES robar la siguiente.",
+    "long": "Roba la carta superior, mírala y decide si te la quedas. Si te la quedas, va a tu mano y tu turno termina. Si no, DEBES robar la siguiente carta sea cual sea, y la que rechazaste vuelve arriba del mazo. Si solo queda 1 carta en el mazo, no tiene efecto.",
+    "color": "#d68a1f",
+    "now": false,
+    "cat": false
+  },
+  "shuffle": {
+    "name": "Barajar",
+    "kind": "En cualquier momento",
+    "short": "Baraja el mazo. Puedes jugarla aunque no sea tu turno.",
+    "long": "Baraja el mazo. Tiene el símbolo ⚡: puedes jugarla en cualquier momento antes de que una acción comience, aunque no sea tu turno. Los jugadores muertos también pueden jugarla. Ideal justo después de que alguien use Ver el Futuro.",
+    "color": "#12a892",
+    "now": true,
+    "cat": false
+  },
+  "favor": {
+    "name": "Favor",
+    "kind": "Acción",
+    "short": "Obliga a otro jugador vivo a darte 1 carta de su mano. Él elige cuál.",
+    "long": "Obliga a cualquier otro jugador a darte 1 carta de su mano; ese jugador elige cuál. No puedes jugarla contra un jugador Muerto.",
+    "color": "#e0457e",
+    "now": false,
+    "cat": false
+  },
+  "clone": {
+    "name": "Clon",
+    "kind": "Acción",
+    "short": "Se convierte en la carta que está debajo en el descarte.",
+    "long": "Al jugarla copia la carta que queda debajo de ella en la pila de descarte y adopta sus reglas. No puede ir sobre otro Clon, ni jugarse fuera de tu turno o estando muerto. Si sacas un explosivo y la carta superior del descarte es un Gatito Zombi, ¡el Clon te salva! También completa parejas y tríos con cualquier carta.",
+    "color": "#1f8fd6",
+    "now": false,
+    "cat": false
+  },
+  "clairvoyance": {
+    "name": "Clarividencia",
+    "kind": "En cualquier momento",
+    "short": "Cuando otro jugador use un Gatito Zombi, mira dónde esconde los explosivos.",
+    "long": "Juégala cuando otro jugador haya jugado un Gatito Zombi: verás en qué posición del mazo coloca el/los Gatito(s) Explosivo(s). Tiene ⚡: puedes jugarla aunque no sea tu turno, incluso estando muerto.",
+    "color": "#2747c9",
+    "now": true,
+    "cat": false
+  },
+  "feed_dead": {
+    "name": "Alimenta a los Muertos",
+    "kind": "En cualquier momento",
+    "short": "Elige a un muerto: cada jugador vivo (menos tú) le da 1 carta.",
+    "long": "Elige a un jugador Muerto. Todos los jugadores Vivos (excepto tú) deben elegir 1 carta de su mano y dársela. Tiene ⚡: puede jugarse en cualquier momento, y los muertos también pueden jugarla… ¡incluso sobre sí mismos!",
+    "color": "#8a9a1f",
+    "now": true,
+    "cat": false
+  },
+  "grave_robber": {
+    "name": "Ladrón de Tumbas",
+    "kind": "Acción",
+    "short": "Cada muerto con cartas elige 1 de su mano y la baraja en el mazo.",
+    "long": "Todos los jugadores Muertos con cartas deben elegir 1 carta de su mano para barajarla dentro del mazo. No puedes jugarla si no hay muertos. Muy útil al final: más cartas en el mazo = menos probabilidad de explotar.",
+    "color": "#4a4a8a",
+    "now": false,
+    "cat": false
+  },
+  "cat_a": {
+    "name": "Gato Momia",
+    "kind": "Carta de gato",
+    "short": "No hace nada sola. Juega 2 iguales para robar una carta al azar a otro jugador.",
+    "long": "Las cartas de gato no tienen poder por sí solas. Si juntas 2 iguales puedes jugarlas como pareja para robar una carta al azar de cualquier jugador Vivo. Con 3 iguales, nombras la carta que quieres.",
+    "color": "#b8892e",
+    "now": false,
+    "cat": true
+  },
+  "cat_b": {
+    "name": "Vampigato",
+    "kind": "Carta de gato",
+    "short": "No hace nada sola. Juega 2 iguales para robar una carta al azar a otro jugador.",
+    "long": "Las cartas de gato no tienen poder por sí solas. Si juntas 2 iguales puedes jugarlas como pareja para robar una carta al azar de cualquier jugador Vivo. Con 3 iguales, nombras la carta que quieres.",
+    "color": "#8a1f4f",
+    "now": false,
+    "cat": true
+  },
+  "cat_c": {
+    "name": "Fantasmiau",
+    "kind": "Carta de gato",
+    "short": "No hace nada sola. Juega 2 iguales para robar una carta al azar a otro jugador.",
+    "long": "Las cartas de gato no tienen poder por sí solas. Si juntas 2 iguales puedes jugarlas como pareja para robar una carta al azar de cualquier jugador Vivo. Con 3 iguales, nombras la carta que quieres.",
+    "color": "#5463e0",
+    "now": false,
+    "cat": true
+  },
+  "cat_d": {
+    "name": "Esquelegato",
+    "kind": "Carta de gato",
+    "short": "No hace nada sola. Juega 2 iguales para robar una carta al azar a otro jugador.",
+    "long": "Las cartas de gato no tienen poder por sí solas. Si juntas 2 iguales puedes jugarlas como pareja para robar una carta al azar de cualquier jugador Vivo. Con 3 iguales, nombras la carta que quieres.",
+    "color": "#4a4a5e",
+    "now": false,
+    "cat": true
+  },
+  "exploding": {
+    "name": "Gatito Explosivo",
+    "kind": "Peligro",
+    "short": "Si lo sacas, ¡explotas! A menos que juegues un Gatito Zombi.",
+    "long": "Debes mostrarla de inmediato. Si no puedes (o no quieres) jugar un Gatito Zombi, quedas MUERTO: el explosivo se queda frente a ti y conservas el resto de tu mano. Hay un explosivo menos que jugadores.",
+    "color": "#e2331f",
+    "now": false,
+    "cat": false
+  }
+}

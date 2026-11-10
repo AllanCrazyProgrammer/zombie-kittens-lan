@@ -24,6 +24,16 @@ navegador (o súbelo a un hosting estático). Juegas tú contra 1 a 4 rivales de
 Fácil, Normal, Difícil o Mixta. Se regenera con `npm run build:web`. El mismo modo está en la app
 Android (*Un jugador contra la IA*), y en las salas en red el anfitrión puede tocar la dificultad de cada bot.
 
+## Versión Godot (en desarrollo)
+
+La carpeta `godot/` es la reescritura del juego en Godot 4 con mesa 3D. Hoy contiene solo la base:
+escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a Android.
+Las reglas, la IA y el multijugador siguen estando solo en la versión web/Android original.
+
+- Modelos 3D: `Blender --background --python tools/blender/build_models.py`
+- Texturas de cartas: `node tools/godot/build-card-textures.js`
+- Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
+
 ## Estructura
 
 | Carpeta | Qué hay |

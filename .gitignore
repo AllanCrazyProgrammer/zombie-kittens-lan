@@ -3,3 +3,6 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+
+dist/*.apk
+dist/*.idsig
