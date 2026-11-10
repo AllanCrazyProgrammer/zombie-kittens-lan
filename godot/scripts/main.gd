@@ -1,0 +1,517 @@
+extends Node3D
+## Raíz de la aplicación: escenario 3D permanente + menús o partida encima, y el flujo de red
+## (crear sala, unirse, reconectar).
+##
+## Argumentos de depuración (tras "--"):
+##   --auto [rivales] [nivel]   partida de un jugador en la que la IA también juega por el humano
+##   --seed N                   semilla del reparto
+##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
+##   --shots carpeta [cada_s]   guarda capturas periódicas
+##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir)
+##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
+##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
+##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
+##   --token X                  identidad de este jugador (para probar dos instancias en la misma máquina)
+##   --page nombre              abre el menú en esa página (home, solo, join, settings)
+##   --info rules|cards         abre la pantalla de reglas o la guía de cartas
+##   --tutorial                 arranca la partida guiada
+##   --quality high|medium|low  fuerza la calidad gráfica en esta ejecución
+##   --quit-after s             cierra tras s segundos
+
+const SETTINGS := "user://settings.cfg"
+const MAX_RECONNECTS := 6
+
+var _world: TableWorld
+var _menu: MenuScreen
+var _game: GameScreen
+var _session: GameSession
+var _room: RoomHost
+var _last_opts := {}
+var _token := ""
+var _join_ip := ""
+var _reconnects := 0
+var _shots_dir := ""
+var _shot_every := 3.0
+var _shot_t := 0.0
+var _shot_n := 0
+var _quit_after := -1.0
+var _elapsed := 0.0
+var _nettest := ""
+var _nettest_humans := 2
+var _nettest_started := false
+var _auto_t := 0.0
+var _drop_at := -1.0
+var _game_started_at := -1.0
+
+
+func _ready() -> void:
+	_world = TableWorld.new()
+	add_child(_world)
+	# Compila los shaders de partículas al arrancar (lejos de la vista) para que la primera explosión no dé un tirón
+	Vfx.explosion(self, Vector3(0, -60, 0))
+	get_viewport().size_changed.connect(_fit_view)
+	_fit_view()
+	Net.connected.connect(_on_net_connected)
+	Net.failed.connect(_on_net_failed)
+	Net.server_lost.connect(_on_net_lost)
+
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	_token = cfg.get_value("net", "token", "")
+	if _token == "":
+		_token = "%x%x" % [randi(), Time.get_ticks_usec()]
+		cfg.set_value("net", "token", _token)
+		cfg.save(SETTINGS)
+
+	var args := OS.get_cmdline_user_args()
+	var arg := func(flag: String, offset: int = 1) -> String:
+		var k := args.find(flag)
+		return args[k + offset] if k >= 0 and k + offset < args.size() and not args[k + offset].begins_with("--") else ""
+	if arg.call("--quality") != "":
+		_world.apply_quality(arg.call("--quality"))
+	if arg.call("--token") != "":
+		_token = arg.call("--token")
+	if arg.call("--shots") != "":
+		_shots_dir = arg.call("--shots")
+		if arg.call("--shots", 2).is_valid_float():
+			_shot_every = float(arg.call("--shots", 2))
+	if arg.call("--quit-after") != "":
+		_quit_after = float(arg.call("--quit-after"))
+	if arg.call("--drop") != "":
+		_drop_at = float(arg.call("--drop"))
+	if args.has("--uitest"):
+		_show_menu()
+		_ui_test(arg.call("--uitest"))
+	elif args.has("--nettest"):
+		_nettest = arg.call("--nettest")
+		_show_menu()
+		_menu.profile.name = "Anfitrion" if _nettest == "host" else "Invitado" + _token.left(3)
+		if _nettest == "host":
+			if arg.call("--nettest", 2).is_valid_int():
+				_nettest_humans = int(arg.call("--nettest", 2))
+			_on_host()
+		elif _nettest == "discover":
+			Net.start_listening()
+		else:
+			_on_join(arg.call("--nettest", 2))
+	elif args.has("--auto"):
+		var opts := {"autoplay": true, "rivals": 2, "level": "normal", "name": "Allan"}
+		if arg.call("--auto").is_valid_int():
+			opts.rivals = int(arg.call("--auto"))
+		if arg.call("--auto", 2) != "":
+			opts.level = arg.call("--auto", 2)
+		if arg.call("--seed") != "":
+			opts.seed = int(arg.call("--seed"))
+		if args.has("--slow"):
+			opts.me_delay = 5200
+		_start_solo(opts)
+	elif args.has("--tutorial"):
+		_start_solo({"rivals": 1, "level": "easy", "deck_mode": "official", "name": "Allan", "tutorial": true, "seed": 4})
+	else:
+		_show_menu(arg.call("--page") if arg.call("--page") != "" else "home")
+		if arg.call("--info") != "":
+			InfoScreen.open(self, arg.call("--info"))
+
+
+func _process(delta: float) -> void:
+	_elapsed += delta
+	if _shots_dir != "":
+		_shot_t += delta
+		if _shot_t >= _shot_every:
+			_shot_t = 0.0
+			_shot_n += 1
+			_save_shot("%s/shot_%02d.png" % [_shots_dir, _shot_n])
+			print("shot %02d: %s" % [_shot_n, _game.debug_state() if _game else "menú " + (_menu.page if _menu else "")])
+	if _nettest != "":
+		_nettest_step(delta)
+	if _quit_after > 0.0 and _elapsed >= _quit_after:
+		get_tree().quit()
+
+
+func _save_shot(path: String) -> void:
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png(path)
+
+
+## En pantallas menos alargadas sube la mesa para dejar sitio a los controles de abajo.
+func _fit_view() -> void:
+	var size := get_viewport().get_visible_rect().size
+	var aspect := size.y / maxf(1.0, size.x)
+	_world.set_view_offset(clampf(aspect - 2.0, -0.5, 0.3) * 1.1)
+
+
+# ---------------------------------------------------------------- menús y partida de un jugador
+
+func _show_menu(page: String = "home", text: String = "") -> void:
+	if _game:
+		_game.queue_free()
+		_game = null
+	if _menu == null:
+		_menu = MenuScreen.new()
+		_menu.solo_requested.connect(_start_solo)
+		_menu.host_requested.connect(_on_host)
+		_menu.join_requested.connect(_on_join)
+		_menu.leave_requested.connect(_on_leave)
+		_menu.quality_changed.connect(_world.apply_quality)
+		add_child(_menu)
+	if _session is ClientSession:
+		_menu.set_session(_session)
+	_menu.show_page(page, text)
+
+
+func _hide_menu() -> void:
+	if _menu:
+		Net.stop_listening()
+		_menu.queue_free()
+		_menu = null
+
+
+func _open_game() -> void:
+	_hide_menu()
+	if _game:
+		_game.queue_free()
+	_game = GameScreen.new().setup(_session, _world)
+	_game.exit_requested.connect(_on_game_exit)
+	_game.rematch_requested.connect(func() -> void: _start_solo(_last_opts))
+	_game.lobby_requested.connect(func() -> void: (_session as ClientSession).send({"t": "toLobby"}))
+	add_child(_game)
+	_game_started_at = _elapsed
+
+
+func _start_solo(opts: Dictionary) -> void:
+	_close_session()
+	_last_opts = opts
+	var solo := LocalMatch.new()
+	add_child(solo)
+	solo.start(opts)
+	_session = solo
+	_open_game()
+	_game.coach = opts.get("tutorial", false)
+	if _game.coach:
+		_game._update_hud()
+
+
+func _on_game_exit() -> void:
+	_close_session()
+	_show_menu()
+
+
+## Cierra la partida o sala actual y la conexión de red.
+func _close_session() -> void:
+	Net.stop_beacon()
+	Net.close()
+	_reconnects = 0
+	if _game:
+		_game.queue_free()
+		_game = null
+	if _session:
+		_session.queue_free()
+		_session = null
+	if _room:
+		_room.queue_free()
+		_room = null
+
+
+func _on_leave() -> void:
+	_close_session()
+	_show_menu()
+
+
+# ---------------------------------------------------------------- red: crear sala, unirse, reconectar
+
+func _profile() -> Dictionary:
+	return _menu.profile if _menu else {"name": "Gatito", "avatar": 0}
+
+
+func _bind_client(cs: ClientSession) -> void:
+	_session = cs
+	add_child(cs)
+	cs.updated.connect(_on_client_state)
+	cs.lobby_updated.connect(_on_client_lobby)
+	cs.left.connect(_on_client_left)
+
+
+func _on_host() -> void:
+	var me := _profile().duplicate()
+	_close_session()
+	if Net.host() != OK:
+		_show_menu("home", "No se pudo crear la sala: el puerto está ocupado. Cierra otras copias del juego.")
+		return
+	_room = RoomHost.new()
+	add_child(_room)
+	var cs := ClientSession.new().setup(_room)
+	_bind_client(cs)
+	cs.hello(str(me.name), int(me.avatar), _token)
+	Net.start_beacon(_room.beacon_info)
+	_show_menu("lobby")
+
+
+func _on_join(ip: String) -> void:
+	_close_session()
+	_join_ip = ip
+	if Net.join(ip) != OK:
+		_show_menu("join", "Dirección inválida.")
+		return
+	_show_menu("connecting", ip)
+
+
+func _on_net_connected() -> void:
+	var me := _profile()
+	if _session is ClientSession:
+		# Reconexión: el anfitrión nos reconoce por la ficha y nos devuelve nuestro asiento
+		_reconnects = 0
+		(_session as ClientSession).hello(str(me.name), int(me.avatar), _token)
+		if _game:
+			_game.notice("Conexión recuperada")
+		return
+	var cs := ClientSession.new().setup(null)
+	_bind_client(cs)
+	cs.hello(str(me.name), int(me.avatar), _token)
+	_show_menu("lobby")
+
+
+func _on_net_failed() -> void:
+	if _session is ClientSession:
+		await get_tree().create_timer(1.5).timeout
+		_try_reconnect()
+	else:
+		_show_menu("join", "No se pudo conectar con %s. ¿Está creada la sala y están en la misma Wi-Fi?" % _join_ip)
+
+
+func _on_net_lost() -> void:
+	if _session is ClientSession and (_session as ClientSession).room == null:
+		_try_reconnect()
+
+
+func _try_reconnect() -> void:
+	if not (_session is ClientSession):
+		return
+	_reconnects += 1
+	if _reconnects > MAX_RECONNECTS:
+		_close_session()
+		_show_menu("home", "Se perdió la conexión con el anfitrión.")
+		return
+	if _game:
+		_game.notice("Reconectando… (%d)" % _reconnects, true)
+	elif _menu:
+		_menu.show_page(_menu.page, "Reconectando… (%d)" % _reconnects)
+	Net.join(_join_ip)
+
+
+func _on_client_state() -> void:
+	if _game == null:
+		_open_game()
+
+
+func _on_client_lobby() -> void:
+	var cs := _session as ClientSession
+	if cs == null or cs.lobby.get("started", false):
+		return
+	# El anfitrión volvió a la sala de espera (o aún no empieza)
+	if _game or _menu == null or _menu.page != "lobby":
+		_show_menu("lobby")
+
+
+func _on_client_left(reason: String) -> void:
+	_close_session()
+	_show_menu("home", reason)
+
+
+# ---------------------------------------------------------------- prueba de red (--nettest)
+
+func _nettest_step(delta: float) -> void:
+	_auto_t += delta
+	if _auto_t < 0.45:
+		return
+	_auto_t = 0.0
+	if _nettest == "discover" and _session == null and not Net.rooms.is_empty():
+		var found: Dictionary = Net.rooms.values()[0]
+		var ip: String = found.ip
+		print("NETTEST sala encontrada en %s: %s" % [ip, found.get("name")])
+		_nettest = "join"
+		_on_join(ip)
+		return
+	var cs := _session as ClientSession
+	if cs == null:
+		return
+	if _nettest == "host" and not cs.in_game() and not _nettest_started and not cs.lobby.is_empty():
+		var humans := 0
+		for p: Dictionary in cs.lobby.players:
+			humans += 0 if p.bot else 1
+		if humans >= _nettest_humans:
+			_nettest_started = true
+			cs.send({"t": "addBot", "level": "hard"})
+			cs.send({"t": "start"})
+			print("NETTEST partida iniciada con %d humanos" % humans)
+		return
+	if _drop_at > 0.0 and _game_started_at >= 0.0 and _elapsed - _game_started_at >= _drop_at:
+		_drop_at = -1.0
+		print("NETTEST corto la conexión a propósito")
+		Net.close()
+		await get_tree().create_timer(2.5).timeout
+		print("NETTEST intento reconectar")
+		_try_reconnect()
+		return
+	var v := cs.view()
+	if v.is_empty():
+		return
+	if v.over != null:
+		var winner := ""
+		for p: Dictionary in v.players:
+			if p.id == v.over.winner:
+				winner = p.name
+		print("NETTEST fin: ganó %s | soy %s | cartas en mano %d" % [winner, cs.me_id, v.hand.size()])
+		_nettest = ""
+		await get_tree().create_timer(1.0).timeout
+		get_tree().quit()
+		return
+	var a := _auto_action(v)
+	if not a.is_empty():
+		cs.act(a)
+
+
+## Jugador automático mínimo que decide solo con lo que ve en pantalla (sirve igual para anfitrión e invitado).
+func _auto_action(v: Dictionary) -> Dictionary:
+	var pr: Variant = v.prompt
+	if pr != null and pr.get("mine", false):
+		match pr.type:
+			"explode":
+				for c: Dictionary in v.hand:
+					if c.type == "zombie":
+						return {"a": "play", "cards": [c.id]}
+				return {"a": "die"}
+			"zombie":
+				if pr.needRevive and pr.revived == null:
+					for p: Dictionary in v.players:
+						if not p.alive:
+							return {"a": "revive", "target": p.id}
+				if not pr.waiting:
+					var pos: Array = []
+					for i in int(pr.eks):
+						pos.append(i)
+					return {"a": "insert", "positions": pos}
+			"give":
+				return {"a": "give", "card": v.hand[0].id}
+			"dig":
+				return {"a": "dig", "keep": true}
+		return {}
+	if v.win != null:
+		return {"a": "pass"} if v.win.canNope and not v.win.passed else {}
+	if v.cur == v.you and pr == null and v.stack.is_empty():
+		return {"a": "draw"}
+	return {}
+
+
+# ---------------------------------------------------------------- prueba automática de toques (--uitest carpeta)
+# Simula toques reales en pantalla: menú → jugar → elegir carta → jugarla → robar del mazo.
+
+func _find_button(n: Node, text: String) -> Button:
+	if n is Button and n.text == text and n.is_visible_in_tree():
+		return n
+	for c in n.get_children():
+		var r := _find_button(c, text)
+		if r:
+			return r
+	return null
+
+
+func _tap(window_pos: Vector2) -> void:
+	for pressed: bool in [true, false]:
+		var e := InputEventMouseButton.new()
+		e.button_index = MOUSE_BUTTON_LEFT
+		e.pressed = pressed
+		e.position = window_pos
+		e.global_position = window_pos
+		Input.parse_input_event(e)
+		await get_tree().process_frame
+		await get_tree().process_frame
+
+
+func _tap_control(c: Control) -> void:
+	await _tap(get_viewport().get_final_transform() * c.get_global_rect().get_center())
+
+
+func _tap_3d(n: Node3D, local_offset: Vector3 = Vector3.ZERO) -> void:
+	await _tap(get_viewport().get_final_transform() * _world.camera.unproject_position(n.to_global(local_offset)))
+
+
+func _wait(seconds: float) -> void:
+	await get_tree().create_timer(seconds).timeout
+
+
+func _ui_test(dir: String) -> void:
+	var report: Array = []
+	await _wait(1.2)
+	await _save_shot(dir + "/t1_menu.png")
+	await _tap_control(_find_button(self, "UN JUGADOR"))
+	await _wait(0.4)
+	var b := _find_button(self, "4")
+	if b:
+		await _tap_control(b)
+	await _wait(0.3)
+	report.append("menú: rivales = %s" % str(_menu._opts.rivals))
+	await _tap_control(_find_button(self, "¡JUGAR!"))
+	await _wait(1.5)
+	report.append("partida creada: %s" % str(_game != null))
+	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
+	var card: Card3D = null
+	for _i in 180:
+		if _game.debug_can_draw():
+			card = _game.debug_playable_card()
+			if card:
+				break
+			await _tap_3d(_game.debug_deck_card())      # sin carta jugable: roba y sigue esperando
+		await _wait(0.5)
+		if (_session as LocalMatch).game.over != null:
+			break
+	if card:
+		var before: int = (_session as LocalMatch).game.discard.size()
+		await _wait(0.5)
+		await _tap_3d(card, Vector3(-0.24, 0, -0.3))   # esquina superior izquierda: la parte que no tapa la carta vecina
+		await _wait(0.6)
+		await _save_shot(dir + "/t2_seleccion.png")
+		report.append("carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
+		var play := _find_button(self, "JUGAR")
+		report.append("botón JUGAR visible: %s" % str(play != null))
+		if play:
+			await _tap_control(play)
+		await _wait(0.4)
+		await _save_shot(dir + "/t3_jugada.png")
+		report.append("descarte %d → %d" % [before, (_session as LocalMatch).game.discard.size()])
+		# Si la carta abre una ventana (p. ej. Ver el Futuro), se cierra con su botón
+		await _wait(1.6)
+		var ok := _find_button(self, "Entendido")
+		if ok:
+			await _save_shot(dir + "/t3b_ventana.png")
+			report.append("ventana tras jugar: %s" % _game.debug_state())
+			await _tap_control(ok)
+			await _wait(0.4)
+	else:
+		report.append("no hubo carta jugable")
+	# Robar tocando el mazo
+	for _i in 120:
+		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
+			break
+		await _wait(0.5)
+	report.append("antes de robar: me toca y puedo robar = %s (%s)" % [str(_game.debug_can_draw()), _game.debug_state()])
+	if (_session as LocalMatch).game.over == null:
+		var hand_before: int = (_session as LocalMatch).game.P("p0").hand.size()
+		var deck_before: int = (_session as LocalMatch).game.draw.size()
+		await _tap_3d(_game.debug_deck_card())
+		await _wait(0.8)
+		await _save_shot(dir + "/t4_robo.png")
+		report.append("robar tocando el mazo: mazo %d → %d, mano %d → %d" % [deck_before, (_session as LocalMatch).game.draw.size(), hand_before, (_session as LocalMatch).game.P("p0").hand.size()])
+	# Menú → salir
+	var menu := _find_button(self, "MENÚ")
+	if menu and (_session as LocalMatch).game.over == null:
+		await _tap_control(menu)
+		await _wait(0.4)
+		var exit := _find_button(self, "Salir al menú")
+		report.append("ventana de salida: %s" % str(exit != null))
+		if exit:
+			await _tap_control(exit)
+			await _wait(0.5)
+			report.append("de vuelta en el menú: %s" % str(_menu != null and _game == null))
+	for line: String in report:
+		print("UITEST " + line)
+	get_tree().quit()

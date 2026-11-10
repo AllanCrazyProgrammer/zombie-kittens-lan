@@ -24,6 +24,23 @@ navegador (o súbelo a un hosting estático). Juegas tú contra 1 a 4 rivales de
 Fácil, Normal, Difícil o Mixta. Se regenera con `npm run build:web`. El mismo modo está en la app
 Android (*Un jugador contra la IA*), y en las salas en red el anfitrión puede tocar la dificultad de cada bot.
 
+## Versión Godot (en desarrollo)
+
+La carpeta `godot/` es la reescritura del juego en Godot 4 con mesa 3D. Hoy contiene solo la base:
+escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a Android.
+Ya se puede jugar contra la IA y en red local: un teléfono crea la sala y los demás la encuentran solos en la misma Wi-Fi (o escriben su dirección). Hay reconexión, y el anfitrión puede añadir rivales de IA. Incluye tutorial guiado, pantalla de reglas, guía de cartas y ajustes de sonido y calidad gráfica. Falta la versión para iPhone y la exportación web.
+
+- Modelos 3D: `Blender --background --python tools/blender/build_models.py`
+- Sonidos y música (síntesis): `python3 tools/audio/gen_audio.py`
+- Avatares de los jugadores: `Blender --background --python tools/blender/render_card_art.py -- --avatars`
+- Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
+- Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
+- Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
+- Partida de demostración (la IA juega por ti) con capturas: `godot --path godot -- --auto 2 normal --slow --shots carpeta 3 --quit-after 120`
+- Prueba de red con dos copias en la misma máquina: `godot --path godot -- --nettest host 2 --token A` y `godot --path godot -- --nettest discover --token B` (añade `--drop 5` para probar la reconexión)
+- Prueba de toques (menú, elegir carta, jugar, robar, salir): `godot --path godot -- --uitest carpeta`
+- Pruebas de reglas e IA: `godot --headless --path godot -s tests/run_tests.gd` (las partidas de referencia se regeneran con `node tools/godot/gen-traces.js`)
+
 ## Estructura
 
 | Carpeta | Qué hay |

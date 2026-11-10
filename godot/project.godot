@@ -1,0 +1,36 @@
+; Zombie Kittens (versión Godot). Configuración del motor.
+config_version=5
+
+[application]
+
+config/name="Zombie Kittens"
+config/version="2.0.0-dev5"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.7", "Mobile")
+
+[autoload]
+
+CardDB="*res://scripts/autoload/card_db.gd"
+Sfx="*res://scripts/autoload/sfx.gd"
+Net="*res://scripts/autoload/net.gd"
+
+[display]
+
+window/size/viewport_width=1080
+window/size/viewport_height=1920
+window/size/window_width_override=450
+window/size/window_height_override=800
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[gui]
+
+theme/custom_font="res://assets/fonts/Nunito.ttf"
+
+[rendering]
+
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+textures/vram_compression/import_etc2_astc=true
+anti_aliasing/quality/msaa_3d=2
