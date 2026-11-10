@@ -11,6 +11,7 @@ extends Node3D
 ##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
+##   --no-broadcast             el anfitrión no se anuncia por difusión (prueba la búsqueda directa)
 ##   --token X                  identidad de este jugador (para probar dos instancias en la misma máquina)
 ##   --page nombre              abre el menú en esa página (home, solo, join, settings)
 ##   --info rules|cards         abre la pantalla de reglas o la guía de cartas
@@ -42,6 +43,9 @@ var _nettest_started := false
 var _auto_t := 0.0
 var _drop_at := -1.0
 var _game_started_at := -1.0
+var _fps_t := 0.0
+var _fps_n := 0
+var _fps_worst := 0.0
 
 
 func _ready() -> void:
@@ -69,6 +73,8 @@ func _ready() -> void:
 		return args[k + offset] if k >= 0 and k + offset < args.size() and not args[k + offset].begins_with("--") else ""
 	if arg.call("--quality") != "":
 		_world.apply_quality(arg.call("--quality"))
+	if args.has("--no-broadcast"):
+		Net.broadcast_enabled = false
 	if arg.call("--token") != "":
 		_token = arg.call("--token")
 	if arg.call("--shots") != "":
@@ -115,6 +121,16 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	_elapsed += delta
+	# En compilaciones de depuración se anota el rendimiento en el registro cada 4 s (adb logcat -s godot)
+	if OS.is_debug_build():
+		_fps_t += delta
+		_fps_n += 1
+		_fps_worst = maxf(_fps_worst, delta)
+		if _fps_t >= 4.0:
+			print("FPS %.0f  (peor cuadro %.0f ms)  %s" % [_fps_n / _fps_t, _fps_worst * 1000.0, "partida" if _game else "menú"])
+			_fps_t = 0.0
+			_fps_n = 0
+			_fps_worst = 0.0
 	if _shots_dir != "":
 		_shot_t += delta
 		if _shot_t >= _shot_every:
