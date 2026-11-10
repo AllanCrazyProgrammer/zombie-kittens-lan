@@ -6,11 +6,15 @@ signal tapped(card: Card3D)
 
 const MODEL := preload("res://assets/models/card.glb")
 const SIZE := Vector3(0.63, 0.006, 0.882)
+const CARD_SHADER := preload("res://shaders/card.gdshader")
+## Cartas especiales con más brillo tornasol
+const FOIL := {"zombie": 0.3, "exploding": 0.32, "nope": 0.16}
 
 var type: String = ""
 var face_up: bool = true
 var _busy: bool = false
 var _body: Node3D
+var _front: ShaderMaterial
 
 
 func setup(card_type: String, up: bool = true) -> Card3D:
@@ -20,8 +24,9 @@ func setup(card_type: String, up: bool = true) -> Card3D:
 	add_child(_body)
 	var mesh := _find_mesh(_body)
 	if mesh:
-		mesh.set_surface_override_material(0, _mat(CardDB.texture(type)))
-		mesh.set_surface_override_material(1, _mat(CardDB.texture("back")))
+		_front = _mat(CardDB.texture(type), FOIL.get(type, 0.1))
+		mesh.set_surface_override_material(0, _front)
+		mesh.set_surface_override_material(1, _mat(CardDB.texture("back"), 0.06))
 	if not up:
 		_body.rotation.z = PI
 	var area := Area3D.new()
@@ -47,12 +52,18 @@ func flip() -> void:
 	t.finished.connect(func() -> void: _busy = false)
 
 
-func _mat(tex: Texture2D) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_texture = tex
-	m.roughness = 0.5
-	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+func _mat(tex: Texture2D, foil: float) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = CARD_SHADER
+	m.set_shader_parameter("albedo_tex", tex)
+	m.set_shader_parameter("foil", foil)
 	return m
+
+
+## Resalta la carta (elegida o jugable) con un resplandor.
+func set_glow(amount: float) -> void:
+	if _front:
+		_front.set_shader_parameter("glow", amount)
 
 
 func _find_mesh(n: Node) -> MeshInstance3D:

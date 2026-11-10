@@ -117,6 +117,89 @@ def build_tombstone():
     export("tombstone")
 
 
+def cone_between(bm, p0, p1, r0, r1, seg=7):
+    """Tronco de cono entre dos puntos (para ramas)."""
+    from mathutils import Vector
+    axis = (p1 - p0).normalized()
+    ref = Vector((0, 0, 1)) if abs(axis.z) < 0.9 else Vector((1, 0, 0))
+    u = axis.cross(ref).normalized(); v = axis.cross(u)
+    a = [bm.verts.new(p0 + (u * math.cos(2 * math.pi * i / seg) + v * math.sin(2 * math.pi * i / seg)) * r0) for i in range(seg)]
+    b = [bm.verts.new(p1 + (u * math.cos(2 * math.pi * i / seg) + v * math.sin(2 * math.pi * i / seg)) * r1) for i in range(seg)]
+    for i in range(seg):
+        bm.faces.new((a[i], a[(i + 1) % seg], b[(i + 1) % seg], b[i]))
+    bm.faces.new(list(reversed(b)))
+
+
+def build_tree():
+    """Árbol seco y retorcido para el fondo del cementerio."""
+    import random
+    from mathutils import Vector, Matrix
+    reset()
+    rnd = random.Random(7)
+    bm = bmesh.new()
+
+    def branch(p, d, length, radius, depth):
+        end = p + d * length
+        cone_between(bm, p, end, radius, radius * 0.62)
+        if depth == 0:
+            return
+        for _ in range(2 if depth < 3 else 3):
+            perp = d.cross(Vector((rnd.uniform(-1, 1), rnd.uniform(-1, 1), rnd.uniform(-1, 1)))).normalized()
+            nd = (Matrix.Rotation(math.radians(rnd.uniform(24, 52)), 3, perp) @ d).normalized()
+            nd.z = abs(nd.z) * 0.8 + 0.15
+            branch(end, nd.normalized(), length * rnd.uniform(0.6, 0.78), radius * 0.62, depth - 1)
+
+    branch(Vector((0, 0, 0)), Vector((0.08, 0.0, 1)).normalized(), 1.5, 0.22, 4)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    me = bpy.data.meshes.new("Tree"); bm.to_mesh(me); bm.free()
+    ob = bpy.data.objects.new("Tree", me); bpy.context.scene.collection.objects.link(ob)
+    me.materials.append(material("Bark", (0.05, 0.035, 0.06), 0.95))
+    for p in me.polygons:
+        p.use_smooth = True
+    export("tree")
+
+
+def build_lantern():
+    """Farol de mesa: base y tapa de metal, vidrio que emite luz."""
+    reset()
+    metal = material("LanternMetal", (0.07, 0.06, 0.09), 0.35, 0.9)
+    glass = material("LanternGlass", (1.0, 0.72, 0.3), 0.2)
+    b = glass.node_tree.nodes.get("Principled BSDF")
+    b.inputs["Emission Color"].default_value = (1.0, 0.62, 0.22, 1.0)
+    b.inputs["Emission Strength"].default_value = 4.0
+    def add(op, mat, **kw):
+        op(**kw); o = bpy.context.object; o.data.materials.append(mat); bpy.ops.object.shade_auto_smooth(); return o
+    add(bpy.ops.mesh.primitive_cylinder_add, metal, vertices=24, radius=0.1, depth=0.035, location=(0, 0, 0.0175))
+    add(bpy.ops.mesh.primitive_cylinder_add, glass, vertices=24, radius=0.07, depth=0.17, location=(0, 0, 0.12))
+    add(bpy.ops.mesh.primitive_cone_add, metal, vertices=24, radius1=0.105, radius2=0.03, depth=0.07, location=(0, 0, 0.24))
+    add(bpy.ops.mesh.primitive_torus_add, metal, major_segments=24, minor_segments=8, major_radius=0.04, minor_radius=0.008, location=(0, 0, 0.3), rotation=(math.pi / 2, 0, 0))
+    for i in range(4):
+        a = math.pi / 4 + i * math.pi / 2
+        add(bpy.ops.mesh.primitive_cylinder_add, metal, vertices=8, radius=0.007, depth=0.18, location=(0.078 * math.cos(a), 0.078 * math.sin(a), 0.12))
+    export("lantern")
+
+
+def build_fence():
+    """Tramo de reja de hierro con puntas."""
+    reset()
+    iron = material("Iron", (0.03, 0.03, 0.05), 0.5, 0.8)
+    n, width, h = 9, 2.4, 1.3
+    for i in range(n):
+        x = -width / 2 + width * i / (n - 1)
+        tall = h + (0.18 if i % 2 == 0 else 0.0)
+        bpy.ops.mesh.primitive_cylinder_add(vertices=6, radius=0.022, depth=tall, location=(x, 0, tall / 2))
+        bpy.context.object.data.materials.append(iron)
+        bpy.ops.mesh.primitive_cone_add(vertices=6, radius1=0.05, radius2=0.0, depth=0.16, location=(x, 0, tall + 0.08))
+        bpy.context.object.data.materials.append(iron)
+    for z in (0.28, h - 0.12):
+        bpy.ops.mesh.primitive_cube_add(location=(0, 0, z), scale=(width / 2, 0.018, 0.022))
+        bpy.context.object.data.materials.append(iron)
+    export("fence")
+
+
 build_card()
 build_table()
 build_tombstone()
+build_tree()
+build_lantern()
+build_fence()
