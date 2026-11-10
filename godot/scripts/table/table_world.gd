@@ -18,6 +18,10 @@ var _time: float = 0.0
 var _shake: float = 0.0
 var _lantern_lights: Array[OmniLight3D] = []
 var _flash: ColorRect
+var _env: Environment
+var _moon: DirectionalLight3D
+var _lamp: SpotLight3D
+var _flies: GPUParticles3D
 
 
 func _ready() -> void:
@@ -27,8 +31,11 @@ func _ready() -> void:
 	_graveyard()
 	_camera()
 	_overlay()
-	var flies := Vfx.fireflies(self, Vector3(2.4, 0.7, 2.0))
-	flies.position = Vector3(0, 0.9, -0.2)
+	_flies = Vfx.fireflies(self, Vector3(2.4, 0.7, 2.0))
+	_flies.position = Vector3(0, 0.9, -0.2)
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	apply_quality(cfg.get_value("video", "quality", "high"))
 
 
 func _process(delta: float) -> void:
@@ -41,6 +48,17 @@ func _process(delta: float) -> void:
 	for i in _lantern_lights.size():
 		var f := 0.82 + 0.18 * sin(_time * 9.0 + i * 2.1) * sin(_time * 5.3 + i) + 0.06 * sin(_time * 23.0 + i * 5.0)
 		_lantern_lights[i].light_energy = 2.6 * f
+
+
+## Calidad gráfica: "high" (todo), "medium" (sin sombras de luna ni suavizado), "low" (sin sombras ni brillo, menor resolución 3D).
+func apply_quality(level: String) -> void:
+	var vp := get_viewport()
+	_moon.shadow_enabled = level == "high"
+	_lamp.shadow_enabled = level != "low"
+	_env.glow_enabled = level != "low"
+	_flies.amount = 46 if level == "high" else (30 if level == "medium" else 14)
+	vp.msaa_3d = Viewport.MSAA_2X if level == "high" else Viewport.MSAA_DISABLED
+	vp.scaling_3d_scale = 0.75 if level == "low" else 1.0
 
 
 ## Desplaza la vista en vertical (pantallas menos alargadas: sube la mesa para dejar sitio a los controles).
@@ -80,6 +98,7 @@ func _environment() -> void:
 	env.adjustment_enabled = true
 	env.adjustment_contrast = 1.08
 	env.adjustment_saturation = 1.12
+	_env = env
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
@@ -96,6 +115,7 @@ func _lights() -> void:
 	moon.directional_shadow_max_distance = 16.0
 	moon.shadow_bias = 0.03
 	add_child(moon)
+	_moon = moon
 
 	# Lámpara cálida sobre la mesa: es la luz principal y la que proyecta sombras de las cartas
 	var lamp := SpotLight3D.new()
@@ -109,6 +129,7 @@ func _lights() -> void:
 	lamp.shadow_blur = 1.6
 	lamp.position = Vector3(0.3, 4.2, 1.0)
 	add_child(lamp)
+	_lamp = lamp
 	lamp.look_at(Vector3(0, 0, 0.3))
 
 	# Resplandor verde tóxico desde el cementerio

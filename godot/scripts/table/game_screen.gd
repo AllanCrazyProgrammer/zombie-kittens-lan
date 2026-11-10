@@ -37,6 +37,21 @@ var _ek: Card3D            # el Gatito Explosivo recién sacado, mientras se dec
 var _fxq: Array[Callable] = []
 var _fx_running := false
 var _me_bar: HBoxContainer
+## Tutorial: muestra consejos según lo que pasa en la partida (cada uno, una sola vez)
+var coach := false
+var _tip := ""
+var _tips_seen := {}
+const TIPS := {
+	"intro": "¡Bienvenido! El objetivo es NO sacar el Gatito Explosivo. Gana el último gato con vida.",
+	"hand": "Estas son tus cartas. Toca una para levantarla y leer qué hace.",
+	"rivals": "Arriba ves a tus rivales y cuántas cartas tienen. El contador amarillo son las cartas que quedan en el mazo.",
+	"turn": "Es tu turno. Puedes jugar las cartas que quieras (o ninguna). Para terminar, roba una carta tocando el mazo.",
+	"selected": "Si la carta se puede jugar ahora, aparece el botón JUGAR. Toca otra carta igual para armar una pareja y robarle una carta a un rival.",
+	"window": "Cuando alguien juega una carta hay unos segundos para anularla con un Nop. La barra amarilla es el tiempo que queda.",
+	"nope": "¡Tienes un Nop! Toca ¡NOP! para anular esta jugada, o «Dejar pasar» si no te importa.",
+	"risk": "El riesgo de explotar ya es alto. Antes de robar, considera usar Saltar, Ataque o Ver el Futuro.",
+	"dead": "Explotaste, pero conservas tu mano. Aún puedes jugar Nop y cartas ⚡, y otro jugador puede revivirte con su Gatito Zombi.",
+}
 
 var _turn: Label
 var _turn_panel: PanelContainer
@@ -656,7 +671,7 @@ func _build_hud() -> void:
 	tv.add_child(bar)
 	var menu := UIKit.button("MENÚ", "normal", 34)
 	menu.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
-	menu.pressed.connect(_ask_exit)
+	menu.pressed.connect(_open_menu)
 	bar.add_child(menu)
 	_turn_panel = UIKit.panel(UIKit.C.panel, UIKit.C.line, Vector2(20, 8))
 	_turn_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -784,7 +799,7 @@ func _update_hud() -> void:
 	# Barra del jugador: solo donde sobra espacio bajo la mesa
 	_clear(_me_bar)
 	var screen := get_viewport().get_visible_rect().size
-	if screen.y / maxf(1.0, screen.x) >= 2.0 and _sel.is_empty():
+	if screen.y / maxf(1.0, screen.x) >= 2.0 and _sel.is_empty() and not coach:
 		var pic := UIKit.avatar_icon(_avatar_index(v.you), Vector2(110, 150))
 		pic.modulate = Color.WHITE if me.alive else Color(0.4, 0.4, 0.5)
 		_me_bar.add_child(pic)
@@ -851,6 +866,8 @@ func _update_hud() -> void:
 		if my_turn and _idle():
 			_add_btn(_buttons, "ROBAR CARTA", "primary", _draw_card, 54)
 
+	if coach:
+		_build_tip()
 	_build_selection_info()
 	_build_modal()
 
@@ -1038,6 +1055,18 @@ func _build_modal() -> void:
 				var p := int(_modal.positions[i])
 				_text(box, "Explosivo %s: %s" % [str(i + 1) if _modal.positions.size() > 1 else "", "arriba del todo" if p == 0 else "debajo de %d carta%s" % [p, "s" if p > 1 else ""]], 38, UIKit.C.gold)
 			_add_btn(box, "Entendido", "primary", _close_modal)
+		"menu":
+			var box := _open_modal("Menú")
+			_add_btn(box, "Seguir jugando", "primary", _close_modal)
+			var info := UIKit.hbox(12)
+			box.add_child(info)
+			_add_btn(info, "Cómo jugar", "normal", func() -> void: InfoScreen.open(self, "rules"), 38)
+			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards"), 38)
+			var audio := UIKit.hbox(12)
+			box.add_child(audio)
+			_add_btn(audio, "Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34)
+			_add_btn(audio, "Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34)
+			_add_btn(box, "Salir de la partida", "danger", _ask_exit, 40)
 		"exit":
 			var box := _open_modal("¿Salir de la partida?")
 			_text(box, "Se perderá la partida en curso." if not session.is_network() else ("Eres el anfitrión: la partida termina para todos." if session.is_host() else "Podrás volver a entrar mientras la partida siga."))
@@ -1045,9 +1074,75 @@ func _build_modal() -> void:
 			_add_btn(box, "Salir al menú", "danger", func() -> void: exit_requested.emit())
 
 
+func _open_menu() -> void:
+	_modal = {"type": "menu"}
+	_update_hud()
+
+
 func _ask_exit() -> void:
 	_modal = {"type": "exit"}
 	_update_hud()
+
+
+func _toggle_sfx() -> void:
+	Sfx.set_sfx(not Sfx.sfx_on)
+	_update_hud()
+
+
+func _toggle_music() -> void:
+	Sfx.set_music(not Sfx.music_on)
+	_update_hud()
+
+
+# ---------------------------------------------------------------- tutorial
+
+## Elige el siguiente consejo que toca mostrar, si hay alguno pendiente para la situación actual.
+func _coach_pick() -> void:
+	if _tip != "" or _v.over != null:
+		return
+	var me := _me()
+	var others_turn: bool = _v.cur != _v.you
+	var alive := 0
+	for p: Dictionary in _v.players:
+		alive += 1 if p.alive else 0
+	var risk := 100.0 * (alive - 1) / maxi(1, int(_v.draw))
+	var checks := [
+		["intro", true],
+		["dead", not me.alive],
+		["nope", _v.win != null and _v.win.canNope and not _v.win.passed],
+		["window", _v.win != null and _v.stack.size() > 0 and _v.stack[-1].by != _v.you],
+		["hand", true],
+		["selected", _sel.size() > 0],
+		["turn", _my_turn() and _idle()],
+		["risk", _my_turn() and _idle() and risk >= 25.0],
+		["rivals", others_turn],
+	]
+	for c: Array in checks:
+		if c[1] and not _tips_seen.has(c[0]):
+			_tip = c[0]
+			return
+
+
+func _dismiss_tip() -> void:
+	_tips_seen[_tip] = true
+	_tip = ""
+	_update_hud()
+
+
+func _build_tip() -> void:
+	_coach_pick()
+	if _tip == "":
+		return
+	var panel := UIKit.panel(Color("23401a"), UIKit.C.toxic, Vector2(24, 16))
+	var row := UIKit.hbox(16)
+	panel.add_child(row)
+	var txt := UIKit.label(TIPS[_tip], 32, Color("ecffd0"), false, true)
+	txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(txt)
+	var ok := _add_btn(row, "Entendido", "primary", _dismiss_tip, 34)
+	ok.size_flags_horizontal = Control.SIZE_SHRINK_END
+	ok.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_info_slot.add_child(panel)
 
 
 func _play_nope() -> void:

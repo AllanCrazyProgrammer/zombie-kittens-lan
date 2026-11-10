@@ -6,6 +6,7 @@ signal solo_requested(opts: Dictionary)
 signal host_requested
 signal join_requested(ip: String)
 signal leave_requested
+signal quality_changed(level: String)
 
 const LEVELS := [["easy", "Fácil", "Juega casi al azar. Ideal para aprender."], ["normal", "Normal", "Esquiva cuando el riesgo sube."], ["hard", "Difícil", "Recuerda el mazo y te roba los Zombis."], ["mix", "Mixta", "Cada rival con una dificultad distinta."]]
 const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
@@ -123,6 +124,7 @@ func _build() -> void:
 	_rooms_box = null
 	match page:
 		"home": _build_home()
+		"settings": _build_settings()
 		"solo": _build_solo()
 		"join": _build_join()
 		"connecting": _build_connecting()
@@ -158,7 +160,12 @@ func _build_home() -> void:
 	_add("CREAR SALA", "normal", _on_host, 50)
 	_add("UNIRSE A UNA SALA", "normal", _go.bind("join"), 50)
 	_note("Para jugar con otros, todos deben estar en la misma red Wi-Fi (o en la zona Wi-Fi de un teléfono).", 26)
-	_audio_row()
+	var learn := UIKit.hbox(12)
+	_box.add_child(learn)
+	_add("Tutorial", "normal", _on_tutorial, 38, learn)
+	_add("Cómo jugar", "normal", _open_info.bind("rules"), 38, learn)
+	_add("Cartas", "normal", _open_info.bind("cards"), 38, learn)
+	_add("Ajustes", "normal", _go.bind("settings"), 38)
 	_note("Godot · v%s" % ProjectSettings.get_setting("application/config/version"), 24)
 
 
@@ -167,6 +174,42 @@ func _audio_row() -> void:
 	_box.add_child(audio)
 	_add("Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34, audio)
 	_add("Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34, audio)
+
+
+func _open_info(kind: String) -> void:
+	InfoScreen.open(self, kind)
+
+
+## Partida guiada: un rival fácil y consejos en pantalla.
+func _on_tutorial() -> void:
+	save_profile()
+	solo_requested.emit({"rivals": 1, "level": "easy", "deck_mode": "official", "name": profile.name, "avatar": profile.avatar, "tutorial": true})
+
+
+func _quality() -> String:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	return cfg.get_value("video", "quality", "high")
+
+
+func _next_quality() -> void:
+	var order := ["high", "medium", "low"]
+	var next: String = order[(order.find(_quality()) + 1) % 3]
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	cfg.set_value("video", "quality", next)
+	cfg.save(SETTINGS)
+	quality_changed.emit(next)
+	_build()
+
+
+func _build_settings() -> void:
+	_box.add_child(UIKit.label("Ajustes", 52, UIKit.C.toxic, true))
+	_audio_row()
+	var q := _quality()
+	_add("Gráficos: " + {"high": "calidad alta", "medium": "calidad media", "low": "calidad baja"}[q], "normal", _next_quality, 40)
+	_note({"high": "Todos los efectos: sombras, brillo y suavizado de bordes.", "medium": "Menos sombras y sin suavizado. Buen equilibrio si el juego va lento.", "low": "Sin sombras ni brillo y menor resolución. Para teléfonos modestos o para ahorrar batería."}[q], 28)
+	_add("Volver", "ghost", _go.bind("home"), 38)
 
 
 func _on_host() -> void:

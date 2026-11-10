@@ -12,7 +12,10 @@ extends Node3D
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
 ##   --token X                  identidad de este jugador (para probar dos instancias en la misma máquina)
-##   --page nombre              abre el menú en esa página (home, solo, join)
+##   --page nombre              abre el menú en esa página (home, solo, join, settings)
+##   --info rules|cards         abre la pantalla de reglas o la guía de cartas
+##   --tutorial                 arranca la partida guiada
+##   --quality high|medium|low  fuerza la calidad gráfica en esta ejecución
 ##   --quit-after s             cierra tras s segundos
 
 const SETTINGS := "user://settings.cfg"
@@ -64,6 +67,8 @@ func _ready() -> void:
 	var arg := func(flag: String, offset: int = 1) -> String:
 		var k := args.find(flag)
 		return args[k + offset] if k >= 0 and k + offset < args.size() and not args[k + offset].begins_with("--") else ""
+	if arg.call("--quality") != "":
+		_world.apply_quality(arg.call("--quality"))
 	if arg.call("--token") != "":
 		_token = arg.call("--token")
 	if arg.call("--shots") != "":
@@ -100,8 +105,12 @@ func _ready() -> void:
 		if args.has("--slow"):
 			opts.me_delay = 5200
 		_start_solo(opts)
+	elif args.has("--tutorial"):
+		_start_solo({"rivals": 1, "level": "easy", "deck_mode": "official", "name": "Allan", "tutorial": true, "seed": 4})
 	else:
 		_show_menu(arg.call("--page") if arg.call("--page") != "" else "home")
+		if arg.call("--info") != "":
+			InfoScreen.open(self, arg.call("--info"))
 
 
 func _process(delta: float) -> void:
@@ -143,6 +152,7 @@ func _show_menu(page: String = "home", text: String = "") -> void:
 		_menu.host_requested.connect(_on_host)
 		_menu.join_requested.connect(_on_join)
 		_menu.leave_requested.connect(_on_leave)
+		_menu.quality_changed.connect(_world.apply_quality)
 		add_child(_menu)
 	if _session is ClientSession:
 		_menu.set_session(_session)
@@ -176,6 +186,9 @@ func _start_solo(opts: Dictionary) -> void:
 	solo.start(opts)
 	_session = solo
 	_open_game()
+	_game.coach = opts.get("tutorial", false)
+	if _game.coach:
+		_game._update_hud()
 
 
 func _on_game_exit() -> void:
