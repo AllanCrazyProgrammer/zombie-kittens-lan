@@ -40,82 +40,108 @@
   const tomb = (x, y, s, c) => `<g transform="translate(${x} ${y}) scale(${s || 1})"><path d="M-11 20 v-22 a11 11 0 0 1 22 0 v22 z" fill="${c || '#6f6a8f'}"/><path d="M-11 20 v-22 a11 11 0 0 1 6 -9.5 v31.5 z" fill="#000" opacity=".15"/><path d="M0 -6 v12 M-4 -2 h8" stroke="#3b3658" stroke-width="2.4" stroke-linecap="round"/></g>`;
   const moon = (x, y, r) => `<circle cx="${x}" cy="${y}" r="${r}" fill="#fff6c9"/><circle cx="${x - r * 0.3}" cy="${y - r * 0.2}" r="${r * 0.18}" fill="#e9dc9f"/><circle cx="${x + r * 0.3}" cy="${y + r * 0.35}" r="${r * 0.12}" fill="#e9dc9f"/>`;
   const ground = (y, c) => `<path d="M0 ${y} q30 -7 60 -2 t60 -1 v${100 - y + 4} h-120 z" fill="${c}"/>`;
-  const stars = (c) => `<g fill="${c || '#fff'}" opacity=".8"><circle cx="12" cy="12" r="1.2"/><circle cx="34" cy="22" r=".9"/><circle cx="100" cy="30" r="1.1"/><circle cx="76" cy="10" r=".8"/><circle cx="52" cy="8" r="1"/><circle cx="110" cy="12" r=".8"/></g>`;
+  const stars = (c) => `<g fill="${c || '#fff'}" opacity=".85"><circle cx="14" cy="14" r="2.6"/><circle cx="104" cy="26" r="2.4"/><circle cx="60" cy="10" r="2.2"/><circle cx="34" cy="86" r="2.2"/><circle cx="96" cy="84" r="2.4"/></g>`;
   const mini = (x, y, r, c, inner) => `<g transform="translate(${x} ${y}) rotate(${r})"><rect x="-9" y="-13" width="18" height="26" rx="3" fill="${c}" stroke="#111" stroke-width="1.5"/>${inner || ''}</g>`;
   const bomb = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s})"><circle r="11" fill="#17131f"/><circle cx="-4" cy="-4" r="3" fill="#fff" opacity=".25"/><rect x="-3" y="-15" width="6" height="5" rx="1" fill="#4a4458"/><path d="M0 -15 q2 -8 9 -8" stroke="#c9a36b" stroke-width="2" fill="none"/><path d="M9 -29 l2 4 l4 -1 l-2.500 3.500 l3 3 l-4.500 0 l-1.500 4 l-1.800 -4 l-4.200 .5 l3 -3.200 l-2.500 -3.600 l4.200 1.200 z" fill="#ffd23a" stroke="#ff7a1a" stroke-width="1"/></g>`;
   const burst = (cx, cy, r1, r2, n, c) => { let d = ''; for (let i = 0; i < n * 2; i++) { const a = Math.PI * i / n, r = i % 2 ? r2 : r1; d += (i ? 'L' : 'M') + (cx + Math.cos(a) * r).toFixed(1) + ' ' + (cy + Math.sin(a) * r).toFixed(1); } return `<path d="${d}z" fill="${c}"/>`; };
   const bg = (id, a, b) => `<defs><linearGradient id="g${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${a}"/><stop offset="1" stop-color="${b}"/></linearGradient></defs><rect width="120" height="100" fill="url(#g${id})"/>`;
 
-  /* ---------- una escena por carta ---------- */
+  /* ---------- fondos y focos nuevos: cada carta se lee por su silueta ---------- */
+  /* halo: círculo claro detrás del sujeto para separarlo del fondo. */
+  const halo = (cx, cy, r, c, op) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${c || '#fff'}" opacity="${op == null ? .22 : op}"/>`;
+  /* rays: abanico de rayos desde el centro (sol naciente). */
+  const rays = (cx, cy, r, n, c, op) => { let d = ''; for (let i = 0; i < n; i++) { const a0 = (i * 2 * Math.PI) / n, a1 = a0 + Math.PI / n * .55; d += `M${cx} ${cy} L${(cx + Math.cos(a0) * r).toFixed(1)} ${(cy + Math.sin(a0) * r).toFixed(1)} L${(cx + Math.cos(a1) * r).toFixed(1)} ${(cy + Math.sin(a1) * r).toFixed(1)} z`; } return `<path d="${d}" fill="${c || '#fff'}" opacity="${op == null ? .14 : op}"/>`; };
+  /* dots: patrón de puntos grandes (legible a 104px, no estrellas de 1px). */
+  const dots = (id, c, op) => `<defs><pattern id="pd${id}" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="5" cy="5" r="2.6" fill="${c || '#fff'}" opacity="${op == null ? .3 : op}"/><circle cx="15" cy="15" r="1.8" fill="${c || '#fff'}" opacity="${op == null ? .2 : op}"/></pattern></defs><rect width="120" height="100" fill="url(#pd${id})"/>`;
+  /* stripes: patrón de rayas diagonales gruesas. */
+  const stripes = (id, c, op) => `<defs><pattern id="ps${id}" width="18" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="18" height="7" fill="${c || '#fff'}" opacity="${op == null ? .13 : op}"/></pattern></defs><rect width="120" height="100" fill="url(#ps${id})"/>`;
+  /* sparkles: destellos de 4 puntas, grandes (reemplazan a las estrellas diminutas). */
+  const sparkles = (c) => `<g fill="${c || '#fff'}"><path d="M14 12 l2.5 6 6 2.5 -6 2.5 -2.5 6 -2.5 -6 -6 -2.5 6 -2.5 z"/><path d="M102 26 l2 5 5 2 -5 2 -2 5 -2 -5 -5 -2 5 -2 z"/><path d="M60 10 l1.8 4.4 4.4 1.8 -4.4 1.8 -1.8 4.4 -1.8 -4.4 -4.4 -1.8 4.4 -1.8 z"/></g>`;
+  /* bigBomb: bomba gigante con mecha corta (la de bomb() se sale del cuadro al escalarla). */
+  const bigBomb = (x, y, s) => `<g transform="translate(${x} ${y}) scale(${s || 1})"><circle r="15" fill="#17131f"/><circle cx="-5" cy="-5" r="4" fill="#fff" opacity=".25"/><rect x="-3" y="-20" width="7" height="6" rx="1.5" fill="#4a4458"/><path d="M0 -20 q3 -9 11 -9" stroke="#c9a36b" stroke-width="2.5" fill="none"/><path d="M11 -32 l2.5 5 5 -1 -3 4.5 3.5 3.5 -5.5 0 -2 5 -2 -5 -5 .5 3.5 -3.5 -3 -4.5 5 1.5 z" fill="#ffd23a" stroke="#ff7a1a" stroke-width="1.2"/></g>`;
+  /* stopSign: octógono de STOP centrado en (cx, cy), radio 40*s. */
+  const stopSign = (cx, cy, s) => { const r = 40 * (s || 1); const pts = []; for (let k = 0; k < 8; k++) { const a = (22.5 + 45 * k) * Math.PI / 180; pts.push((cx + Math.cos(a) * r).toFixed(1) + ',' + (cy + Math.sin(a) * r).toFixed(1)); } return `<polygon points="${pts.join(' ')}" fill="#e11d2e" stroke="#fff" stroke-width="4" stroke-linejoin="round"/>`; };
+  /* bigEye: ojo gigante de ancho w y alto h, iris de radio iris. */
+  const bigEye = (cx, cy, w, h, iris) => `<g><path d="M${cx - w / 2} ${cy} q${w / 2} ${-h} ${w} 0 q${-w / 2} ${h} ${-w} 0 z" fill="#f4fbff" stroke="#9fe8ff" stroke-width="3"/><circle cx="${cx}" cy="${cy}" r="${iris}" fill="#49e0e6"/><circle cx="${cx}" cy="${cy}" r="${(iris * .45).toFixed(1)}" fill="#0b1247"/><circle cx="${(cx - iris * .35).toFixed(1)}" cy="${(cy - iris * .35).toFixed(1)}" r="${(iris * .22).toFixed(1)}" fill="#fff"/></g>`;
+  /* bigHeart: corazón grande centrado en (cx, cy), escala s. */
+  const bigHeart = (cx, cy, s) => `<g transform="translate(${cx} ${cy}) scale(${s || 1})"><path d="M0 10 c-10 -14 -30 -4 -18 14 l18 18 18 -18 c12 -18 -8 -28 -18 -14 z" fill="#fff" stroke="#e0457e" stroke-width="3" stroke-linejoin="round"/></g>`;
+  /* bigBone: muslo de carne gigante (hueso + carne), rotado rot grados. */
+  const bigBone = (x, y, s, rot) => `<g transform="translate(${x} ${y}) rotate(${rot || 0}) scale(${s || 1})"><rect x="10" y="-5" width="30" height="10" rx="5" fill="#f4ead8"/><circle cx="42" cy="-7" r="7" fill="#f4ead8"/><circle cx="42" cy="7" r="7" fill="#f4ead8"/><ellipse cx="0" cy="0" rx="20" ry="17" fill="#e88a5a"/><ellipse cx="-4" cy="-3" rx="11" ry="8" fill="#f2a878"/></g>`;
+  /* bigShovel: pala gigante, rotada rot grados. */
+  const bigShovel = (x, y, s, rot) => `<g transform="translate(${x} ${y}) rotate(${rot || 0}) scale(${s || 1})"><rect x="-3.5" y="-36" width="7" height="46" rx="3.5" fill="#b9854a"/><rect x="-10" y="-42" width="20" height="9" rx="4.5" fill="#8a5a2a"/><path d="M-12 10 h24 v15 q-12 15 -24 0 z" fill="#dfe4f2" stroke="#8b93a8" stroke-width="2"/></g>`;
+  /* fan: tres cartas grandes (34x48) abanicadas, centradas en (cx, cy). */
+  const fan = (cx, cy, c1, c2, c3) => `<g><g transform="translate(${cx - 22} ${cy}) rotate(-26)"><rect x="-17" y="-24" width="34" height="48" rx="5" fill="${c1}" stroke="#111" stroke-width="2"/></g><g transform="translate(${cx + 22} ${cy}) rotate(26)"><rect x="-17" y="-24" width="34" height="48" rx="5" fill="${c3}" stroke="#111" stroke-width="2"/></g><g transform="translate(${cx} ${cy - 4})"><rect x="-17" y="-24" width="34" height="48" rx="5" fill="${c2}" stroke="#111" stroke-width="2"/></g></g>`;
+
+  /* ---------- una escena por carta ----------
+     Regla: un solo objeto protagonista grande (~50% del cuadro 120x100),
+     con halo detrás, y el gato desplazado/rotado/escalado de forma distinta
+     en cada carta. Sin detalles menores de 2px ni textos menores de 18px. */
   const ART = {
-    exploding: () => bg('ex', '#ff5a1f', '#a3141f') + burst(60, 50, 58, 30, 12, '#ffb52e') + burst(60, 50, 40, 22, 10, '#ffe66b') +
-      cat({ y: 46, fur: '#17131f', ear: '#ff5a7a', eyes: 'wide', mouth: 'open', under: burst(0, 0, 35, 25, 16, '#17131f'), tail: false }) + bomb(88, 78, 1.05),
-    zombie: () => bg('zo', '#2a1a55', '#4b2a7a') + stars() + moon(96, 20, 12) + tomb(24, 56, 1.25) + ground(74, '#2c4a1e') +
-      `<ellipse cx="62" cy="78" rx="30" ry="7" fill="#1c3312"/>` +
-      `<g transform="translate(98 66) rotate(12)"><rect x="-6" y="-14" width="12" height="30" rx="6" fill="${Z.fur}"/><circle cy="-17" r="8.500" fill="${Z.fur}"/><circle cx="-6" cy="-26" r="3.600" fill="${Z.fur}"/><circle cx="0" cy="-28.500" r="3.600" fill="${Z.fur}"/><circle cx="6" cy="-26" r="3.600" fill="${Z.fur}"/><ellipse cy="-16" rx="4.500" ry="3.600" fill="#3f6b17"/></g>` +
-      cat(Object.assign({ x: 60, y: 54, body: false, eyeL: 'x', eyeR: 'slit', mouth: 'fangs', extra: stitch }, Z)) +
-      `<path d="M28 80 q32 -12 66 0 v24 h-66 z" fill="#2c4a1e"/><path d="M36 78 l4 -6 l5 6 M70 77 l4 -7 l5 7" fill="#3c6428"/>`,
-    attack: () => bg('at', '#ff9a2e', '#d6362b') + burst(60, 50, 70, 48, 9, 'rgba(255,255,255,.12)') +
-      cat({ y: 50, fur: '#2b2342', eyes: 'angry', eye: '#ffe14a', mouth: 'fangs' }) +
-      `<g stroke="#fff" stroke-width="5" stroke-linecap="round" fill="none"><path d="M70 14 q22 26 14 70"/><path d="M84 10 q22 26 14 70"/><path d="M98 8 q20 24 13 62"/></g><g stroke="#ffe14a" stroke-width="1.6" fill="none" opacity=".9"><path d="M72 16 q20 26 13 66"/><path d="M86 12 q20 26 13 66"/></g>`,
-    attack_dead: () => bg('ad', '#23401c', '#0f2212') + moon(60, 30, 20) + ground(70, '#0b160c') +
-      [[14, 70, .55], [38, 66, .7], [84, 66, .7], [106, 70, .55]].map(([x, y, s]) => cat({ x, y, s, fur: '#0b160c', ear: '#0b160c', nose: '#0b160c', line: '#0b160c', eyes: 'glow', eye: '#b6ff3a', mouth: 'none', tail: false })).join('') +
-      cat(Object.assign({ x: 60, y: 60, s: .95, eyeL: 'slit', eyeR: 'x', mouth: 'fangs', extra: stitch + `<rect x="-33" y="6" width="9" height="26" rx="4.500" fill="${Z.fur}" transform="rotate(-28 -28 20)"/><rect x="24" y="6" width="9" height="26" rx="4.500" fill="${Z.fur}" transform="rotate(28 28 20)"/>` }, Z)),
-    nope: () => bg('no', '#ff5468', '#9c1235') +
-      cat({ x: 46, y: 54, fur: '#f1e6d2', ear: '#ff9fbf', eyes: 'closed', mouth: 'flat', line: '#3a2a2a' }) +
-      `<g transform="translate(88 44)"><rect x="-3" y="18" width="6" height="34" fill="#e8e0d0"/><path d="M-10 -24 h20 l14 14 v20 l-14 14 h-20 l-14 -14 v-20 z" fill="#e11d2e" stroke="#fff" stroke-width="3.500"/><text y="6.500" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="19" fill="#fff">NOP</text></g>`,
-    skip: () => bg('sk', '#39b8ff', '#2a4fd6') + `<circle cx="100" cy="18" r="9" fill="#fff" opacity=".35"/>` + ground(80, '#1b2e7a') + tomb(60, 66, 1.1, '#8b93c9') +
-      `<path d="M10 70 q50 -78 100 -6" stroke="#fff" stroke-width="2.500" stroke-dasharray="3 6" fill="none" opacity=".8" stroke-linecap="round"/>` +
-      cat({ x: 78, y: 26, s: .72, rot: 28, fur: '#ffb13d', ear: '#ff6f91', eyes: 'closed', line: '#5a2a00' }),
-    super_skip: () => bg('ss', '#7b3cff', '#28106e') + stars('#ffe66b') + ground(84, '#170a45') + tomb(22, 76, .7, '#8b76d6') + tomb(56, 78, .8, '#8b76d6') + tomb(92, 76, .7, '#8b76d6') +
-      `<g stroke="#ffe66b" stroke-width="2.500" stroke-linecap="round" opacity=".9"><path d="M6 30 h22 M2 42 h18 M10 54 h14"/></g>` +
-      cat({ x: 70, y: 36, s: .8, rot: 62, fur: '#ffb13d', ear: '#ff6f91', eyes: 'angry', eye: '#fff', line: '#5a2a00', tail: false, under: `<path d="M-14 6 q-34 30 -8 62 q10 -14 22 -8 q8 -14 22 -8 q2 -34 -22 -46 z" fill="#e11d2e"/>` }),
-    see_future: () => bg('sf', '#b34cff', '#3c1273') + stars('#ffd6ff') +
-      `<path d="M34 92 q26 -16 52 0 z" fill="#ffc93a"/><rect x="40" y="82" width="40" height="7" rx="3" fill="#e0a21c"/>` +
-      `<circle cx="60" cy="50" r="34" fill="#8ff2ff" opacity=".28"/><circle cx="60" cy="50" r="30" fill="#c9f8ff" opacity=".5" stroke="#e9fdff" stroke-width="2"/>` +
-      mini(44, 54, -16, '#ffe14a') + mini(76, 54, 16, '#7ee06a') + mini(60, 50, 0, '#fff', `<text y="6" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="17" fill="#3c1273">?</text>`) +
-      `<path d="M40 34 q6 -10 16 -12" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" opacity=".9"/>` +
-      `<path d="M14 80 q-2 -18 10 -22 q10 -2 12 8 z M106 80 q2 -18 -10 -22 q-10 -2 -12 8 z" fill="#2b2342"/>`,
-    shuffle: () => bg('sh', '#22d3b4', '#0c6b7a') +
-      mini(40, 52, -24, '#ffe14a') + mini(60, 46, 0, '#ff7fb0') + mini(80, 52, 24, '#fff') +
-      `<g fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"><path d="M22 30 q38 -30 76 0"/><path d="M98 76 q-38 30 -76 0"/></g><path d="M100 18 l1 16 l-15 -6 z M20 88 l-1 -16 l15 6 z" fill="#fff"/>` +
-      cat({ x: 60, y: 50, s: .36, body: false, fur: '#2b2342' }),
-    feed_dead: () => bg('fd', '#c9d64a', '#5d7a1c') +
-      cat(Object.assign({ x: 50, y: 50, eyeL: 'wide', eyeR: 'x', mouth: 'open', extra: stitch }, Z)) +
-      `<g transform="translate(94 52) rotate(14)"><rect x="-2" y="0" width="4" height="40" rx="2" fill="#e8e8f0"/><path d="M-7 -18 v14 q0 6 7 6 q7 0 7 -6 v-14 M0 -18 v16" stroke="#e8e8f0" stroke-width="3" fill="none" stroke-linecap="round"/><g transform="translate(0 -26)"><path d="M-12 0 q0 -10 12 -10 q12 0 12 10 q0 8 -12 8 q-12 0 -12 -8 z" fill="#ff9fc0"/><path d="M-6 -4 q3 4 0 8 M0 -9 v16 M6 -4 q-3 4 0 8" stroke="#d8588a" stroke-width="1.800" fill="none" stroke-linecap="round"/></g></g>`,
-    clone: () => bg('cl', '#5fe0ff', '#1d6fb8') +
-      `<path d="M60 6 v88" stroke="#fff" stroke-width="2" stroke-dasharray="4 5" opacity=".8"/>` +
-      cat({ x: 32, y: 52, s: .8, fur: '#ff8a3d', ear: '#ffd0a8', line: '#5a2a00' }) +
-      `<g opacity=".78">` + cat({ x: 88, y: 52, s: .8, fur: '#39e6c9', ear: '#bafff2', eye: '#fff', line: '#0c4d57', nose: '#0c6b7a' }) + `</g>` +
-      `<g fill="#fff" opacity=".9"><circle cx="60" cy="22" r="3"/><circle cx="60" cy="50" r="3"/><circle cx="60" cy="78" r="3"/></g>`,
-    grave_robber: () => bg('gr', '#3a3a6e', '#17152e') + stars() + ground(76, '#2e2a1e') +
-      `<path d="M62 78 h44 l-5 20 h-34 z" fill="#0d0b14"/>` + tomb(100, 58, 1.1) +
-      `<g transform="translate(84 60) rotate(24)"><rect x="-2" y="-28" width="4" height="40" fill="#b9854a"/><path d="M-8 12 h16 v10 q-8 10 -16 0 z" fill="#cfd4e6"/></g>` +
-      cat({ x: 38, y: 50, fur: '#2b2342', eyes: 'slit', eye: '#fff', extra: `<path d="M-28 -8 h56 v9 q-14 6 -28 0 q-14 6 -28 0 z" fill="#0d0b14" opacity=".92"/>` + eye(-11, 'slit', '#ffe14a') + eye(11, 'slit', '#ffe14a') + `<g transform="translate(22 34)"><path d="M-10 12 q-4 -22 10 -22 q14 0 10 22 z" fill="#d9b36b"/><path d="M-4 -9 h8" stroke="#8a6a2e" stroke-width="3" stroke-linecap="round"/><text y="8" text-anchor="middle" font-size="11" font-family="Bangers,Impact,sans-serif" fill="#8a6a2e">$</text></g>` }),
-    favor: () => bg('fa', '#ff9fd0', '#e0457e') + burst(60, 52, 74, 52, 10, 'rgba(255,255,255,.14)') +
-      cat({ y: 52, fur: '#fff5e6', ear: '#ff9fbf', eyes: 'big', mouth: 'sad', line: '#5a3a3a' }) +
-      `<path d="M94 20 c-5 -8 -16 -2 -10 7 l10 10 l10 -10 c6 -9 -5 -15 -10 -7 z" fill="#fff"/><path d="M22 30 c-3 -5 -10 -1 -6 4.500 l6 6 l6 -6 c4 -5.500 -3 -9.500 -6 -4.500 z" fill="#fff" opacity=".8"/>`,
-    dig_deeper: () => bg('dd', '#ffcf6b', '#e0862e') + `<rect y="46" width="120" height="54" fill="#6b4226"/><path d="M0 46 q30 -6 60 0 t60 0 v6 h-120 z" fill="#58a83a"/>` +
-      `<g fill="#4f2f1a"><circle cx="16" cy="66" r="3"/><circle cx="100" cy="84" r="4"/><circle cx="30" cy="90" r="2.500"/></g>` +
-      mini(52, 66, -8, '#fff', `<text y="6" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="16" fill="#6b4226">1</text>`) + mini(74, 82, 10, '#ffe14a', `<text y="6" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="16" fill="#6b4226">2</text>`) +
-      `<g transform="translate(96 30) rotate(28)"><rect x="-2.500" y="-30" width="5" height="44" rx="2" fill="#b9854a"/><rect x="-8" y="-34" width="16" height="6" rx="3" fill="#8a5a2a"/><path d="M-10 14 h20 v12 q-10 12 -20 0 z" fill="#dfe4f2" stroke="#8b93a8" stroke-width="1.500"/></g>` +
-      cat({ x: 26, y: 30, s: .55, body: false, fur: '#2b2342' }),
-    clairvoyance: () => bg('cv', '#2747c9', '#0b1247') + stars('#9fe8ff') +
-      `<g stroke="#9fe8ff" stroke-width="2" opacity=".55" stroke-linecap="round"><path d="M60 8 v-6 M92 18 l5 -5 M28 18 l-5 -5 M106 44 h8 M6 44 h8"/></g>` +
-      `<path d="M10 46 q50 -46 100 0 q-50 46 -100 0 z" fill="#f4fbff" stroke="#9fe8ff" stroke-width="2.500"/><circle cx="60" cy="46" r="21" fill="#49e0e6"/><circle cx="60" cy="46" r="21" fill="none" stroke="#1a8fa8" stroke-width="2"/><ellipse cx="60" cy="46" rx="6.500" ry="19" fill="#0b1247"/><circle cx="52" cy="37" r="4" fill="#fff" opacity=".85"/>` +
-      bomb(60, 88, .62) + `<path d="M44 70 l16 8 l16 -8" stroke="#9fe8ff" stroke-width="2" fill="none" stroke-dasharray="2 4" stroke-linecap="round"/>`,
-    cat_a: () => bg('ca', '#ffe7a3', '#e0a84a') + `<path d="M0 78 l30 -40 l22 28 l14 -18 l54 60 v-8 h-120 z" fill="#c98a2e" opacity=".5"/>` +
-      cat({ y: 52, fur: '#efe6cf', ear: '#d9c9a3', eyeL: 'slit', eyeR: 'slit', eye: '#7ee06a', nose: '#b89f6e', line: '#6b5a36', mouth: 'flat',
-        extra: `<g stroke="#b8a878" stroke-width="1.600" fill="none"><path d="M-27 -8 q27 -8 54 2 M-28 2 q10 3 14 -4 M10 -14 q8 8 18 6 M-26 12 q26 9 52 0 M-18 22 q18 6 36 0 M-21 30 q20 8 42 2 M-20 40 q20 6 40 0"/></g><path d="M22 14 q14 6 10 22" stroke="#efe6cf" stroke-width="4" fill="none" stroke-linecap="round"/>` }),
-    cat_b: () => bg('cb', '#8a1f4f', '#2a0a2e') + moon(92, 20, 13) +
-      `<g fill="#17131f"><path d="M14 22 q6 -8 12 0 q4 -4 8 0 q-6 2 -8 8 q-2 -5 -6 -3 q-3 -4 -6 -5 z"/><path d="M34 40 q4 -5 8 0 q3 -3 6 0 q-4 1 -6 6 q-1 -4 -4 -2 q-2 -3 -4 -4 z"/></g>` +
-      cat({ y: 52, fur: '#2b2342', ear: '#e11d2e', eye: '#ff4d5e', mouth: 'fangs', under: `<path d="M-38 48 q-6 -44 12 -52 l26 14 l26 -14 q18 8 12 52 z" fill="#17131f"/><path d="M-30 46 q-4 -34 8 -42 l22 12 l22 -12 q12 8 8 42 z" fill="#c2182b"/><path d="M-26 -2 l-8 -18 l20 8 z M26 -2 l8 -18 l-20 8 z" fill="#17131f"/>` }),
-    cat_c: () => bg('cc', '#6b7cff', '#2a2a7a') + stars() +
-      `<g transform="translate(60 50)"><ellipse cx="0" cy="44" rx="24" ry="4" fill="#000" opacity=".25"/><path d="M-22 -20 l0 -18 l14 9 z M22 -20 l0 -18 l-14 9 z" fill="#f4f7ff"/><path d="M-27 34 v-36 a27 26 0 0 1 54 0 v36 q-4.500 -8 -9 0 q-4.500 8 -9 0 q-4.500 -8 -9 0 q-4.500 8 -9 0 q-4.500 -8 -9 0 q-4.500 8 -9 0 z" fill="#f4f7ff"/><path d="M-27 34 v-36 a27 26 0 0 1 8 -18 v50 q-4 -4 -8 4 z" fill="#c9d2ff" opacity=".7"/><ellipse cx="-10" cy="-4" rx="5.500" ry="7.500" fill="#1b1b4a"/><ellipse cx="10" cy="-4" rx="5.500" ry="7.500" fill="#1b1b4a"/><path d="M-3 7 h6 l-3 3.600 z" fill="#ff86b3"/><ellipse cx="0" cy="16" rx="4" ry="5" fill="#1b1b4a"/><ellipse cx="-19" cy="6" rx="4" ry="2.500" fill="#ff9fbf" opacity=".6"/><ellipse cx="19" cy="6" rx="4" ry="2.500" fill="#ff9fbf" opacity=".6"/></g>` +
-      `<text x="96" y="30" font-family="Bangers,Impact,sans-serif" font-size="13" fill="#fff" opacity=".85" transform="rotate(12 96 30)">miau~</text>`,
-    cat_d: () => bg('cd', '#3b3b4f', '#111118') + `<circle cx="60" cy="50" r="40" fill="#7ee06a" opacity=".12"/>` +
-      cat({ y: 50, fur: '#f1efe6', ear: '#17131f', nose: '#17131f', line: '#17131f', eyes: 'none', mouth: 'none',
-        extra: `<ellipse cx="-11" cy="-2" rx="7.500" ry="8.500" fill="#17131f"/><ellipse cx="11" cy="-2" rx="7.500" ry="8.500" fill="#17131f"/><circle cx="-11" cy="-1" r="2.400" fill="#7ee06a"/><circle cx="11" cy="-1" r="2.400" fill="#7ee06a"/><path d="M-9 14 h18 M-6 11 v6 M-2 11 v6 M2 11 v6 M6 11 v6" stroke="#17131f" stroke-width="1.600" stroke-linecap="round"/><g stroke="#17131f" stroke-width="2.400" stroke-linecap="round" fill="none"><path d="M0 24 v20 M-12 28 q12 5 24 0 M-13 34 q13 5 26 0 M-12 40 q12 5 24 0"/></g>` }),
+    exploding: () => bg('ex', '#ff5a1f', '#a3141f') + rays(60, 50, 70, 12, '#ffb52e', .2) + halo(54, 60, 42, '#ffe66b', .35) + burst(54, 60, 46, 30, 10, '#ffb52e') +
+      bigBomb(54, 66, 1.9) + cat({ x: 98, y: 24, s: .45, rot: 20, fur: '#17131f', ear: '#ff5a7a', eyes: 'wide', mouth: 'open', body: false, tail: false }),
+    zombie: () => bg('zo', '#2a1a55', '#4b2a7a') + dots('zo', '#b6f23a', .25) + moon(104, 18, 14) + halo(52, 56, 42, '#86c440', .28) +
+      tomb(100, 62, 1.5) + ground(78, '#2c4a1e') +
+      cat(Object.assign({ x: 50, y: 56, s: 1.25, body: true, eyeL: 'x', eyeR: 'slit', mouth: 'fangs', extra: stitch }, Z)) +
+      `<g transform="translate(92 78) rotate(12)"><rect x="-6" y="-14" width="12" height="30" rx="6" fill="${Z.fur}"/><circle cy="-17" r="8.5" fill="${Z.fur}"/><circle cx="-6" cy="-26" r="3.6" fill="${Z.fur}"/><circle cx="0" cy="-28.5" r="3.6" fill="${Z.fur}"/><circle cx="6" cy="-26" r="3.6" fill="${Z.fur}"/><ellipse cy="-16" rx="4.5" ry="3.6" fill="#3f6b17"/></g>`,
+    attack: () => bg('at', '#ff9a2e', '#d6362b') + stripes('at', '#fff', .14) + halo(74, 52, 40, '#ffe14a', .3) +
+      `<g stroke="#fff" stroke-width="7" stroke-linecap="round" fill="none"><path d="M8 12 q26 30 16 76"/><path d="M26 8 q26 30 16 76"/><path d="M44 10 q24 28 15 70"/></g>` +
+      cat({ x: 82, y: 54, s: 1.15, rot: -14, fur: '#2b2342', eyes: 'angry', eye: '#ffe14a', mouth: 'fangs' }),
+    attack_dead: () => bg('ad', '#23401c', '#0f2212') + dots('ad', '#b6ff3a', .22) + halo(60, 54, 42, '#b6ff3a', .2) +
+      cat({ x: 16, y: 62, s: .8, fur: '#0b160c', ear: '#0b160c', nose: '#0b160c', line: '#0b160c', eyes: 'glow', eye: '#b6ff3a', mouth: 'none', body: false, tail: false }) +
+      cat({ x: 104, y: 62, s: .8, fur: '#0b160c', ear: '#0b160c', nose: '#0b160c', line: '#0b160c', eyes: 'glow', eye: '#b6ff3a', mouth: 'none', body: false, tail: false }) +
+      cat(Object.assign({ x: 60, y: 58, s: 1.1, eyeL: 'slit', eyeR: 'x', mouth: 'fangs', extra: stitch + `<rect x="-33" y="6" width="9" height="26" rx="4.5" fill="${Z.fur}" transform="rotate(-28 -28 20)"/><rect x="24" y="6" width="9" height="26" rx="4.5" fill="${Z.fur}" transform="rotate(28 28 20)"/>` }, Z)),
+    nope: () => bg('no', '#ff5468', '#9c1235') + rays(60, 50, 70, 10, '#fff', .16) + halo(60, 50, 44, '#fff', .18) +
+      stopSign(60, 50, 1) + `<text x="60" y="60" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="26" fill="#fff">NOP</text>` +
+      cat({ x: 18, y: 84, s: .5, rot: -14, fur: '#f1e6d2', ear: '#ff9fbf', eyes: 'closed', mouth: 'flat', line: '#3a2a2a', body: false, tail: false }),
+    skip: () => bg('sk', '#39b8ff', '#2a4fd6') + stripes('sk', '#fff', .15) + halo(60, 48, 40, '#fff', .25) +
+      `<path d="M10 80 q50 -80 96 -6" stroke="#fff" stroke-width="4" stroke-dasharray="6 8" fill="none" stroke-linecap="round"/><path d="M106 74 l-18 -4 l6 14 z" fill="#fff"/>` +
+      cat({ x: 62, y: 52, s: 1.05, rot: 28, fur: '#ffb13d', ear: '#ff6f91', eyes: 'closed', line: '#5a2a00' }),
+    super_skip: () => bg('ss', '#7b3cff', '#28106e') + rays(60, 50, 70, 10, '#ffe66b', .18) + halo(66, 50, 40, '#ffe66b', .22) +
+      `<g stroke="#ffe66b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M6 26 l16 12 -16 12"/><path d="M24 26 l16 12 -16 12"/><path d="M42 26 l16 12 -16 12"/></g>` +
+      cat({ x: 78, y: 54, s: 1.05, rot: 40, fur: '#ffb13d', ear: '#ff6f91', eyes: 'angry', eye: '#fff', line: '#5a2a00', tail: false, under: `<path d="M-14 6 q-34 30 -8 62 q10 -14 22 -8 q8 -14 22 -8 q2 -34 -22 -46 z" fill="#e11d2e"/>` }),
+    see_future: () => bg('sf', '#b34cff', '#3c1273') + dots('sf', '#ffd6ff', .25) + halo(60, 52, 42, '#8ff2ff', .3) +
+      `<circle cx="60" cy="52" r="38" fill="#c9f8ff" opacity=".55" stroke="#e9fdff" stroke-width="3"/>` +
+      mini(44, 56, -18, '#ffe14a') + mini(76, 56, 18, '#7ee06a') + mini(60, 54, 0, '#fff', `<text y="7" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="18" fill="#3c1273">?</text>`) +
+      `<path d="M34 94 q26 -14 52 0 z" fill="#ffc93a"/><rect x="40" y="84" width="40" height="8" rx="4" fill="#e0a21c"/>` +
+      cat({ x: 16, y: 82, s: .42, rot: -16, fur: '#2b2342', body: false, tail: false }) + cat({ x: 104, y: 82, s: .42, rot: 16, fur: '#2b2342', body: false, tail: false }),
+    shuffle: () => bg('sh', '#22d3b4', '#0c6b7a') + stripes('sh', '#fff', .15) + halo(60, 50, 42, '#fff', .25) +
+      fan(60, 52, '#ffe14a', '#ff7fb0', '#fff') +
+      `<g fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"><path d="M16 14 q44 -18 88 0"/><path d="M104 88 q-44 18 -88 0"/></g><path d="M106 8 l0 16 -14 -8 z M14 94 l0 -16 14 8 z" fill="#fff"/>`,
+    feed_dead: () => bg('fd', '#c9d64a', '#5d7a1c') + dots('fd', '#fff', .22) + halo(44, 52, 38, '#86c440', .3) +
+      cat(Object.assign({ x: 42, y: 54, s: 1.1, eyeL: 'wide', eyeR: 'x', mouth: 'open', extra: stitch }, Z)) +
+      bigBone(84, 54, .85, -24),
+    clone: () => bg('cl', '#5fe0ff', '#1d6fb8') + rays(60, 50, 70, 10, '#fff', .16) + halo(60, 50, 44, '#fff', .2) +
+      `<path d="M60 4 v92" stroke="#fff" stroke-width="3" stroke-dasharray="8 8" opacity=".8"/><g fill="#fff"><circle cx="60" cy="18" r="4"/><circle cx="60" cy="50" r="4"/><circle cx="60" cy="82" r="4"/></g>` +
+      cat({ x: 30, y: 54, s: .95, fur: '#ff8a3d', ear: '#ffd0a8', line: '#5a2a00' }) +
+      `<g opacity=".85">` + cat({ x: 90, y: 54, s: .95, fur: '#39e6c9', ear: '#bafff2', eye: '#fff', line: '#0c4d57', nose: '#0c6b7a' }) + `</g>`,
+    grave_robber: () => bg('gr', '#3a3a6e', '#17152e') + dots('gr', '#9fe8ff', .2) + halo(40, 52, 38, '#cfd4e6', .2) +
+      ground(80, '#2e2a1e') +
+      cat({ x: 40, y: 54, s: 1.1, fur: '#2b2342', eyes: 'slit', eye: '#fff', extra: `<path d="M-28 -8 h56 v9 q-14 6 -28 0 q-14 6 -28 0 z" fill="#0d0b14" opacity=".92"/>` + eye(-11, 'slit', '#ffe14a') + eye(11, 'slit', '#ffe14a') }) +
+      bigShovel(100, 44, 1, 28),
+    favor: () => bg('fa', '#ff9fd0', '#e0457e') + rays(60, 46, 70, 10, '#fff', .18) + halo(60, 46, 40, '#fff', .3) +
+      bigHeart(64, 42, 1.15) +
+      cat({ x: 20, y: 86, s: .55, rot: -12, fur: '#fff5e6', ear: '#ff9fbf', eyes: 'big', mouth: 'sad', line: '#5a3a3a', body: false, tail: false }),
+    dig_deeper: () => bg('dd', '#ffcf6b', '#e0862e') + stripes('dd', '#6b4226', .16) + `<rect y="52" width="120" height="48" fill="#6b4226"/><path d="M0 52 q30 -6 60 0 t60 0 v6 h-120 z" fill="#58a83a"/>` +
+      halo(52, 66, 34, '#ffe14a', .3) +
+      `<g transform="translate(48 70) scale(1.5)">` + mini(0, 0, -10, '#fff', `<text y="7" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="18" fill="#6b4226">1</text>`) + `</g>` +
+      `<g transform="translate(76 78) scale(1.5)">` + mini(0, 0, 10, '#ffe14a', `<text y="7" text-anchor="middle" font-family="Bangers,Impact,sans-serif" font-size="18" fill="#6b4226">2</text>`) + `</g>` +
+      bigShovel(100, 44, 1, 28) +
+      cat({ x: 22, y: 28, s: .55, rot: -18, fur: '#2b2342', body: false, tail: false }),
+    clairvoyance: () => bg('cv', '#2747c9', '#0b1247') + dots('cv', '#9fe8ff', .25) + halo(60, 48, 42, '#49e0e6', .25) +
+      bigEye(60, 46, 104, 52, 20) +
+      `<path d="M40 68 l20 10 l20 -10" stroke="#9fe8ff" stroke-width="2.5" fill="none" stroke-dasharray="3 5" stroke-linecap="round"/>` + bomb(60, 88, .7),
+    cat_a: () => bg('ca', '#ffe7a3', '#e0a84a') + stripes('ca', '#c98a2e', .2) + halo(60, 52, 42, '#fff', .3) +
+      cat({ x: 60, y: 54, s: 1.25, fur: '#efe6cf', ear: '#d9c9a3', eyeL: 'slit', eyeR: 'slit', eye: '#7ee06a', nose: '#b89f6e', line: '#6b5a36', mouth: 'flat',
+        extra: `<g stroke="#b8a878" stroke-width="5" fill="none" opacity=".9"><path d="M-28 -6 q28 -10 56 0 M-28 6 q28 8 56 0 M-28 18 q28 8 56 0 M-24 -16 q24 -6 48 0" stroke="#b8a878" stroke-width="5" fill="none" opacity=".9"/></g>` }),
+    cat_b: () => bg('cb', '#8a1f4f', '#2a0a2e') + rays(60, 50, 70, 10, '#ff4d5e', .16) + halo(60, 52, 42, '#c2182b', .3) +
+      `<path d="M10 16 q8 -10 16 0 q6 -6 12 0 q-4 4 -8 8 q-4 -6 -8 -4 q-6 -2 -12 -4 z" fill="#17131f"/>` +
+      `<path d="M22 18 q38 -16 76 0 q10 40 -6 66 q-4 -26 -14 -34 q-6 18 -18 24 q-12 -6 -18 -24 q-10 8 -14 34 q-16 -26 -6 -66 z" fill="#c2182b"/>` +
+      cat({ x: 60, y: 54, s: 1.15, fur: '#2b2342', ear: '#e11d2e', eye: '#ff4d5e', mouth: 'fangs' }),
+    cat_c: () => bg('cc', '#6b7cff', '#2a2a7a') + dots('cc', '#fff', .22) + moon(100, 16, 14) + halo(60, 54, 42, '#fff', .28) +
+      `<g transform="translate(60 54)"><ellipse cx="0" cy="42" rx="30" ry="5" fill="#000" opacity=".3"/><path d="M-34 36 v-38 a34 32 0 0 1 68 0 v36 q-5.5 -10 -11 0 q-5.5 10 -11 0 q-5.5 -10 -11 0 q-5.5 10 -11 0 q-5.5 -10 -11 0 q-5.5 -10 -12 0 z" fill="#f4f7ff"/><path d="M-34 36 v-38 a34 32 0 0 1 10 -22 v54 q-5 -5 -10 6 z" fill="#c9d2ff" opacity=".7"/><ellipse cx="-12" cy="-4" rx="7" ry="9" fill="#1b1b4a"/><ellipse cx="12" cy="-4" rx="7" ry="9" fill="#1b1b4a"/><circle cx="-14" cy="-6" r="2.5" fill="#fff"/><circle cx="10" cy="-6" r="2.5" fill="#fff"/><path d="M-4 8 h8 l-4 5 z" fill="#ff86b3"/><ellipse cx="0" cy="18" rx="5" ry="6" fill="#1b1b4a"/><ellipse cx="-23" cy="8" rx="5" ry="3" fill="#ff9fbf" opacity=".6"/><ellipse cx="23" cy="8" rx="5" ry="3" fill="#ff9fbf" opacity=".6"/></g>`,
+    cat_d: () => bg('cd', '#3b3b4f', '#111118') + stripes('cd', '#7ee06a', .12) + halo(60, 52, 42, '#7ee06a', .22) +
+      cat({ x: 60, y: 52, s: 1.25, fur: '#f1efe6', ear: '#17131f', nose: '#17131f', line: '#17131f', eyes: 'none', mouth: 'none',
+        extra: `<ellipse cx="-11" cy="-2" rx="9" ry="10" fill="#17131f"/><ellipse cx="11" cy="-2" rx="9" ry="10" fill="#17131f"/><circle cx="-11" cy="-1" r="3.4" fill="#7ee06a"/><circle cx="11" cy="-1" r="3.4" fill="#7ee06a"/><path d="M-10 16 h20 M-7 13 v7 M-2 13 v7 M3 13 v7 M8 13 v7" stroke="#17131f" stroke-width="2.4" stroke-linecap="round"/><g stroke="#17131f" stroke-width="4" stroke-linecap="round" fill="none"><path d="M0 26 v22 M-14 30 q14 6 28 0 M-15 38 q15 6 30 0 M-14 46 q14 6 28 0"/></g>` }),
     back: () => `<defs><linearGradient id="gbk" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a1f7a"/><stop offset="1" stop-color="#1b0f3d"/></linearGradient><pattern id="pbk" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(30)"><circle cx="8" cy="8" r="1.600" fill="#9be22d" opacity=".22"/></pattern></defs><rect width="100" height="140" rx="10" fill="url(#gbk)"/><rect width="100" height="140" rx="10" fill="url(#pbk)"/><rect x="6" y="6" width="88" height="128" rx="7" fill="none" stroke="#9be22d" stroke-width="2" opacity=".7"/>` +
       `<g transform="translate(50 72)" fill="#9be22d"><ellipse cx="0" cy="10" rx="17" ry="14"/><ellipse cx="-19" cy="-9" rx="6.500" ry="9" transform="rotate(-22 -19 -9)"/><ellipse cx="-7" cy="-19" rx="6.500" ry="9.500" transform="rotate(-6 -7 -19)"/><ellipse cx="7" cy="-19" rx="6.500" ry="9.500" transform="rotate(6 7 -19)"/><ellipse cx="19" cy="-9" rx="6.500" ry="9" transform="rotate(22 19 -9)"/></g><path d="M42 80 l5 5 M47 80 l-5 5 M53 80 l5 5 M58 80 l-5 5" stroke="#1b0f3d" stroke-width="2.200" stroke-linecap="round"/>`,
   };
