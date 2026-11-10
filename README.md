@@ -28,12 +28,13 @@ Android (*Un jugador contra la IA*), y en las salas en red el anfitrión puede t
 
 La carpeta `godot/` es la reescritura del juego en Godot 4 con mesa 3D. Hoy contiene solo la base:
 escena de mesa con cartas de prueba, modelos hechos con Blender y exportación a Android.
-Las reglas, la IA y el multijugador siguen estando solo en la versión web/Android original.
+Las reglas y la IA ya están portadas a GDScript y verificadas contra el motor original, pero todavía no están conectadas a la mesa: aún no se puede jugar una partida en Godot.
 
 - Modelos 3D: `Blender --background --python tools/blender/build_models.py`
 - Ilustraciones 3D de las cartas: `Blender --background --python tools/blender/render_card_art.py` (opcional: `-- zombie nope` para solo algunas)
 - Caras de las cartas (ilustración + marco): `node tools/godot/build-card-textures.js`
 - Exportar APK: `godot --headless --path godot --export-debug Android ../dist/ZombieKittensGodot.apk`
+- Pruebas de reglas e IA: `godot --headless --path godot -s tests/run_tests.gd` (las partidas de referencia se regeneran con `node tools/godot/gen-traces.js`)
 
 ## Estructura
 
