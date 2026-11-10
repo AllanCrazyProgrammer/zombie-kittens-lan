@@ -10,6 +10,11 @@ signal server_lost
 
 const PORT := 8766
 const DISCOVERY_PORT := 8767
+## Puerto donde el anfitrión responde a quien pregunta directamente "¿hay sala?" (por si la red o el
+## teléfono filtran los avisos por difusión)
+const PROBE_PORT := 8768
+const PROBE := "zk?"
+const PROBE_EVERY := 2.0
 const BEACON_EVERY := 1.0
 const ROOM_TTL_MS := 3500
 
@@ -20,6 +25,9 @@ var _beacon_info: Callable
 var _beacon_t := 0.0
 var _beacon_id := ""
 var _listener: PacketPeerUDP
+var _probe_t := 0.0
+## Solo para pruebas: desactiva los avisos por difusión para comprobar la búsqueda directa
+var broadcast_enabled := true
 
 
 func _ready() -> void:
@@ -87,6 +95,7 @@ func local_ips() -> Array:
 func start_beacon(info: Callable) -> void:
 	stop_beacon()
 	_beacon = PacketPeerUDP.new()
+	_beacon.bind(PROBE_PORT)      # si falla (puerto ocupado) solo se pierde la respuesta directa
 	_beacon.set_broadcast_enabled(true)
 	_beacon_info = info
 	_beacon_id = "%x" % randi()
@@ -102,6 +111,7 @@ func stop_beacon() -> void:
 func start_listening() -> bool:
 	stop_listening()
 	rooms = {}
+	_probe_t = PROBE_EVERY
 	_listener = PacketPeerUDP.new()
 	if _listener.bind(DISCOVERY_PORT) != OK:
 		_listener = null
@@ -121,14 +131,20 @@ func stop_listening() -> void:
 
 func _process(delta: float) -> void:
 	if _beacon:
+		var info: Dictionary = _beacon_info.call()
+		info["zk"] = 1
+		info["id"] = _beacon_id
+		info["port"] = PORT
+		var data := JSON.stringify(info).to_utf8_buffer()
+		# Responde a quien pregunta directamente
+		while _beacon.get_available_packet_count() > 0:
+			var q := _beacon.get_packet()
+			if q.get_string_from_utf8() == PROBE:
+				_beacon.set_dest_address(_beacon.get_packet_ip(), _beacon.get_packet_port())
+				_beacon.put_packet(data)
 		_beacon_t += delta
-		if _beacon_t >= BEACON_EVERY:
+		if _beacon_t >= BEACON_EVERY and broadcast_enabled:
 			_beacon_t = 0.0
-			var info: Dictionary = _beacon_info.call()
-			info["zk"] = 1
-			info["id"] = _beacon_id
-			info["port"] = PORT
-			var data := JSON.stringify(info).to_utf8_buffer()
 			# Difusión general + la de cada subred (algunos routers solo dejan pasar esta última)
 			var targets := {"255.255.255.255": true, "127.0.0.1": true}
 			for ip: String in local_ips():
@@ -138,6 +154,22 @@ func _process(delta: float) -> void:
 				_beacon.set_dest_address(t, DISCOVERY_PORT)
 				_beacon.put_packet(data)
 	if _listener:
+		# Además de escuchar avisos, pregunta una por una a las direcciones de la red local
+		_probe_t += delta
+		if _probe_t >= PROBE_EVERY:
+			_probe_t = 0.0
+			var probe := PROBE.to_utf8_buffer()
+			var mine := local_ips()
+			var targets := ["127.0.0.1"]
+			for ip: String in mine:
+				var parts := ip.split(".")
+				for n in range(1, 255):
+					var t := "%s.%s.%s.%d" % [parts[0], parts[1], parts[2], n]
+					if t != ip:
+						targets.append(t)
+			for t: String in targets:
+				_listener.set_dest_address(t, PROBE_PORT)
+				_listener.put_packet(probe)
 		while _listener.get_available_packet_count() > 0:
 			var raw := _listener.get_packet()
 			var ip := _listener.get_packet_ip()
