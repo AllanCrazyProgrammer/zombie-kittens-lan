@@ -91,6 +91,8 @@ const PLAY_ZONE_CENTER := Vector3(0, 0, -0.25)
 const PLAY_ZONE_RADIUS := 1.25
 const CARRY_HEIGHT := 0.32
 var _toasts: VBoxContainer
+var _discard_list: DiscardList   # ventana «Descarte» abierta (UX-03)
+var _named_grid: CardPickGrid    # cuadrícula del trío abierta (UX-04)
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -228,6 +230,8 @@ func _refresh() -> void:
 		_give_sel = ""
 	if _modal.get("type", "") in ["target", "named"] and _sel.is_empty():
 		_modal = {}
+	if _modal.get("type", "") == "discard" and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
+		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
 	_sync_seats()
 	_process_events()
 	_sync_deck()
@@ -285,7 +289,7 @@ func _sync_deck() -> void:
 
 
 func _sorted_hand() -> Array:
-	var order: Array = CardDB.types()
+	var order: Array = CardDB.types_for(_v.get("packs", []))   # base + cartas de los packs de la partida
 	var hand: Array = _v.hand.duplicate()
 	hand.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		var ia := order.find(a.type)
@@ -362,6 +366,7 @@ func _sync_discard() -> void:
 			# Jugada de un rival: la carta llega desde el otro lado de la mesa
 			n = Card3D.new().setup(d.type, true)
 			n.card_id = d.id
+			n.tapped.connect(_on_card_tapped)
 			add_child(n)
 			n.position = _pos_of(d.by) + Vector3(0, 0.25, 0)
 			n.scale = Vector3.ONE * 0.5
@@ -832,6 +837,11 @@ func _drop_carry() -> void:
 
 
 func _on_card_tapped(card: Card3D) -> void:
+	# Tocar la pila de descarte abre la lista (no si se está llevando una carta ni con otra ventana abierta)
+	if _discard_nodes.get(card.card_id) == card:
+		if _carry == "" and not _dragging and _modal.is_empty() and _modal_root.get_child_count() == 0 and _v.over == null:
+			_open_discard()
+		return
 	if not _hand.has(card.card_id) or _v.over != null:
 		return
 	var id := card.card_id
@@ -1214,6 +1224,9 @@ func _build_selection_info() -> void:
 		can = _v.playable.has(c.id)
 		if not can:
 			desc += "\n→ " + _why_not(c)
+		if c.type == "clone":
+			var ch := CloneHint.describe(_v)
+			desc += "\n" + str(ch.text)
 	else:
 		var cs := _combo_state()
 		title = "Pareja" if cards.size() == 2 else "Trío"
@@ -1290,7 +1303,10 @@ static func _ins_label(pos: int, max_pos: int) -> String:
 
 
 func _build_modal() -> void:
+	var keep_scroll := _discard_list.scroll_value() if is_instance_valid(_discard_list) else 0   # la lista conserva su posición al reconstruirse
 	_clear(_modal_root)
+	_discard_list = null
+	_named_grid = null
 	_modal_title = ""
 	var v := _v
 	if _fx_running and (v.over != null or (v.prompt != null and v.prompt.mine and v.prompt.type == "explode")):
@@ -1328,17 +1344,12 @@ func _build_modal() -> void:
 		"named":
 			var box := _open_modal("¿Qué carta quieres?")
 			_text(box, "Si %s la tiene, te la da." % _pname(_modal.target))
-			var grid := GridContainer.new()
-			grid.columns = 2
-			grid.add_theme_constant_override("h_separation", 12)
-			grid.add_theme_constant_override("v_separation", 12)
-			box.add_child(grid)
+			var types: Array = v.get("deckTypes", CardDB.types_for(v.get("packs", [])))
+			types = types.filter(func(t: String) -> bool: return t != "exploding")
 			var target: String = _modal.target
-			for t: String in CardDB.types():
-				if t == "exploding":
-					continue
-				var type := t
-				_add_btn(grid, CardDB.display_name(t), "normal", func() -> void: _play_selected(target, type), 32)
+			_named_grid = CardPickGrid.new().setup(types, get_viewport().get_visible_rect().size.y * 0.5)
+			_named_grid.picked.connect(func(type: String) -> void: _play_selected(target, type))
+			box.add_child(_named_grid)
 			_add_btn(box, "Cancelar", "ghost", _close_modal)
 		"future":
 			var box := _open_modal("El futuro (solo tú lo ves)")
@@ -1363,6 +1374,12 @@ func _build_modal() -> void:
 			_add_btn(box, "Entendido", "primary", _close_modal)
 		"history":
 			_build_history(_open_modal("Historial"))
+		"discard":
+			var box := _open_modal("Descarte")
+			_text(box, "Las cartas jugadas, la más reciente arriba.", 28, UIKit.C.dim)
+			_discard_list = DiscardList.new().setup(v, get_viewport().get_visible_rect().size.y * 0.5, keep_scroll)
+			box.add_child(_discard_list)
+			_add_btn(box, "Cerrar", "primary", _close_modal)
 		"menu":
 			var box := _open_modal("Menú")
 			_add_btn(box, "Seguir jugando", "primary", _close_modal)
@@ -1513,6 +1530,11 @@ func _record(e: Dictionary) -> void:
 		_history.pop_front()
 
 
+func _open_discard() -> void:
+	_modal = {"type": "discard"}
+	_update_hud()
+
+
 func _open_history() -> void:
 	_modal = {"type": "history"}
 	_update_hud()
@@ -1551,6 +1573,68 @@ func _build_history(box: VBoxContainer) -> void:
 ## Para la prueba automática.
 func debug_history_size() -> int:
 	return _history.size()
+
+
+## Para la prueba automática: la carta de arriba de la pila de descarte (para tocarla).
+func debug_discard_top() -> Card3D:
+	var all: Array = _v.discard
+	return _discard_nodes.get(all.back().id) if not all.is_empty() else null
+
+
+## Ids que lista la ventana «Descarte» (vacío si no está abierta), la más reciente primero.
+func debug_discard_listed() -> Array[String]:
+	return _discard_list.debug_ids() if is_instance_valid(_discard_list) else ([] as Array[String])
+
+
+## Texto «Copiará: …» del primer Clon de la mano ("" si no hay Clon).
+func debug_clone_hint() -> String:
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			return str(CloneHint.describe(_v).text)
+	return ""
+
+
+## Selecciona el primer Clon de la mano y devuelve el texto del panel de selección ("" si no hay Clon).
+func debug_select_clone() -> String:
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			_sel.clear()
+			_sel.append(c.id)
+			_sync_hand()
+			_update_hud()
+			return _info_text()
+	return ""
+
+
+## Texto de todas las etiquetas del panel de selección.
+func _info_text() -> String:
+	var out := ""
+	var stack: Array = [_info_slot]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is Label:
+			out += n.text + "\n"
+		stack.append_array(n.get_children())
+	return out
+
+
+## Abre la cuadrícula del trío contra el primer rival vivo y devuelve los tipos que ofrece.
+func debug_open_named() -> Array[String]:
+	if _sel.is_empty() and not _v.hand.is_empty():
+		_sel.append(_v.hand[0].id)       # la ventana se cierra sola sin selección
+	for p: Dictionary in _v.players:
+		if p.id != _v.you and p.alive:
+			_modal = {"type": "named", "target": p.id}
+			_update_hud()
+			break
+	return _named_grid.debug_types() if is_instance_valid(_named_grid) else ([] as Array[String])
+
+
+## Quita la selección de cartas (prueba).
+func debug_clear_selection() -> void:
+	_sel.clear()
+	_sync_hand()
+	_update_hud()
 
 
 func _close_modal() -> void:

@@ -525,7 +525,9 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 		await _wait(0.5)
 		if (_session as LocalMatch).game.over != null:
 			break
+	var played_id := ""
 	if card:
+		played_id = card.card_id
 		var before: int = (_session as LocalMatch).game.discard.size()
 		await _wait(0.5)
 		var chips_before: int = _game.debug_chip_builds() if plus_mode else 0
@@ -651,6 +653,8 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 		if close:
 			await _tap_control(close)
 			await _wait(0.3)
+	if plus_mode and (_session as LocalMatch).game.over == null:
+		await _ui_test_plus_extras(dir, report, played_id)
 	# Menú → salir
 	var menu := _find_button(self, "MENÚ")
 	if menu and (_session as LocalMatch).game.over == null:
@@ -668,6 +672,50 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 			_say(report, "de vuelta en el menú: %s" % str(_menu != null and _game == null))
 	print("UITEST fin")
 	get_tree().quit()
+
+
+## Comprobaciones de Plus: ventana de descarte (UX-03), texto del Clon (UX-03) y cuadrícula del trío (UX-04).
+func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void:
+	# Texto fijo del Clon: con un Ataque arriba del descarte debe decir «Copiará: Ataque (2x)»
+	var fake := {"discard": [{"id": "x1", "type": "attack", "by": "p0"}], "deadN": 0, "stack": []}
+	var hint: String = CloneHint.describe(fake).text
+	_say(report, "Plus: Clon sobre un Ataque dice «%s» | %s" % [hint, "OK" if hint == "Copiará: Ataque (2x)" else "ERROR"])
+	# Descarte: tocar la pila abre la ventana y lista la carta jugada
+	var top: Card3D = _game.debug_discard_top()
+	if top:
+		await _tap_3d(top)
+		await _wait(0.6)
+		var listed: Array = _game.debug_discard_listed()
+		_say(report, "Plus: descarte abierto tocando la pila: %s | %d cartas listadas | incluye la jugada %s: %s" % [_game.debug_state(), listed.size(), played_id, "OK" if (played_id == "" or listed.has(played_id)) else "ERROR"])
+		await _save_shot(dir + "/t8_descarte.png")
+		var close := _find_button(self, "Cerrar")
+		if close:
+			await _tap_control(close)
+			await _wait(0.3)
+	else:
+		_say(report, "Plus: no había carta en el descarte que tocar")
+	# Clon en la mano: el panel de selección dice qué copiará
+	var info: String = _game.debug_select_clone()
+	if info == "":
+		_say(report, "Plus: no hay Clon en la mano; se prueba solo el texto fijo")
+	else:
+		_say(report, "Plus: panel del Clon: %s | %s" % [info.replace("\n", " / "), "OK" if (info.contains("Copiará:") or info.contains("No cop") or info.contains("No pued")) else "ERROR"])
+		_game.debug_clear_selection()
+	# Trío: la cuadrícula ofrece exactamente los tipos de la partida
+	var offered: Array = _game.debug_open_named()
+	await _wait(0.5)
+	var want: Array = _session.view().get("deckTypes", [])
+	var a: Array = offered.duplicate()
+	var b: Array = want.duplicate()
+	a.sort()
+	b.sort()
+	_say(report, "Plus: cuadrícula del trío ofrece %d tipos, deckTypes %d | %s | sin explosivo: %s" % [offered.size(), want.size(), "OK" if a == b else "ERROR", str(not offered.has("exploding"))])
+	await _save_shot(dir + "/t9_trio.png")
+	var cancel := _find_button(self, "Cancelar")
+	if cancel:
+		await _tap_control(cancel)
+		await _wait(0.3)
+	_game.debug_clear_selection()
 
 
 ## Anota un resultado de la prueba y lo imprime al momento (por si la prueba se corta por tiempo).
