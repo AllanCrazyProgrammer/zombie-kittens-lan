@@ -115,6 +115,7 @@ func _ready() -> void:
 			opts.me_delay = 5200
 		if args.has("--plus"):
 			opts.plus = true
+			opts.packs = ["crypt"]       # la demostración Plus lleva el pack de La Cripta
 		_start_solo(opts)
 	elif args.has("--tutorial"):
 		_start_solo({"rivals": 1, "level": "easy", "deck_mode": "official", "name": "Allan", "tutorial": true, "seed": 4})
@@ -517,6 +518,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
 	var card: Card3D = null
 	for _i in 180:
+		_ui_rescue(plus_mode)
 		if _game.debug_can_draw():
 			card = _game.debug_playable_card()
 			if card:
@@ -564,6 +566,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 		_say(report, "no hubo carta jugable")
 	# Robar tocando el mazo
 	for _i in 120:
+		_ui_rescue(plus_mode)
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
@@ -579,6 +582,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var lm := _session as LocalMatch
 	var carried: Card3D = null
 	for _i in 160:
+		_ui_rescue(plus_mode)
 		if lm.game.over != null:
 			break
 		if _game.debug_can_draw():
@@ -606,6 +610,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 			await _wait(0.3)
 		# Sacarla y regresarla a la mano sin soltar en el centro: no debe jugarse
 		for _i in 120:
+			_ui_rescue(plus_mode)
 			if lm.game.over != null or _game.debug_can_draw():
 				break
 			await _wait(0.5)
@@ -624,6 +629,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 		_say(report, "no hubo carta jugable para llevar al centro")
 	# Arrastrar el dedo por la mano, de la primera a la última carta (cuando la mano está libre, sin ventanas)
 	for _i in 120:
+		_ui_rescue(plus_mode)
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
@@ -717,6 +723,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 		await _wait(0.3)
 	_game.debug_clear_selection()
 	await _ui_test_aim(dir, report)
+	await _ui_test_cripta(dir, report)
 
 
 ## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
@@ -823,6 +830,497 @@ func _ui_test_aim(dir: String, report: Array) -> void:
 			await _tap_control(c3)
 			await _wait(0.3)
 	_game.debug_clear_selection()
+
+
+# ---------------------------------------------------------------- La Cripta (T25 + T32): las 9 cartas, una a una
+
+## Solo prueba Plus: si el jugador murió en la partida de prueba (azar), lo devuelve a la vida para no agotar el tiempo.
+func _ui_rescue(plus_mode: bool) -> void:
+	if not plus_mode or not (_session is LocalMatch):
+		return
+	var g: ZKGame = (_session as LocalMatch).game
+	if g.over == null and g.prompt == null and not g.P("p0").alive:
+		g.P("p0").alive = true
+		_session.updated.emit()
+
+
+## Cierra cualquier ventana que haya quedado abierta. true si no queda ninguna.
+func _cripta_close_windows() -> bool:
+	for _i in 6:
+		var any := false
+		for label: String in ["Entendido", "Cerrar", "Cancelar", "CANCELAR"]:
+			var b := _find_button(self, label)
+			if b:
+				any = true
+				await _tap_control(b)
+				await _wait(0.3)
+		if not any:
+			break
+	return _game.debug_modal_title() == "" and not _game.debug_aim_active()
+
+
+## Espera a que la partida esté libre (sin pila ni decisión) y me devuelve el turno (vivo, un solo turno).
+func _cripta_my_turn(lm: LocalMatch, alive: bool = true, attempt: int = 0) -> bool:
+	if attempt >= 2:
+		# Tras dos jugadas anuladas por Nop seguidas, se quitan los Nop de las manos rivales para poder comprobar el efecto
+		for pl in lm.game.players:
+			if pl.id != "p0":
+				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
+	for _i in 60:
+		if lm.game.over != null:
+			return false
+		if lm.game.stack.is_empty() and lm.game.prompt == null:
+			break
+		await _wait(0.5)
+	lm.game.P("p0").alive = alive
+	lm.game.cur = 0 if alive else 1
+	lm.game.turns_left = 1
+	lm.game.attacked = false
+	lm.game.idle_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.4)
+	return lm.game.over == null
+
+
+var _cripta_n := 0
+
+
+## Coloca una copia de la carta en la mano del jugador (como si la hubiera robado) y devuelve su id.
+func _cripta_give(lm: LocalMatch, type: String) -> String:
+	_cripta_n += 1
+	var c := ZKGame.Card.new("z%d" % _cripta_n, type, false)
+	lm.game.P("p0").hand.append(c)
+	_session.updated.emit()
+	await _wait(0.4)
+	return c.id
+
+
+## Quita de la mano las copias de una carta (tras una jugada anulada, para reintentar con otra limpia).
+func _cripta_drop(lm: LocalMatch, type: String) -> void:
+	lm.game.P("p0").hand = lm.game.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != type)
+
+
+## Selecciona la carta, toca JUGAR y, si pide objetivo, toca el avatar de `target`. Devuelve {played, nopes}.
+func _cripta_play(lm: LocalMatch, type: String, target: String = "") -> Dictionary:
+	var seq0 := lm.game.seq
+	var disc0 := lm.game.discard.size()
+	var out := {"played": false, "nopes": 0}
+	if not _game.debug_select_type(type):
+		return out
+	await _wait(0.4)
+	var btn := _find_button(self, "JUGAR")
+	if btn == null:
+		return out
+	await _tap_control(btn)
+	await _wait(0.4)
+	if target != "":
+		if _game.debug_aim_active():
+			await _tap(get_viewport().get_final_transform() * _game.debug_seat_pos(target))
+			await _wait(0.4)
+		if _game.debug_aim_active():
+			_game.debug_aim_confirm(target)     # el toque no dio en el avatar: se confirma por la ficha
+			await _wait(0.4)
+	out.played = lm.game.discard.size() > disc0 or not lm.game.stack.is_empty()
+	# Espera a que se resuelva (ventana de Nop) o a que aparezca la decisión propia
+	for _i in 40:
+		var pr: Variant = lm.game.prompt
+		if lm.game.stack.is_empty() and (pr == null or pr.type in ["alter", "bury"]):
+			break
+		await _wait(0.5)
+	await _wait(0.6)
+	for e: Dictionary in lm.game.events:
+		if e.seq > seq0 and e.type == "nope":
+			out.nopes += 1
+	return out
+
+
+func _cripta_line(report: Array, card: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/cripta: %s %s | %s" % [card, detail, "OK" if ok else "ERROR"])
+
+
+func _cripta_event(lm: LocalMatch, type: String, seq0: int) -> Dictionary:
+	for e: Dictionary in lm.game.events:
+		if e.seq > seq0 and e.type == type:
+			return e
+	return {}
+
+
+func _cripta_rival(lm: LocalMatch, alive: bool) -> String:
+	for pl in lm.game.players:
+		if pl.id != "p0" and pl.alive == alive and pl.hand.size() > 0:
+			return pl.id
+	return ""
+
+
+func _find_label(n: Node, text: String) -> Label:
+	if n is Label and (n as Label).text == text:
+		return n
+	for c in n.get_children():
+		var r := _find_label(c, text)
+		if r:
+			return r
+	return null
+
+
+func _tree_has_label(n: Node, text: String) -> bool:
+	if n is Label and (n as Label).text == text:
+		return true
+	for c in n.get_children():
+		if _tree_has_label(c, text):
+			return true
+	return false
+
+
+func _ui_test_cripta(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null or not (g.packs as Array).has("crypt"):
+		_say(report, "Plus/cripta: AVISO, partida terminada o sin el pack; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	# Estado de partida limpio: todos vivos (la prueba de puntería mató a p2), sin ventanas
+	for pl in g.players:
+		pl.alive = true
+	await _cripta_my_turn(lm)
+	# --- Motivos de «no se puede jugar»
+	var why_haunt: String = _game.debug_why_not("haunt")
+	_cripta_line(report, "motivos", "| Espanto vivo: «%s»" % why_haunt, why_haunt == "Solo los muertos pueden espantar.")
+	var why_swap: String = _game.debug_why_not("soul_swap")
+	_cripta_line(report, "motivos", "| Trueque sin muertos: «%s»" % why_swap, why_swap == "Necesita un jugador muerto con cartas.")
+	g.cur = 1
+	_session.updated.emit()
+	await _wait(0.3)
+	var why_turn: String = _game.debug_why_not("reverse")
+	_cripta_line(report, "motivos", "| fuera de turno: «%s»" % why_turn, why_turn == "Espera tu turno.")
+	# Espanto estando vivo: el panel lo explica y no hay botón JUGAR
+	await _cripta_my_turn(lm)
+	await _cripta_give(lm, "haunt")
+	_game.debug_select_type("haunt")
+	await _wait(0.4)
+	var panel_txt: String = _game.debug_info_text()
+	_cripta_line(report, "Espanto vivo (panel)", "| «%s» | botón JUGAR: %s" % [panel_txt.replace("\n", " / "), str(_find_button(self, "JUGAR") != null)], panel_txt.contains("Solo los muertos pueden espantar.") and _find_button(self, "JUGAR") == null)
+	_game.debug_clear_selection()
+	_cripta_drop(lm, "haunt")
+
+	# 1. Ataque Dirigido
+	var done := false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var tgt := _cripta_rival(lm, true)
+		await _cripta_give(lm, "targeted_attack")
+		var seq0 := g.seq
+		var r := await _cripta_play(lm, "targeted_attack", tgt)
+		var ev := _cripta_event(lm, "attack", seq0)
+		if not ev.is_empty():
+			_cripta_line(report, "targeted_attack", "contra %s -> evento attack objetivo=%s n=%d%s" % [tgt, str(ev.target), int(ev.n), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ev.target == tgt and int(ev.n) == 2)
+			done = true
+			break
+		_say(report, "Plus/cripta: targeted_attack ANULADA por Nop (%d) o no jugada (%s); se reintenta con otra copia" % [r.nopes, str(r.played)])
+		_cripta_drop(lm, "targeted_attack")
+	if not done:
+		_cripta_line(report, "targeted_attack", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 2. Marcha Atrás
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var dir0: int = g.dir
+		await _cripta_give(lm, "reverse")
+		await _cripta_play(lm, "reverse")
+		if g.dir != dir0:
+			await _wait(0.8)
+			var ds: Dictionary = _game.debug_dir()
+			_cripta_line(report, "reverse", "dir %d -> %d | flecha visible=%s dir=%d | rótulo «%s»%s" % [dir0, g.dir, str(ds.visible), int(ds.dir), str(ds.label), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ds.visible and int(ds.dir) == g.dir and str(ds.label) != "")
+			await _save_shot(dir + "/t12_sentido.png")
+			done = true
+			break
+		_say(report, "Plus/cripta: reverse ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "reverse")
+	if not done:
+		_cripta_line(report, "reverse", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 3. Robar del Fondo
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		if g.draw[0].type == "exploding":      # que el fondo sea seguro: se cambia por otra carta del mazo
+			for i in range(1, g.draw.size()):
+				if g.draw[i].type != "exploding":
+					var tmp: ZKGame.Card = g.draw[0]
+					g.draw[0] = g.draw[i]
+					g.draw[i] = tmp
+					break
+		var bottom: ZKGame.Card = g.draw[0]
+		var n0: int = g.draw.size()
+		await _cripta_give(lm, "draw_bottom")
+		var seq0 := g.seq
+		await _cripta_play(lm, "draw_bottom")
+		var ev := _cripta_event(lm, "draw", seq0)
+		if not ev.is_empty() and ev.get("bottom", false):
+			await _wait(0.8)
+			# Al acabar el turno un bot puede robar enseguida: se comprueba que la carta salió del mazo y está en mi mano
+			var mine: bool = _session.view().hand.any(func(c: Dictionary) -> bool: return c.id == bottom.id)
+			var left_deck: bool = not g.draw.any(func(c: ZKGame.Card) -> bool: return c.id == bottom.id)
+			_cripta_line(report, "draw_bottom", "mazo %d -> %d | la carta del fondo (%s) está en mi mano=%s y ya no está en el mazo=%s | evento draw bottom" % [n0, g.draw.size(), bottom.type, str(mine), str(left_deck)], mine and left_deck and g.draw.size() <= n0 - 1)
+			done = true
+			break
+		_say(report, "Plus/cripta: draw_bottom ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "draw_bottom")
+	if not done:
+		_cripta_line(report, "draw_bottom", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 4. Ojo de Cuervo (+ memoria para el trío)
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var tgt := _cripta_rival(lm, true)
+		var hand_kinds: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.type)
+		await _cripta_give(lm, "crow_eye")
+		var seq0 := g.seq
+		await _cripta_play(lm, "crow_eye", tgt)
+		var ev := _cripta_event(lm, "peek", seq0)
+		if not ev.is_empty():
+			await _wait(0.6)
+			var title: String = _game.debug_modal_title()
+			var grid: CardPickGrid = _game.debug_peek_grid()
+			var shown: int = grid.debug_types().size() if grid else -1
+			var open_ok: bool = title.begins_with("Mano de ") and shown == hand_kinds.size()
+			await _save_shot(dir + "/t13_ojo_de_cuervo.png")
+			var entendido := _find_button(self, "Entendido")
+			if entendido:
+				await _tap_control(entendido)
+				await _wait(0.4)
+			var closed: bool = _game.debug_modal_title() == ""
+			var kn: Dictionary = _game.debug_known(tgt)
+			_cripta_line(report, "crow_eye", "contra %s | ventana «%s» con %d/%d cartas | cerrada=%s | recuerdo=%s" % [tgt, title, shown, hand_kinds.size(), str(closed), str(kn.get("count", -1))], open_ok and closed and int(kn.get("count", -1)) == hand_kinds.size())
+			# UX-04: la cuadrícula del trío contra ese jugador muestra primero «Sabes que tiene»
+			_game.debug_clear_selection()
+			var known: Array = _game.debug_open_named_for(tgt)
+			await _wait(0.5)
+			var want: Array = []
+			for t: String in hand_kinds:
+				if (g.deck_types as Array).has(t) and not want.has(t):
+					want.append(t)
+			var ka: Array = known.duplicate()
+			ka.sort()
+			want.sort()
+			_cripta_line(report, "trío (Sabes que tiene)", "| %d tipos conocidos, esperados %d" % [known.size(), want.size()], ka == want and not known.is_empty())
+			await _save_shot(dir + "/t14_trio_sabes.png")
+			await _cripta_close_windows()
+			_game.debug_clear_selection()
+			done = true
+			break
+		_say(report, "Plus/cripta: crow_eye ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "crow_eye")
+	if not done:
+		_cripta_line(report, "crow_eye", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 5. Apocalipsis Zombi
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var eks0: int = g.draw.filter(func(c: ZKGame.Card) -> bool: return c.type == "exploding").size()
+		await _cripta_give(lm, "apocalypse")
+		var seq0 := g.seq
+		await _cripta_play(lm, "apocalypse")
+		var ev := _cripta_event(lm, "apocalypse", seq0)
+		if not ev.is_empty():
+			var top_ok := true
+			for k in int(ev.n):
+				top_ok = top_ok and g.draw[g.draw.size() - 1 - k].type == "exploding"
+			_cripta_line(report, "apocalypse", "explosivos arriba: %s de %d (evento n=%d)" % [str(top_ok), eks0, int(ev.n)], top_ok and int(ev.n) == eks0)
+			# Para que los bots no mueran todos al instante y la prueba siga: los explosivos vuelven al fondo del mazo
+			var bottom_eks: Array[ZKGame.Card] = []
+			for k in int(ev.n):
+				bottom_eks.append(g.draw.pop_back())
+			for c: ZKGame.Card in bottom_eks:
+				g.draw.insert(0, c)
+			done = true
+			break
+		_say(report, "Plus/cripta: apocalypse ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "apocalypse")
+	if not done:
+		_cripta_line(report, "apocalypse", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 6. Alterar el Futuro: ventana, intercambio arrastrando y tocando, CONFIRMAR
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		await _cripta_give(lm, "alter_future")
+		await _cripta_play(lm, "alter_future")
+		var arr: FutureArranger = _game.debug_arranger()
+		if arr != null and g.prompt != null and g.prompt.type == "alter":
+			var cards: Array = (g.prompt.cards as Array).duplicate()
+			var ids: Array = cards.map(func(c: ZKGame.Card) -> String: return c.id)
+			await _save_shot(dir + "/t15_alterar_futuro.png")
+			# Arrastre real: la primera carta sobre la tercera
+			var vt := get_viewport().get_final_transform()
+			var c0: Vector2 = vt * arr.debug_cell(0).get_global_rect().get_center()
+			var c2: Vector2 = vt * arr.debug_cell(2).get_global_rect().get_center()
+			await _drag(c0, c2, true)
+			await _drag(c2, c2, false)
+			await _wait(0.3)
+			var drag_ok: bool = arr.order() == [2, 1, 0]
+			if not drag_ok:
+				arr.debug_swap(0, 2)           # el arrastre sintético no llegó: se hace por la vía directa
+			# Dos toques reales: primera y segunda carta
+			await _tap(vt * arr.debug_cell(0).get_global_rect().get_center())
+			await _wait(0.2)
+			await _tap(vt * arr.debug_cell(1).get_global_rect().get_center())
+			await _wait(0.3)
+			var tap_ok: bool = arr.order() == [1, 2, 0]
+			var conf := _find_button(self, "CONFIRMAR")
+			if conf:
+				await _tap_control(conf)
+				await _wait(0.8)
+			var want_ids: Array = [ids[1], ids[2], ids[0]]
+			var got_ids: Array = [g.draw[g.draw.size() - 1].id, g.draw[g.draw.size() - 2].id, g.draw[g.draw.size() - 3].id]
+			var stuck: bool = _game.debug_modal_title() != "" or (g.prompt != null and g.prompt.get("player") == "p0")
+			_cripta_line(report, "alter_future", "arrastre real=%s | dos toques=%s | orden final %s (esperado %s) | ventana cerrada=%s" % [str(drag_ok), str(tap_ok), str(got_ids), str(want_ids), str(not stuck)], got_ids == want_ids and not stuck and tap_ok)
+			done = true
+			break
+		_say(report, "Plus/cripta: alter_future ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "alter_future")
+	if not done:
+		_cripta_line(report, "alter_future", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 7. Entierro
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var n0: int = g.draw.size()
+		await _cripta_give(lm, "bury")
+		var seq0 := g.seq
+		await _cripta_play(lm, "bury")
+		var pk: DeckSlotPicker = _game.debug_slot_picker()
+		if pk != null and g.prompt != null and g.prompt.type == "bury":
+			var cid: String = g.prompt.card.id
+			pk.debug_set(3)
+			await _wait(0.3)
+			await _save_shot(dir + "/t16_entierro.png")
+			var phrase: String = pk.debug_text()
+			var conf := _find_button(self, "CONFIRMAR")
+			if conf:
+				await _tap_control(conf)
+				await _wait(0.8)
+			# El turno acaba al enterrar y un bot puede robar enseguida: se comprueba el evento y que la carta esté en el mazo
+			var bev := _cripta_event(lm, "buried", seq0)
+			var in_deck: bool = g.draw.any(func(c: ZKGame.Card) -> bool: return c.id == cid)
+			var stuck: bool = _game.debug_modal_title() != "" or (g.prompt != null and g.prompt.get("player") == "p0")
+			_cripta_line(report, "bury", "mazo %d | evento buried pos=%s len=%s (esperado 3) | la carta (%s) está en el mazo=%s | «%s» | ventana cerrada=%s" % [g.draw.size(), str(bev.get("pos", -1)), str(bev.get("len", -1)), cid, str(in_deck), phrase, str(not stuck)], int(bev.get("pos", -1)) == 3 and in_deck and not stuck)
+			done = true
+			break
+		_say(report, "Plus/cripta: bury ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "bury")
+	if not done:
+		_cripta_line(report, "bury", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 8. Trueque de Almas: p3 muerto con cartas
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var dead_id := "p3"
+		g.P(dead_id).alive = false
+		if g.P(dead_id).hand.size() < 3:
+			for k in 3:
+				_cripta_n += 1
+				g.P(dead_id).hand.append(ZKGame.Card.new("z%d" % _cripta_n, "favor", false))
+		_session.updated.emit()
+		await _wait(0.3)
+		await _cripta_give(lm, "soul_swap")
+		var theirs: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+		var mine_after: Array = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "soul_swap").map(func(c: ZKGame.Card) -> String: return c.id)
+		var seq0 := g.seq
+		await _cripta_play(lm, "soul_swap", dead_id)
+		var ev := _cripta_event(lm, "swap", seq0)
+		if not ev.is_empty():
+			await _wait(0.8)
+			var my_ids: Array = g.P("p0").hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var view_ids: Array = _session.view().hand.map(func(c: Dictionary) -> String: return c.id)
+			var their_ids: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var a: Array = my_ids.duplicate()
+			var b: Array = theirs.duplicate()
+			a.sort()
+			b.sort()
+			var c1: Array = their_ids.duplicate()
+			var c2: Array = mine_after.duplicate()
+			c1.sort()
+			c2.sort()
+			_cripta_line(report, "soul_swap", "con %s muerto | mi mano %d cartas = la suya de antes=%s | la suya = la mía de antes=%s | vista=%d cartas" % [dead_id, my_ids.size(), str(a == b), str(c1 == c2), view_ids.size()], a == b and c1 == c2 and view_ids.size() == my_ids.size())
+			done = true
+			break
+		_say(report, "Plus/cripta: soul_swap ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "soul_swap")
+	if not done:
+		_cripta_line(report, "soul_swap", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 9. Espanto: yo muerto contra un vivo con cartas
+	done = false
+	for attempt in 4:
+		await _cripta_my_turn(lm, false, attempt)
+		var tgt := _cripta_rival(lm, true)
+		if tgt == "":
+			break
+		var n_before: int = g.P(tgt).hand.size()
+		var kinds_before: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.type)
+		var ids_before: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+		await _cripta_give(lm, "haunt")
+		var seq0 := g.seq
+		await _cripta_play(lm, "haunt", tgt)
+		var ev := _cripta_event(lm, "haunt", seq0)
+		if not ev.is_empty():
+			await _wait(0.8)
+			# El turno de la víctima sigue (un bot puede robar o jugar): se comprueba que esa carta salió de su mano al descarte
+			# La mano de la víctima puede haber cambiado entre la foto previa y la resolución (ventana de Nop): la carta
+			# espantada se identifica por estar en el descarte a nombre de la víctima y no por la foto previa.
+			var hand_ids: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var in_discard: bool = g.discard.any(func(d: Dictionary) -> bool: return d.by == tgt and d.card.type == ev.card and not hand_ids.has(d.card.id))
+			var still_in_hand: bool = not in_discard
+			_cripta_line(report, "haunt", "muerto, contra %s | descarta %s (estaba en su mano antes de jugar=%s) | está en el descarte atribuida a la víctima=%s | sigue en su mano=%s" % [tgt, str(ev.card), str(kinds_before.has(ev.card)), str(in_discard), str(still_in_hand)], in_discard)
+			done = true
+			break
+		_say(report, "Plus/cripta: haunt ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "haunt")
+	if not done:
+		_cripta_line(report, "haunt", "no se pudo resolver tras 3 intentos", false)
+	g.P("p0").alive = true
+	# Guía de cartas con el pack
+	var info := InfoScreen.open(self, "cards", ["crypt"])
+	await _wait(0.5)
+	var has_head := _tree_has_label(info, "La Cripta")
+	var plain := InfoScreen.open(self, "cards")
+	await _wait(0.3)
+	var plain_head := _tree_has_label(plain, "La Cripta")
+	plain.queue_free()
+	await _wait(0.2)
+	var sc := info.find_children("*", "ScrollContainer", true, false)
+	if not sc.is_empty():
+		(sc[0] as ScrollContainer).scroll_vertical = 100000      # al final: ahí está la sección del pack
+		await _wait(0.5)
+		await _save_shot(dir + "/t17_guia_cripta.png")
+		var head_label := _find_label(info, "La Cripta")
+		if head_label:
+			(sc[0] as ScrollContainer).ensure_control_visible(head_label)
+			(sc[0] as ScrollContainer).scroll_vertical = maxi(0, (sc[0] as ScrollContainer).scroll_vertical - 40)
+		await _wait(0.5)
+		await _save_shot(dir + "/t18_guia_cripta_inicio.png")
+	_cripta_line(report, "guía", "| con el pack: sección «La Cripta»=%s | sin pack: %s" % [str(has_head), str(plain_head)], has_head and not plain_head)
+	info.queue_free()
+	await _wait(0.3)
+	# Nada atascado
+	var clean := await _cripta_close_windows()
+	_cripta_line(report, "final", "| sin ventanas abiertas=%s (ventana «%s», puntería=%s), decisión pendiente=%s" % [str(clean), _game.debug_modal_title(), str(_game.debug_aim_active()), str(g.prompt != null)], clean and (g.prompt == null or g.prompt.player != "p0"))
+	g.P("p0").alive = true
+	_session.updated.emit()
 
 
 ## Anota un resultado de la prueba y lo imprime al momento (por si la prueba se corta por tiempo).

@@ -101,6 +101,16 @@ var _aim_kind := ""              # tipo de objetivo que se está eligiendo ("" =
 var _aim_forced := false         # solo prueba: modo puntería sin jugada detrás
 var _aim_debug_pick := ""        # solo prueba: último rival elegido en un modo forzado
 var _last_play := {}             # última jugada enviada sin error (prueba)
+# --- La Cripta
+var _known_hands := {}           # id del rival -> {cards: [tipos], count: n}: lo visto con Ojo de Cuervo (UX-04)
+var _alter_order: Array = []     # orden elegido en la ventana de Alterar el Futuro (se conserva al reconstruirla)
+var _alter_live := false         # tengo una decisión «alter» abierta (para no abrir «El futuro» al confirmarla)
+var _arranger: FutureArranger    # ventana de Alterar el Futuro abierta
+var _slot_picker: DeckSlotPicker # selector de posición abierto (esconder el explosivo / Entierro)
+var _peek_grid: CardPickGrid     # ventana de Ojo de Cuervo abierta
+var _bottom_draw := false        # el próximo robo sale de DEBAJO del mazo
+var _dir_ring: DirIndicator      # flecha de sentido de juego sobre el tapete (V-06)
+var _dir_label: Label            # rótulo «sentido» bajo las fichas de los rivales
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -152,6 +162,9 @@ func _ready() -> void:
 	add_child(_drop_ring)
 	_aim = AimMode.new()
 	add_child(_aim)
+	_dir_ring = DirIndicator.new()
+	_dir_ring.position = Vector3(0, 0.016, -0.2)
+	add_child(_dir_ring)
 	_build_hud()
 	_opps.chip_pressed.connect(_aim_pick)
 	session.updated.connect(_refresh)
@@ -250,6 +263,9 @@ func _refresh() -> void:
 	_sync_deck()
 	_sync_hand()
 	_sync_discard()
+	_sync_dir()
+	var pr0: Variant = _v.prompt
+	_alter_live = pr0 != null and pr0.mine and pr0.type == "alter"
 	_update_hud()
 
 
@@ -285,6 +301,11 @@ func _deck_top() -> Vector3:
 	return DECK_POS + Vector3(0, 0.03 + _deck_cards.size() * 0.007, 0)
 
 
+## Punto de donde sale una carta robada del FONDO: de debajo del mazo, asomando por un lado.
+func _deck_bottom_out() -> Vector3:
+	return DECK_POS + Vector3(0.1, 0.004, 0.07)
+
+
 func _sync_deck() -> void:
 	var want := clampi(_v.draw, 0, 14)
 	while _deck_cards.size() > want:
@@ -299,6 +320,21 @@ func _sync_deck() -> void:
 	_deck_label.text = str(_v.draw)
 	_deck_label.position = _deck_top() + Vector3(0, 0.3, 0)
 	_deck_label.visible = _v.draw > 0
+
+
+## Flecha de sentido (V-06): solo con un pack activo. Refleja `view.dir`.
+func _sync_dir() -> void:
+	var on: bool = not (_v.get("packs", []) as Array).is_empty() and _v.over == null
+	var first := not _dir_ring.visible
+	_dir_ring.visible = on
+	if on:
+		_dir_ring.set_dir(int(_v.get("dir", 1)), not first)
+	if _dir_label != null:
+		_dir_label.visible = on
+		if on:
+			var fwd: bool = int(_v.get("dir", 1)) >= 0
+			_dir_label.text = "Sentido de los turnos →" if fwd else "← Sentido invertido: los turnos van a la izquierda"
+			_dir_label.add_theme_color_override("font_color", UIKit.C.dim if fwd else UIKit.C.gold)
 
 
 func _sorted_hand() -> Array:
@@ -325,9 +361,10 @@ func _sync_hand() -> void:
 			n.card_id = c.id
 			n.tapped.connect(_on_card_tapped)
 			_hand_pivot.add_child(n)
-			n.global_position = _deck_top()
+			n.global_position = _deck_bottom_out() if _bottom_draw else _deck_top()
 			n.scale = Vector3.ONE * 0.6
 			_hand[c.id] = n
+			_bottom_draw = false
 	for id: String in _hand.keys():
 		if ids.has(id):
 			continue
@@ -485,11 +522,28 @@ func _fx_reveal() -> void:
 	add_child(_ek)
 	_ek.position = _deck_top()
 	_ek.scale = Vector3.ONE * HAND_SCALE
+	if _bottom_draw:
+		_ek.position = _deck_bottom_out()
+		_bottom_draw = false
 	Sfx.play("fuse")
 	world.shake(0.3)
 	_ek.fly_to(Vector3(0, 0.95, 0.3), Vector3(deg_to_rad(54.0), 0, 0), 0.45, 1.3)
 	_ek.flip()
 	await get_tree().create_timer(0.95).timeout
+
+
+## Robo del FONDO del mazo: la carta asoma por debajo y sale de ahí (no de arriba).
+func _fx_bottom_draw(player_id: String) -> void:
+	if not _deck_cards.is_empty():
+		var c := _deck_cards[0]
+		var home := c.position
+		var t := c.create_tween()
+		t.tween_property(c, "position", home + Vector3(0.1, 0, 0.07), 0.14)
+		t.tween_property(c, "position", home, 0.2)
+	if player_id == _v.you:
+		_bottom_draw = true
+	else:
+		_ghost(_deck_bottom_out(), _pos_of(player_id))
 
 
 func _fx_die(player_id: String, mine: bool) -> void:
@@ -594,7 +648,9 @@ func _process_events() -> void:
 				Sfx.play("card")
 			"draw":
 				Sfx.play("draw", -3.0)
-				if e.player != me:
+				if e.get("bottom", false):
+					_fx_bottom_draw(e.player)
+				elif e.player != me:
 					_ghost(_deck_top(), _pos_of(e.player))
 			"turn":
 				if e.player == me and _v.over == null:
@@ -616,6 +672,53 @@ func _process_events() -> void:
 			"shuffle":
 				Sfx.play("shuffle")
 				_jiggle_deck()
+			"reverse":
+				Sfx.play("shuffle")
+				Sfx.play("turn", -3.0)
+				world.flash(Color("49e0e6"), 0.25, 0.4)
+				world.shake(0.25)
+				_popup("¡MARCHA ATRÁS!", Color("49e0e6"))
+			"apocalypse":
+				Sfx.play("alarm")
+				Sfx.play("explosion", -6.0, 0.0)
+				world.flash(UIKit.C.red, 0.55, 0.7)
+				world.shake(0.9)
+				Input.vibrate_handheld(200)
+				_jiggle_deck()
+				_popup("¡APOCALIPSIS!", UIKit.C.red)
+				_toast(e.text, true)
+			"swap":
+				Sfx.play("steal")
+				_ghost(_pos_of(e.player), _pos_of(e.target))
+				_ghost(_pos_of(e.target), _pos_of(e.player))
+				world.flash(Color("8a5cff"), 0.2, 0.35)
+				_popup("¡TRUEQUE!", Color("c9a6ff"))
+				_known_hands.erase(e.player)      # lo visto con Ojo de Cuervo ya no vale
+				_known_hands.erase(e.target)
+			"haunt":
+				Sfx.play("steal")
+				Sfx.play("zombie", -7.0)
+				# La carta descartada vuela de la víctima a la pila: lo hace _sync_discard (el descarte lleva `by` = víctima)
+				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
+				world.flash(Color("8a5cff"), 0.2, 0.35)
+				if e.target == me:
+					_popup("¡TE ESPANTAN!", UIKit.C.red)
+					_toast(e.text, true)
+					Input.vibrate_handheld(120)
+				else:
+					_popup("¡ESPANTO!", Color("c9a6ff"))
+			"peek":
+				Sfx.play("draw", -2.0)
+				_known_hands[e.target] = {"cards": (e.cards as Array).duplicate(), "count": (e.cards as Array).size()}
+				_modal = {"type": "peek", "target": e.target, "cards": e.cards}
+			"buried":
+				Sfx.play("card")
+				_jiggle_deck()
+				_toast(e.text)
+			"info":
+				if str(e.get("text", "")).ends_with("mira la mano de %s." % str(_me().get("name", "?"))):
+					Sfx.play("draw", -4.0)
+					_toast(e.text, true)      # a quien miran se le avisa
 			"steal":
 				Sfx.play("steal")
 				_ghost(_pos_of(e.target), _pos_of(e.player))
@@ -649,7 +752,10 @@ func _process_events() -> void:
 				if e.target == me:
 					_popup("¡REVIVISTE!", UIKit.C.toxic)
 			"future":
-				_modal = {"type": "future", "cards": e.cards}
+				if _alter_live:
+					_toast("Nuevo orden: " + ", ".join(PackedStringArray((e.cards as Array).map(func(t: String) -> String: return CardDB.display_name(t)))) + ".")
+				else:
+					_modal = {"type": "future", "cards": e.cards}
 			"clair":
 				_modal = {"type": "clair", "positions": e.positions, "len": e.len}
 			"got", "lost":
@@ -1108,6 +1214,11 @@ func _build_hud() -> void:
 	bar.add_child(hist)
 	_opps = RivalChips.new()
 	tv.add_child(_opps)
+	_dir_label = UIKit.label("", 28, UIKit.C.dim)
+	_dir_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_dir_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dir_label.visible = false
+	tv.add_child(_dir_label)
 	_risk = RiskMeter.new()
 	tv.add_child(_risk)
 	_toasts = UIKit.vbox(8)
@@ -1265,6 +1376,8 @@ func _update_hud() -> void:
 				var title: String = "Favor" if pr.reason == "favor" else ("Alimenta a los Muertos" if pr.reason == "feed" else "Ladrón de Tumbas")
 				_status.text = "%s: esperando carta de %s…" % [title, ", ".join(PackedStringArray(names))]
 			"dig": _status.text = "Cavas más hondo…" if pr.mine else "%s cava más hondo…" % who
+			"alter": _status.text = "Reordenas el futuro…" if pr.mine else "%s reordena el futuro…" % who
+			"bury": _status.text = "Entierras una carta…" if pr.mine else "%s entierra una carta…" % who
 		_status_timer.visible = true
 		_track(_status_timer, pr)
 	else:
@@ -1338,12 +1451,35 @@ func _why_not(c: Dictionary) -> String:
 		return "Úsala cuando alguien juegue una carta."
 	if c.type == "clairvoyance":
 		return "Úsala cuando otro juegue un Gatito Zombi."
+	if c.type == "haunt":
+		if _me().alive:
+			return "Solo los muertos pueden espantar."
+		if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive and p.count > 0):
+			return "Nadie tiene cartas que espantar."
+		if not _idle():
+			return "Espera a que termine la jugada en curso."
+		return "No se puede espantar ahora."
 	if not _me().alive:
 		return "Estás muerto: solo Nop y cartas ⚡."
 	if _v.cur != _v.you:
 		return "Espera tu turno."
 	if c.type in ["attack_dead", "grave_robber", "feed_dead"] and _v.deadN == 0:
 		return "Necesita que haya jugadores muertos."
+	if not _idle():
+		return "Espera a que termine la jugada en curso."
+	match c.type:
+		"soul_swap":
+			if not _v.players.any(func(p: Dictionary) -> bool: return not p.alive and p.count > 0):
+				return "Necesita un jugador muerto con cartas."
+		"targeted_attack":
+			if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive):
+				return "No hay ningún rival vivo al que atacar."
+		"crow_eye":
+			if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.count > 0):
+				return "Nadie más tiene cartas que mirar."
+		"alter_future", "bury", "draw_bottom":
+			if int(_v.draw) == 0:
+				return "El mazo está vacío."
 	return "No se puede jugar ahora."
 
 
@@ -1449,19 +1585,14 @@ func _player_buttons(box: Node, players: Array, fn: Callable) -> void:
 		_add_btn(box, "%s  ·  %d cartas" % ["Yo mismo" if id == _v.you else p.name, p.count], "normal", func() -> void: fn.call(id))
 
 
-static func _ins_label(pos: int, max_pos: int) -> String:
-	if pos <= 0:
-		return "Arriba del todo: será la PRÓXIMA carta"
-	if pos >= max_pos:
-		return "Hasta el fondo del mazo"
-	return "Debajo de %d carta%s (posición %d de %d)" % [pos, "s" if pos > 1 else "", pos + 1, max_pos + 1]
-
-
 func _build_modal() -> void:
 	var keep_scroll := _discard_list.scroll_value() if is_instance_valid(_discard_list) else 0   # la lista conserva su posición al reconstruirse
 	_clear(_modal_root)
 	_discard_list = null
 	_named_grid = null
+	_peek_grid = null
+	_arranger = null
+	_slot_picker = null
 	_modal_title = ""
 	var v := _v
 	if _fx_running and (v.over != null or (v.prompt != null and v.prompt.mine and v.prompt.type == "explode")):
@@ -1481,6 +1612,10 @@ func _build_modal() -> void:
 			_add_btn(box, "Salir de la sala", "ghost", func() -> void: exit_requested.emit())
 		return
 	var pr: Variant = v.prompt
+	if pr == null or not pr.mine or pr.type != "alter":
+		_alter_order = []
+	if pr == null or not (pr.type in ["zombie", "bury"]):
+		_ins = [0, 0]
 	if pr != null and pr.mine:
 		_build_prompt_modal(pr)
 		return
@@ -1502,7 +1637,13 @@ func _build_modal() -> void:
 			var types: Array = v.get("deckTypes", CardDB.types_for(v.get("packs", [])))
 			types = types.filter(func(t: String) -> bool: return t != "exploding")
 			var target: String = _modal.target
-			_named_grid = CardPickGrid.new().setup(types, get_viewport().get_visible_rect().size.y * 0.5)
+			var known: Array = []
+			var kh: Dictionary = _known_hands.get(target, {})
+			if not kh.is_empty() and int(kh.count) == int(_player(target).get("count", -1)):
+				for t: String in kh.cards:
+					if types.has(t) and not known.has(t):
+						known.append(t)        # lo que se vio con Ojo de Cuervo y sigue siendo cierto (UX-04)
+			_named_grid = CardPickGrid.new().setup(types, get_viewport().get_visible_rect().size.y * 0.5, known)
 			_named_grid.picked.connect(func(type: String) -> void: _play_selected(target, type))
 			box.add_child(_named_grid)
 			_add_btn(box, "Cancelar", "ghost", _close_modal)
@@ -1519,6 +1660,13 @@ func _build_modal() -> void:
 				col.add_child(UIKit.card_image(_modal.cards[i], 400))
 				row.add_child(col)
 			_text(box, "Las cartas siguen en el mismo orden en el mazo.", 28, UIKit.C.dim)
+			_add_btn(box, "Entendido", "primary", _close_modal)
+		"peek":
+			var box := _open_modal("Mano de %s" % _pname(_modal.target))
+			var n_seen: int = (_modal.cards as Array).size()
+			_text(box, "Solo tú lo ves. Tiene %d carta%s." % [n_seen, "" if n_seen == 1 else "s"], 30)
+			_peek_grid = CardPickGrid.new().setup(_modal.cards, get_viewport().get_visible_rect().size.y * 0.5)
+			box.add_child(_peek_grid)
 			_add_btn(box, "Entendido", "primary", _close_modal)
 		"clair":
 			var box := _open_modal("Clarividencia")
@@ -1541,7 +1689,7 @@ func _build_modal() -> void:
 			var info := UIKit.hbox(12)
 			box.add_child(info)
 			_add_btn(info, "Cómo jugar", "normal", func() -> void: InfoScreen.open(self, "rules"), 38)
-			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards"), 38)
+			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards", _v.get("packs", [])), 38)
 			var audio := UIKit.hbox(12)
 			box.add_child(audio)
 			_add_btn(audio, "Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34)
@@ -1647,6 +1795,18 @@ func _confirm_insert() -> void:
 	_act({"a": "insert", "positions": pos})
 
 
+func _confirm_alter() -> void:
+	var order: Array = _arranger.order() if is_instance_valid(_arranger) else _alter_order
+	_alter_order = []
+	_act({"a": "reorder", "order": order})
+
+
+func _confirm_bury() -> void:
+	var pos := _ins[0]
+	_ins = [0, 0]
+	_act({"a": "bury", "pos": pos})
+
+
 func _confirm_give() -> void:
 	if _give_sel != "":
 		var cid := _give_sel
@@ -1671,10 +1831,18 @@ func _record(e: Dictionary) -> void:
 			text = "Tu turno" if e.player == _v.you else "Turno de " + _pname(e.player)
 			kind = "turn"
 		"draw":
-			text = "Robas una carta." if e.player == _v.you else "%s roba una carta." % _pname(e.player)
+			var from_bottom: bool = e.get("bottom", false)
+			if e.player == _v.you:
+				text = "Robas la carta del fondo del mazo." if from_bottom else "Robas una carta."
+			else:
+				text = ("%s roba la carta del fondo del mazo." if from_bottom else "%s roba una carta.") % _pname(e.player)
 		"future":
 			var names: Array = e.cards.map(func(t: String) -> String: return CardDB.display_name(t))
-			text = "Viste el futuro: " + ", ".join(PackedStringArray(names)) + "."
+			text = ("Reordenaste el futuro: " if _alter_live else "Viste el futuro: ") + ", ".join(PackedStringArray(names)) + "."
+			kind = "me"
+		"peek":
+			var seen: Array = e.cards.map(func(t: String) -> String: return CardDB.display_name(t))
+			text = "Viste la mano de %s: %s." % [_pname(e.target), ", ".join(PackedStringArray(seen))]
 			kind = "me"
 		_:
 			text = e.get("text", "")
@@ -1862,6 +2030,70 @@ func debug_clear_selection() -> void:
 	_update_hud()
 
 
+# ---------------------------------------------------------------- ayudas de prueba (La Cripta)
+
+## Selecciona la primera carta de ese tipo de la mano (sin tocar la pantalla). false si no hay.
+func debug_select_type(type: String) -> bool:
+	for c: Dictionary in _sorted_hand():
+		if c.type == type:
+			_sel.clear()
+			_sel.append(c.id)
+			_sync_hand()
+			_update_hud()
+			return true
+	return false
+
+
+## Motivo por el que una carta de ese tipo no se podría jugar ahora (`_why_not`).
+func debug_why_not(type: String) -> String:
+	return _why_not({"id": "debug", "type": type})
+
+
+## Título de la ventana abierta ("" si no hay ninguna).
+func debug_modal_title() -> String:
+	return _modal_title
+
+
+func debug_arranger() -> FutureArranger:
+	return _arranger if is_instance_valid(_arranger) else null
+
+
+func debug_slot_picker() -> DeckSlotPicker:
+	return _slot_picker if is_instance_valid(_slot_picker) else null
+
+
+func debug_peek_grid() -> CardPickGrid:
+	return _peek_grid if is_instance_valid(_peek_grid) else null
+
+
+func debug_named_grid() -> CardPickGrid:
+	return _named_grid if is_instance_valid(_named_grid) else null
+
+
+## Lo que se recuerda de la mano de un rival: {cards, count} o {}.
+func debug_known(id: String) -> Dictionary:
+	return _known_hands.get(id, {})
+
+
+## Estado de la flecha de sentido: {visible, dir, label}.
+func debug_dir() -> Dictionary:
+	return {"visible": _dir_ring.visible, "dir": _dir_ring.dir, "label": _dir_label.text if _dir_label.visible else ""}
+
+
+## Abre la cuadrícula del trío contra ese jugador (necesita una selección) y devuelve los tipos de «Sabes que tiene».
+func debug_open_named_for(id: String) -> Array[String]:
+	if _sel.is_empty() and not _v.hand.is_empty():
+		_sel.append(_v.hand[0].id)
+	_modal = {"type": "named", "target": id}
+	_update_hud()
+	return _named_grid.debug_known() if is_instance_valid(_named_grid) else ([] as Array[String])
+
+
+## Confirma un objetivo en modo puntería como si se hubiera tocado su ficha.
+func debug_aim_confirm(id: String) -> void:
+	_aim_pick(id)
+
+
 func _close_modal() -> void:
 	_modal = {}
 	_update_hud()
@@ -1905,26 +2137,10 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 				var max_pos: int = int(v.draw) + i
 				_ins[i] = mini(_ins[i], max_pos)
 				var title := "Explosivo" if pr.eks == 1 else ("Tu explosivo" if i == 0 else "El del jugador revivido")
-				var tl := UIKit.label(title, 42, UIKit.C.gold, true)
-				box.add_child(tl)
-				var row := UIKit.hbox(12)
-				row.add_child(UIKit.label("Arriba", 26, UIKit.C.dim))
-				var slider := UIKit.slider(max_pos, _ins[i])
-				row.add_child(slider)
-				row.add_child(UIKit.label("Fondo", 26, UIKit.C.dim))
-				box.add_child(row)
-				var where := _text(box, _ins_label(_ins[i], max_pos), 30, UIKit.C.ink)
-				var on_slide := func(val: float) -> void:
-					_ins[idx] = int(val)
-					where.text = _ins_label(int(val), max_pos)
-				slider.value_changed.connect(on_slide)
-				var quick := UIKit.hbox(10)
-				box.add_child(quick)
-				for opt: Array in [["Arriba", 0], ["Segunda", 1], ["Al azar", -1], ["Fondo", max_pos]]:
-					var target_pos: int = opt[1]
-					var jump := func() -> void:
-						slider.value = (randi() % (max_pos + 1)) if target_pos < 0 else mini(target_pos, max_pos)
-					_add_btn(quick, opt[0], "normal", jump, 30)
+				var picker := DeckSlotPicker.new().setup(max_pos, _ins[i], title)
+				picker.changed.connect(func(pos: int) -> void: _ins[idx] = pos)
+				box.add_child(picker)
+				_slot_picker = picker
 			var bar := UIKit.timer_bar()
 			box.add_child(bar)
 			_track(bar, pr)
@@ -1957,6 +2173,36 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 			_track(bar, pr)
 			var give := _add_btn(box, "DAR ESTA CARTA", "primary", _confirm_give, 54)
 			give.disabled = _give_sel == ""
+		"alter":
+			var box := _open_modal("Alterar el Futuro")
+			_text(box, "Solo tú lo ves. Arrastra una carta sobre otra o toca dos cartas para intercambiarlas.", 30)
+			var types: Array = pr.cards
+			var order: Array = _alter_order if _alter_order.size() == types.size() else []
+			_arranger = FutureArranger.new().setup(types, 370, order)
+			_arranger.order_changed.connect(func(o: Array) -> void: _alter_order = o)
+			_alter_order = _arranger.order()
+			box.add_child(_arranger)
+			_text(box, "Las etiquetas son fijas: la carta de PRÓXIMA será la siguiente que se robe.", 26, UIKit.C.dim)
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_alter, 54)
+		"bury":
+			var box := _open_modal("Entierro")
+			_text(box, "Robaste esta carta y no entra en tu mano. Entiérrala en secreto donde quieras; tu turno termina.", 30)
+			if pr.card == "exploding":
+				_text(box, "¡Es un Gatito Explosivo! No explota: se entierra igual.", 30, UIKit.C.gold)
+			_centered(box, UIKit.card_image(pr.card, 380))
+			var max_pos: int = int(v.draw)
+			_ins[0] = mini(_ins[0], max_pos)
+			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0])
+			picker.changed.connect(func(pos: int) -> void: _ins[0] = pos)
+			box.add_child(picker)
+			_slot_picker = picker
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_bury, 54)
 		"dig":
 			var box := _open_modal("Cava Más Hondo")
 			_text(box, "Esta es la carta de arriba. ¿Te la quedas? Si no, DEBES robar la siguiente sea cual sea.")

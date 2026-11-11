@@ -19,9 +19,18 @@ const RULES := [
 ]
 
 
-static func open(parent: Node, kind: String) -> InfoScreen:
+const PACK_TITLES := {"crypt": "La Cripta"}
+
+
+## packs: packs de cartas cuyas cartas se añaden a la guía, cada uno bajo su título (p. ej. ["crypt"]).
+## Vacío = solo las 19 cartas de siempre. Si se abre desde el menú con el modo Plus elegido y no se
+## indica nada, se usan los packs que tenga elegidos el menú.
+static func open(parent: Node, kind: String, packs: Array = []) -> InfoScreen:
 	var s := InfoScreen.new()
 	s.set_meta("kind", kind)
+	if packs.is_empty() and parent.get("plus") == true and parent.get("_opts") is Dictionary:
+		packs = (parent.get("_opts") as Dictionary).get("packs", [])
+	s.set_meta("packs", packs.duplicate())
 	parent.add_child(s)
 	return s
 
@@ -85,23 +94,40 @@ func _fill_rules(body: VBoxContainer) -> void:
 
 
 func _fill_cards(body: VBoxContainer) -> void:
+	var packs: Array = get_meta("packs", [])
 	var counts := {"exploding": "4 cartas"}
 	for row: Array in ZKGame.DECK:
 		counts[row[0]] = "%d con huella + %d sin huella" % [row[1], row[2]]
+	for row: Array in ZKGame.DECK_CRYPT:
+		counts[row[0]] = "%d con huella + %d sin huella" % [row[1], row[2]]
 	for t: String in CardDB.types():
-		var d: Dictionary = CardDB.defs[t]
-		var panel := UIKit.panel(Color(0.11, 0.06, 0.24), UIKit.C.line, Vector2(18, 18))
-		var h := UIKit.hbox(20)
-		panel.add_child(h)
-		var pic := UIKit.card_image(t, 360)
-		pic.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-		h.add_child(pic)
-		var v := UIKit.vbox(6)
-		v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		h.add_child(v)
-		v.add_child(UIKit.label(d.name, 44, UIKit.C.ink, true, true))
-		v.add_child(UIKit.label("%s · %s" % [d.kind, counts.get(t, "")], 26, UIKit.C.toxic, false, true))
-		v.add_child(UIKit.label(d.long, 29, UIKit.C.ink, false, true))
-		body.add_child(panel)
+		_card_panel(body, t, counts)
+	for pack: String in packs:
+		# Solo las cartas que el motor ya reparte (las que tienen fila de copias)
+		var types: Array = CardDB.types_for([pack]).filter(func(t: String) -> bool: return CardDB.defs[t].get("pack", "") == pack and counts.has(t))
+		if types.is_empty():
+			continue
+		var head := UIKit.label(PACK_TITLES.get(pack, pack), 56, UIKit.C.gold, true, true)
+		head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		body.add_child(head)
+		for t: String in types:
+			_card_panel(body, t, counts)
 	var foot := UIKit.label("Con huella: las cartas que se usan con 2 jugadores. Sin huella: las de 3 jugadores. Con 4 o 5 se usan todas.", 26, UIKit.C.dim, false, true)
 	body.add_child(foot)
+
+
+func _card_panel(body: VBoxContainer, t: String, counts: Dictionary) -> void:
+	var d: Dictionary = CardDB.defs[t]
+	var panel := UIKit.panel(Color(0.11, 0.06, 0.24), UIKit.C.line, Vector2(18, 18))
+	var h := UIKit.hbox(20)
+	panel.add_child(h)
+	var pic := UIKit.card_image(t, 360)
+	pic.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	h.add_child(pic)
+	var v := UIKit.vbox(6)
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_child(v)
+	v.add_child(UIKit.label(d.name, 44, UIKit.C.ink, true, true))
+	v.add_child(UIKit.label("%s · %s" % [d.kind, counts.get(t, "")], 26, UIKit.C.toxic, false, true))
+	v.add_child(UIKit.label(d.long, 29, UIKit.C.ink, false, true))
+	body.add_child(panel)
