@@ -15,8 +15,16 @@ const DECK := [
 	["dig_deeper", 2, 2], ["clairvoyance", 1, 1],
 	["cat_a", 2, 2], ["cat_b", 2, 2], ["cat_c", 2, 2], ["cat_d", 2, 2],
 ]
-## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta» se añadirá en tareas posteriores.
-const DECK_CRYPT := []
+## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: faltan las cartas 6-10 (otra tarea).
+const DECK_CRYPT := [
+	["targeted_attack", 0, 2], ["reverse", 0, 2], ["draw_bottom", 1, 2], ["crow_eye", 1, 1], ["apocalypse", 0, 1],
+]
+## Respaldo de nombres de las cartas de packs (si la partida no recibe `names`, p. ej. en pruebas)
+const NAMES_CRYPT := {
+	"targeted_attack": "Ataque Dirigido", "reverse": "Marcha Atrás", "draw_bottom": "Robar del Fondo",
+	"crow_eye": "Ojo de Cuervo", "apocalypse": "Apocalipsis Zombi", "alter_future": "Alterar el Futuro (3x)",
+	"bury": "Entierro", "soul_swap": "Trueque de Almas", "haunt": "Espanto", "rotten": "Gatito Putrefacto",
+}
 const NAMES := {
 	"exploding": "Gatito Explosivo", "zombie": "Gatito Zombi", "attack": "Ataque (2x)",
 	"attack_dead": "Ataque de los Muertos", "nope": "Nop", "skip": "Saltar", "super_skip": "Súper Salto",
@@ -92,6 +100,13 @@ var names: Dictionary = {}          # {tipo: nombre} de las cartas de packs (el 
 var dir: int = 1                    # sentido de juego (+1 / -1)
 var tops: int = 0                   # cartas retiradas de ARRIBA del mazo desde el último cambio de `shuf`
 var deck_types: Array[String] = []  # tipos presentes en esta partida (sin exploding)
+
+
+## Nombre de una carta, también de packs. Las 19 cartas base salen siempre de NAMES (textos idénticos al clásico).
+func _name(t: String) -> String:
+	if NAMES.has(t):
+		return NAMES[t]
+	return str(names.get(t, NAMES_CRYPT.get(t, t)))
 
 
 static func is_cat(t: String) -> bool:
@@ -340,6 +355,16 @@ func plan(player_id: String, ids: Variant, target: Variant = null, named: Varian
 			return {"err": "Espera a que se resuelva la jugada anterior."}
 		if (eff == "attack_dead" or eff == "grave_robber") and dead_n == 0:
 			return {"err": "No hay jugadores muertos: no puedes jugar esta carta."}
+		if plus and (eff == "targeted_attack" or eff == "crow_eye"):
+			var any_hand: bool = eff == "crow_eye"
+			if not players.any(func(o: Player) -> bool: return o.id != player_id and (o.alive or any_hand) and (o.hand.size() > 0 or not any_hand)):
+				return {"err": "Nadie tiene cartas que mirar." if any_hand else "No hay ningún rival vivo al que atacar."}
+			if _none(target):
+				return {"need": "any_hand" if any_hand else "living_any", "eff": eff, "cards": cards}
+			var t := P(target)
+			if t == null or t.id == player_id or (any_hand and t.hand.is_empty()) or (not any_hand and not t.alive):
+				return {"err": "Elige a otro jugador con cartas." if any_hand else "Elige a un jugador vivo que no seas tú."}
+			return {"kind": "action", "eff": eff, "cards": cards, "target": target}
 		if eff == "favor":
 			if not players.any(func(o: Player) -> bool: return o.id != player_id and o.alive and o.hand.size() > 0):
 				return {"err": "Nadie tiene cartas para darte."}
@@ -419,7 +444,7 @@ func _do_play(p: Player, a: Dictionary, now: int) -> String:
 		p.hand.erase(c)
 		discard.append({"card": c, "by": p.id})
 	var eff: String = pl["eff"]
-	var card_name: String = ("Clon (como " + NAMES[eff] + ")") if cards.size() == 1 and cards[0].type == "clone" else NAMES[cards[0].type]
+	var card_name: String = ("Clon (como " + _name(eff) + ")") if cards.size() == 1 and cards[0].type == "clone" else _name(cards[0].type)
 	if pl["kind"] == "zombie":
 		var pr: Dictionary = prompt
 		var dead_p := dead()
@@ -453,13 +478,17 @@ func _do_play(p: Player, a: Dictionary, now: int) -> String:
 	var tn: String = P(s.target).name if s.target != null else ""
 	var text: String
 	if eff == "combo2":
-		text = p.name + " juega una pareja de " + NAMES[s.of] + " contra " + tn + "."
+		text = p.name + " juega una pareja de " + _name(s.of) + " contra " + tn + "."
 	elif eff == "combo3":
-		text = p.name + " juega un trío de " + NAMES[s.of] + " contra " + tn + " y pide: " + NAMES[s.named] + "."
+		text = p.name + " juega un trío de " + _name(s.of) + " contra " + tn + " y pide: " + _name(s.named) + "."
 	elif eff == "favor":
 		text = p.name + " pide un Favor a " + tn + "."
 	elif eff == "feed_dead":
 		text = p.name + " juega Alimenta a los Muertos para " + tn + "."
+	elif eff == "targeted_attack":
+		text = p.name + " juega " + card_name + " contra " + tn + "."
+	elif eff == "crow_eye":
+		text = p.name + " mira la mano de " + tn + " con " + card_name + "."
 	else:
 		text = p.name + " juega " + card_name + "."
 	emit("play", {"player": p.id, "eff": eff, "text": text})
@@ -580,22 +609,81 @@ func _apply(s: Dictionary, now: int) -> void:
 			var c: Card = t.hand.pop_at(int(floor(rnd.call() * t.hand.size())))
 			p.hand.append(c)
 			emit("steal", {"player": p.id, "target": t.id, "text": p.name + " le roba una carta al azar a " + t.name + "."})
-			emit("got", {"card": c.type, "text": "Le robaste " + NAMES[c.type] + " a " + t.name + "."}, p.id)
-			emit("lost", {"card": c.type, "text": p.name + " te robó " + NAMES[c.type] + "."}, t.id)
+			emit("got", {"card": c.type, "text": "Le robaste " + _name(c.type) + " a " + t.name + "."}, p.id)
+			emit("lost", {"card": c.type, "text": p.name + " te robó " + _name(c.type) + "."}, t.id)
 		"combo3":
 			var t := P(s.target)
 			if t == null or not t.alive:
 				return
 			var c := t.find_type(s.named)
 			if c == null:
-				emit("info", {"text": t.name + " no tiene " + NAMES[s.named] + ". " + p.name + " no consigue nada."})
+				emit("info", {"text": t.name + " no tiene " + _name(s.named) + ". " + p.name + " no consigue nada."})
 				return
 			t.hand.erase(c)
 			p.hand.append(c)
-			emit("steal", {"player": p.id, "target": t.id, "card": c.type, "text": p.name + " le quita " + NAMES[c.type] + " a " + t.name + "."})
+			emit("steal", {"player": p.id, "target": t.id, "card": c.type, "text": p.name + " le quita " + _name(c.type) + " a " + t.name + "."})
 		"clairvoyance":
 			if prompt != null and prompt.type == "zombie" and not prompt.watchers.has(p.id):
 				prompt.watchers.append(p.id)
+		"targeted_attack":
+			if not plus or not is_cur:
+				return
+			var t := P(s.target)
+			var idx := players.find(t)
+			if t == null or not t.alive:
+				idx = next_living_idx(idx if idx >= 0 else cur)
+			var n: int = (turns_left if attacked else 0) + 2
+			cur = idx
+			turns_left = n
+			attacked = true
+			idle_since = now
+			emit("turn", {"player": cur_p().id})
+			emit("attack", {"player": p.id, "target": cur_p().id, "n": n, "text": cur_p().name + " debe jugar " + str(n) + " turnos seguidos."})
+		"reverse":
+			if not plus or not is_cur:
+				return
+			dir = -dir
+			emit("reverse", {"dir": dir, "text": "¡Marcha atrás! " + p.name + " invierte el sentido de juego."})
+			_end_turn(now)
+		"draw_bottom":
+			if not plus or not is_cur or draw.is_empty():
+				return
+			var c: Card = draw.pop_front()
+			mut += 1
+			emit("draw", {"player": p.id, "bottom": true})
+			_receive(p, c, now)
+		"crow_eye":
+			if not plus:
+				return
+			var t := P(s.target)
+			if t == null or t.id == p.id:
+				return
+			var kinds: Array = []
+			for c in t.hand:
+				kinds.append(c.type)
+			emit("info", {"text": p.name + " mira la mano de " + t.name + "."})
+			emit("peek", {"target": t.id, "cards": kinds, "text": "Ves la mano de " + t.name + "."}, p.id)
+		"apocalypse":
+			if not plus:
+				return
+			var eks: Array[Card] = []
+			var rest: Array[Card] = []
+			for c in draw:
+				if c.type == "exploding":
+					eks.append(c)
+				else:
+					rest.append(c)
+			shuffle_arr(rest, rnd)
+			shuffle_arr(eks, rnd)
+			draw.clear()
+			draw.append_array(rest)
+			draw.append_array(eks)
+			mut += 1
+			shuf += 1
+			tops = 0
+			emit("apocalypse", {"n": eks.size(), "text": "Los " + str(eks.size()) + " explosivos están arriba del mazo."})
+			if is_cur:
+				_advance(1, false, now)
 
 
 func _start_give(reason: String, to: Variant, givers: Array, now: int) -> void:
@@ -623,7 +711,7 @@ func _do_give(p: Player, card_id: Variant, now: int) -> String:
 		var t := P(pr.to)
 		t.hand.append(c)
 		emit("gave", {"player": p.id, "target": t.id, "text": p.name + " le da una carta a " + t.name + "."})
-		emit("got", {"card": c.type, "text": p.name + " te dio " + NAMES[c.type] + "."}, t.id)
+		emit("got", {"card": c.type, "text": p.name + " te dio " + _name(c.type) + "."}, t.id)
 	if pr.waiting.is_empty():
 		prompt = null
 		if pr.reason == "rob":
@@ -661,7 +749,7 @@ func _receive(p: Player, c: Card, now: int) -> void:
 		prompt = {"type": "explode", "player": p.id, "card": c, "start": now, "deadline": _dl([p.id], now, 25000)}
 		return
 	p.hand.append(c)
-	emit("got", {"card": c.type, "drawn": true, "text": "Robaste: " + NAMES[c.type] + "."}, p.id)
+	emit("got", {"card": c.type, "drawn": true, "text": "Robaste: " + _name(c.type) + "."}, p.id)
 	_end_turn(now)
 
 
