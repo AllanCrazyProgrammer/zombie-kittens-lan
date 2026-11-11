@@ -74,11 +74,11 @@ func _draw() -> void:
 	var txt := "%d%%" % int(round(_pct * 100.0))
 	var fs := 46
 	var ts := big.get_string_size(txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
-	var pw := maxf(ts.x, 100.0)
+	var pw := maxf(ts.x, 100.0) + 8.0      # + el contorno del texto
 	draw_string_outline(big, Vector2(14.0, 46.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 8, UIKit.C.dark)
 	draw_string(big, Vector2(14.0, 46.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
 	# Derecha: mecha con tramos de color
-	var bx := 14.0 + pw + 16.0
+	var bx := 14.0 + pw + 24.0
 	var bw := w - bx - 22.0
 	var by := 12.0
 	var bar := Rect2(bx, by, bw, BAR_H)
@@ -105,7 +105,13 @@ func _draw() -> void:
 		var ang := _time * 6.0 + k * TAU / 5.0
 		var r := (9.0 + 6.0 * sin(_time * 11.0 + k * 1.7)) * flick
 		draw_line(sp + Vector2(cos(ang), sin(ang)) * 4.0, sp + Vector2(cos(ang), sin(ang)) * r, Color(1.0, 0.9, 0.5, 0.9), 2.0)
-	# Detalle en pequeño, bajo la mecha
+	# Detalle en pequeño, bajo la mecha: empieza siempre a la derecha del porcentaje y se encoge si no cabe
 	var sub := "%d %s en %d cartas" % [_eks, "explosivo" if _eks == 1 else "explosivos", _cards]
-	draw_string_outline(UIKit.bold(), Vector2(bx, by + BAR_H + 27.0), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 26, 6, UIKit.C.dark)
-	draw_string(UIKit.bold(), Vector2(bx, by + BAR_H + 27.0), sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color("ece4ff"))
+	var sfont := UIKit.bold()
+	var sfs := 26
+	var avail := maxf(40.0, w - bx - 8.0)
+	while sfs > 14 and sfont.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, sfs).x > avail:
+		sfs -= 1
+	var sp_pos := Vector2(bx, by + BAR_H + 27.0)
+	draw_string_outline(sfont, sp_pos, sub, HORIZONTAL_ALIGNMENT_LEFT, avail, sfs, 6, UIKit.C.dark)
+	draw_string(sfont, sp_pos, sub, HORIZONTAL_ALIGNMENT_LEFT, avail, sfs, Color("ece4ff"))

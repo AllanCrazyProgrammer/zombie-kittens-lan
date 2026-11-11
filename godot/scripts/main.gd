@@ -716,6 +716,113 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 		await _tap_control(cancel)
 		await _wait(0.3)
 	_game.debug_clear_selection()
+	await _ui_test_aim(dir, report)
+
+
+## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
+func _ui_test_aim(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var vt := get_viewport().get_final_transform()
+	for _i in 60:
+		for label: String in ["Entendido", "Cerrar"]:      # ventanas que pudieran haber quedado abiertas
+			var open_btn := _find_button(self, label)
+			if open_btn:
+				await _tap_control(open_btn)
+				await _wait(0.3)
+		if lm.game.over != null or _game.debug_can_draw():
+			break
+		await _wait(0.5)
+	_game.debug_clear_selection()
+	var natural := false
+	var src: Array = []
+	if _game.debug_can_draw():
+		var tc: Card3D = _game.debug_targeted_card()
+		if tc:
+			src = [tc]
+		else:
+			src = _game.debug_pair_cards()
+	if not src.is_empty():
+		natural = true
+		for c: Card3D in src:
+			await _tap_3d(c, Vector3(-0.24, 0, -0.3))
+			await _wait(0.3)
+		var btn := _find_button(self, "JUGAR") if src.size() == 1 else _find_button(self, "JUGAR PAREJA")
+		_say(report, "Plus/puntería: carta con objetivo (%s), botón de jugar visible: %s" % [src[0].type, str(btn != null)])
+		if btn:
+			await _tap_control(btn)
+			await _wait(0.5)
+	else:
+		_say(report, "Plus/puntería: AVISO, la mano no tiene carta con objetivo ni pareja; se FUERZA el modo puntería con debug_force_aim('living')")
+		_game.debug_force_aim("living")
+		await _wait(0.5)
+	_say(report, "Plus/puntería: modo activo=%s tipo=%s | válidos=%s no válidos=%s | panel: %s" % [str(_game.debug_aim_active()), _game.debug_aim_kind(), str(_game.debug_aim_ids(true)), str(_game.debug_aim_ids(false)), _game.debug_info_text().replace("\n", " / ")])
+	await _save_shot(dir + "/t10_punteria.png")
+	var valid: Array = _game.debug_aim_ids(true)
+	# (c) CANCELAR sale sin jugar
+	var disc0: int = lm.game.discard.size()
+	var cancel := _find_button(self, "CANCELAR")
+	var had_cancel := cancel != null
+	if cancel:
+		await _tap_control(cancel)
+		await _wait(0.4)
+	_say(report, "Plus/puntería: CANCELAR (botón=%s) -> activo=%s, descarte %d -> %d, jugada enviada=%s | %s" % [str(had_cancel), str(_game.debug_aim_active()), disc0, lm.game.discard.size(), str(_game.debug_last_play()), "OK" if (had_cancel and not _game.debug_aim_active() and lm.game.discard.size() == disc0) else "ERROR"])
+	# (b) tocar un jugador NO válido no juega nada y no cancela (modo forzado «dead»: todos los vivos son inválidos)
+	_game.debug_force_aim("dead")
+	await _wait(0.3)
+	var rivals: Array = _game.debug_aim_ids(false)
+	if not rivals.is_empty():
+		var play0: Dictionary = _game.debug_last_play()
+		await _tap(vt * _game.debug_seat_pos(rivals[0]))
+		await _wait(0.3)
+		_say(report, "Plus/puntería: (FORZADO tipo dead) tocar a %s no válido -> sigue activo=%s, nada jugado=%s, elegido='%s' | %s" % [rivals[0], str(_game.debug_aim_active()), str(_game.debug_last_play() == play0), _game.debug_aim_pick(), "OK" if (_game.debug_aim_active() and _game.debug_last_play() == play0 and _game.debug_aim_pick() == "") else "ERROR"])
+	var c2 := _find_button(self, "CANCELAR")
+	if c2:
+		await _tap_control(c2)
+		await _wait(0.3)
+	# (a) tocar el avatar 3D de un rival válido juega la carta contra él
+	if natural and not valid.is_empty() and _game.debug_can_draw():
+		var tc2: Card3D = _game.debug_targeted_card() if src.size() == 1 else null
+		if src.size() == 1 and tc2 == null:
+			_say(report, "Plus/puntería: la carta ya no está para repetir")
+		else:
+			_game.debug_clear_selection()
+			await _wait(0.3)
+			for c: Card3D in (src if src.size() > 1 else [tc2]):
+				await _tap_3d(c, Vector3(-0.24, 0, -0.3))
+				await _wait(0.3)
+			var b2 := _find_button(self, "JUGAR") if src.size() == 1 else _find_button(self, "JUGAR PAREJA")
+			if b2:
+				await _tap_control(b2)
+				await _wait(0.5)
+			var tgt: String = valid[0]
+			await _tap(vt * _game.debug_seat_pos(tgt))
+			await _wait(0.4)
+			var lp: Dictionary = _game.debug_last_play()
+			_say(report, "Plus/puntería: tocar el avatar de %s -> jugada %s | %s" % [tgt, str(lp), "OK" if lp.get("target", "") == tgt else "ERROR: no salió con ese objetivo"])
+	else:
+		# Sin carta con objetivo real: modo forzado, el toque solo se anota
+		_game.debug_force_aim("living")
+		await _wait(0.3)
+		var vv: Array = _game.debug_aim_ids(true)
+		if not vv.is_empty():
+			await _tap(vt * _game.debug_seat_pos(vv[0]))
+			await _wait(0.3)
+			_say(report, "Plus/puntería: (FORZADO, sin jugada real) tocar el avatar de %s -> elegido='%s' | %s" % [vv[0], _game.debug_aim_pick(), "OK" if _game.debug_aim_pick() == vv[0] else "ERROR"])
+	# Captura con un jugador muerto: él queda atenuado
+	if lm.game.over == null:
+		for pl in lm.game.players:
+			if pl.id == "p2":
+				pl.alive = false
+		_session.updated.emit()
+		_game.debug_force_aim("living")
+		await _wait(0.6)
+		_say(report, "Plus/puntería: captura con p2 muerto (FORZADO) | válidos=%s no válidos=%s" % [str(_game.debug_aim_ids(true)), str(_game.debug_aim_ids(false))])
+		await _save_shot(dir + "/t11_punteria_muerto.png")
+		var c3 := _find_button(self, "CANCELAR")
+		if c3:
+			await _tap_control(c3)
+			await _wait(0.3)
+	_game.debug_clear_selection()
 
 
 ## Anota un resultado de la prueba y lo imprime al momento (por si la prueba se corta por tiempo).

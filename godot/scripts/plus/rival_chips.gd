@@ -3,7 +3,7 @@ extends HBoxContainer
 ## Fichas de los rivales (UX-10). Se crean una vez por rival; `update` solo cambia textos, colores e
 ## iconos, así que seleccionar cartas de la mano no crea ni destruye nodos.
 
-## Reservada para el «modo puntería»: se emite al tocar la ficha de un rival (si `set_pickable(true)`).
+## Modo puntería (UX-01): se emite al tocar la ficha de un rival (si `set_pickable(true)`).
 signal chip_pressed(player_id: String)
 
 const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
@@ -15,11 +15,13 @@ var _builds := 0
 var _pickable := false
 var _target := ""         # objetivo de la jugada en curso (para pulsar solo al cambiar)
 var _time := 0.0
+var _aim := {}            # modo puntería: id -> válido (vacío = apagado)
 
 
 func _init() -> void:
 	add_theme_constant_override("separation", 12)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	set_process(false)
 
 
 ## Cuántas fichas se han construido en total (prueba: no debe cambiar al seleccionar cartas).
@@ -37,6 +39,33 @@ func set_pickable(on: bool) -> void:
 	_pickable = on
 	for id: String in _chips:
 		_chips[id].panel.mouse_filter = Control.MOUSE_FILTER_STOP if on else Control.MOUSE_FILTER_IGNORE
+
+
+## Modo puntería: resalta las fichas válidas (borde brillante pulsante) y atenúa las demás.
+## valid: id del rival -> si es un objetivo válido. Vacío = apagar.
+func set_aim(valid: Dictionary) -> void:
+	if valid == _aim:
+		return
+	_aim = valid.duplicate()
+	set_process(not _aim.is_empty())
+	for id: String in _chips:
+		var panel: Control = _chips[id].panel
+		panel.modulate = Color.WHITE
+		if _aim.has(id) and not _aim[id]:
+			panel.modulate = Color(0.55, 0.55, 0.62, 0.62)
+
+
+## Prueba: ids de las fichas marcadas como válidas.
+func debug_aim_valid() -> Array:
+	return _aim.keys().filter(func(id: String) -> bool: return _aim[id])
+
+
+func _process(delta: float) -> void:
+	_time += delta
+	var pulse := 0.5 + 0.5 * sin(_time * 6.0)
+	for id: String in _aim:
+		if _aim[id] and _chips.has(id):
+			_chips[id].panel.modulate = Color(1, 1, 1).lerp(Color(1.35, 1.45, 1.1), pulse * 0.6)
 
 
 ## view: vista de la partida. level_of: Callable(id) -> nivel de la IA.
@@ -108,6 +137,9 @@ func _fill(c: Dictionary, p: Dictionary, view: Dictionary, level_of: Callable, i
 	var multi: bool = is_cur and p.alive and int(view.turnsLeft) > 1
 	var border: Color = UIKit.C.gold if is_target else (UIKit.C.toxic if is_cur else UIKit.C.line)
 	var bw := 8 if is_target else 5
+	if _aim.get(p.id, false):
+		border = Color("dcff8a")
+		bw = 10
 	c.panel.add_theme_stylebox_override("panel", UIKit.box(DEAD_BG if not p.alive else UIKit.C.panel, border, 30, bw, Vector2(10, 8)))
 	c.pic.modulate = Color.WHITE if p.alive else Color(0.4, 0.4, 0.5)
 	c.name.text = p.name

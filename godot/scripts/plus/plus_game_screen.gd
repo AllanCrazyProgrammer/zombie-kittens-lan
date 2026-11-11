@@ -55,6 +55,7 @@ const TIPS := {
 	"window": "Cuando alguien juega una carta hay unos segundos para anularla con un Nop. La barra amarilla es el tiempo que queda.",
 	"nope": "¡Tienes un Nop! Toca ¡NOP! para anular esta jugada, o «Dejar pasar» si no te importa.",
 	"risk": "El riesgo de explotar ya es alto. Antes de robar, considera usar Saltar, Ataque o Ver el Futuro.",
+	"aim": "Toca al rival que quieres elegir: los resaltados son válidos. Toca CANCELAR para volver sin jugar la carta.",
 	"dead": "Explotaste, pero conservas tu mano. Aún puedes jugar Nop y cartas ⚡, y otro jugador puede revivirte con su Gatito Zombi.",
 }
 
@@ -93,6 +94,13 @@ const CARRY_HEIGHT := 0.32
 var _toasts: VBoxContainer
 var _discard_list: DiscardList   # ventana «Descarte» abierta (UX-03)
 var _named_grid: CardPickGrid    # cuadrícula del trío abierta (UX-04)
+## Accesibilidad: si es true, el objetivo se elige en una lista de botones (ventana) en vez de tocando la mesa
+var aim_with_list := false
+var _aim: AimMode                # resaltado de asientos y toques sobre la mesa (UX-01)
+var _aim_kind := ""              # tipo de objetivo que se está eligiendo ("" = modo puntería apagado)
+var _aim_forced := false         # solo prueba: modo puntería sin jugada detrás
+var _aim_debug_pick := ""        # solo prueba: último rival elegido en un modo forzado
+var _last_play := {}             # última jugada enviada sin error (prueba)
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -142,7 +150,10 @@ func _ready() -> void:
 	_drop_ring.scale = Vector3(1, 0.3, 1)
 	_drop_ring.visible = false
 	add_child(_drop_ring)
+	_aim = AimMode.new()
+	add_child(_aim)
 	_build_hud()
+	_opps.chip_pressed.connect(_aim_pick)
 	session.updated.connect(_refresh)
 	session.error.connect(func(msg: String) -> void: _toast(msg, true))
 	_refresh()
@@ -230,6 +241,8 @@ func _refresh() -> void:
 		_give_sel = ""
 	if _modal.get("type", "") in ["target", "named"] and _sel.is_empty():
 		_modal = {}
+	if _aim_kind != "" and not _aim_still_valid():
+		_exit_aim(false)
 	if _modal.get("type", "") == "discard" and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
 		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
 	_sync_seats()
@@ -651,9 +664,13 @@ func _act(a: Dictionary) -> void:
 	var err := session.act(a)
 	if err != "":
 		_toast(err, true)
+	elif a.get("a", "") == "play":
+		_last_play = a.duplicate(true)
 
 
 func _on_deck_tapped(_c: Card3D) -> void:
+	if _aim_kind != "":
+		return          # eligiendo objetivo: el mazo no hace nada
 	if _my_turn() and _idle():
 		_sel.clear()
 		_act({"a": "draw"})
@@ -707,6 +724,15 @@ func _input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
+			# Modo puntería: tocar un asiento (avatar o cartas) elige a ese jugador
+			if _aim_kind != "" and get_viewport().gui_get_hovered_control() == null:
+				var sid := _aim.seat_at(world.camera, event.position)
+				if sid != "":
+					_pressing = false
+					_dragging = false
+					get_viewport().set_input_as_handled()
+					_aim_pick(sid)
+					return
 			# Si el dedo empieza sobre un botón de la interfaz, no es un arrastre por la mano
 			_pressing = get_viewport().gui_get_hovered_control() == null
 			_dragging = false
@@ -716,7 +742,7 @@ func _input(event: InputEvent) -> void:
 		elif _pressing and _carry != "":
 			_pressing = false
 			_dragging = false
-			_drop_carry()
+			_drop_carry(event.position)
 			_update_zoom()
 		elif _pressing:
 			_pressing = false
@@ -759,6 +785,8 @@ func _table_point(screen_pos: Vector2, height: float) -> Vector3:
 
 
 func _start_carry(id: String, screen_pos: Vector2) -> void:
+	if _aim_kind != "":
+		_exit_aim(false)
 	_carry = id
 	# Si la carta era parte de una pareja o trío ya elegidos, se lleva el combo; si no, solo esa carta
 	if _sel_before.has(id):
@@ -802,15 +830,30 @@ func _move_carry(screen_pos: Vector2) -> void:
 
 
 ## Soltar la carta: en el centro se juega; fuera, vuelve a la mano.
-func _drop_carry() -> void:
+func _drop_carry(screen_pos: Vector2 = Vector2(-1, -1)) -> void:
 	var id := _carry
 	var over := _carry_over
+	var need := _carry_need()
 	_carry = ""
 	_carry_over = false
 	_drop_ring.visible = false
 	if not _hand.has(id):
 		_sync_hand()
+		_update_hud()
 		return
+	# Soltada sobre un rival: si la jugada necesita objetivo y es válido, se juega contra él directamente
+	if need != "" and screen_pos.x >= 0.0:
+		var sid := _aim.seat_at(world.camera, screen_pos)
+		if sid != "":
+			var why := AimMode.reason(need, _player(sid), _v.you)
+			if why != "":
+				_toast(why, true)
+			else:
+				drops += 1
+				_play_selected(sid)
+			_sync_hand()
+			_update_hud()
+			return
 	if not over:
 		_sync_hand()
 		_update_hud()
@@ -844,6 +887,8 @@ func _on_card_tapped(card: Card3D) -> void:
 		return
 	if not _hand.has(card.card_id) or _v.over != null:
 		return
+	if _aim_kind != "":
+		_exit_aim(false)      # tocar otra carta de la mano cancela la puntería
 	var id := card.card_id
 	if _sel.has(id):
 		_sel.erase(id)
@@ -894,16 +939,14 @@ func _play_selected(target: String = "", named: String = "") -> void:
 		if need == null:
 			return
 		if need is String and target == "":
-			_modal = {"type": "target", "kind": need}
-			_update_hud()
+			_request_target(need)
 			return
 	else:
 		var cs := _combo_state()
 		if cs.is_empty() or cs.has("err"):
 			return
 		if target == "":
-			_modal = {"type": "target", "kind": "living"}
-			_update_hud()
+			_request_target("living")
 			return
 		if cs.n == 3 and named == "":
 			_modal = {"type": "named", "target": target}
@@ -916,8 +959,104 @@ func _play_selected(target: String = "", named: String = "") -> void:
 		a["named"] = named
 	_sel.clear()
 	_modal = {}
+	_exit_aim(false)
 	_act(a)
 	_update_hud()
+
+
+# ---------------------------------------------------------------- modo puntería (UX-01)
+
+## La jugada necesita objetivo: modo puntería sobre la mesa, o la lista antigua si `aim_with_list`.
+func _request_target(kind: String) -> void:
+	if aim_with_list:
+		_modal = {"type": "target", "kind": kind}
+	else:
+		_aim_kind = kind
+		_aim_forced = false
+		_modal = {}
+	_update_hud()
+
+
+## Tipo de objetivo de lo que se lleva en la mano ("" si no necesita ninguno).
+func _carry_need() -> String:
+	if _carry == "" or _sel.is_empty():
+		return ""
+	if _sel.size() == 1:
+		var need: Variant = _v.playable.get(_sel[0])
+		return need if need is String else ""
+	var cs := _combo_state()
+	return "living" if (not cs.is_empty() and not cs.has("err")) else ""
+
+
+## Tipo de objetivo cuyos asientos se resaltan: el de la puntería o el de la carta que se lleva.
+func _aim_vis_kind() -> String:
+	return _aim_kind if _aim_kind != "" else _carry_need()
+
+
+func _aim_still_valid() -> bool:
+	if _aim_forced:
+		return _v.over == null
+	if _v.over != null or _sel.is_empty():
+		return false
+	if _sel.size() == 1:
+		return _v.playable.get(_sel[0]) is String
+	var cs := _combo_state()
+	return not cs.is_empty() and not cs.has("err")
+
+
+## Sale del modo puntería sin jugar. `refresh`: redibuja la interfaz y restablece los asientos.
+func _exit_aim(refresh: bool = true) -> void:
+	if _aim_kind == "":
+		return
+	_aim_kind = ""
+	_aim_forced = false
+	_aim.set_kind("", _v, _seats)
+	if refresh:
+		_sync_seats()
+		_update_hud()
+
+
+## Se tocó a un jugador (asiento o ficha) en modo puntería: lo confirma o avisa por qué no vale.
+func _aim_pick(id: String) -> void:
+	if _aim_kind == "":
+		return
+	var why := AimMode.reason(_aim_kind, _player(id), _v.you)
+	if why != "":
+		_toast(why, true)
+		return
+	if _aim_forced:
+		_aim_debug_pick = id
+		_exit_aim()
+		return
+	_exit_aim(false)
+	_play_selected(id)
+
+
+func _aim_cancel() -> void:
+	_exit_aim()
+
+
+## Panel inferior del modo puntería: carta, instrucción, «Yo mismo» (si vale) y CANCELAR.
+func _build_aim_panel() -> void:
+	var panel := UIKit.panel(UIKit.C.cream, UIKit.C.toxic_dark, Vector2(24, 16))
+	var col := UIKit.vbox(8)
+	panel.add_child(col)
+	var title := "Elige un objetivo"
+	var cards := _sel_cards()
+	if cards.size() == 1:
+		title = CardDB.display_name(cards[0].type)
+	elif cards.size() > 1:
+		var cs := _combo_state()
+		title = ("Pareja" if cards.size() == 2 else "Trío") + ((" de " + CardDB.display_name(cs.of)) if cs.has("of") else "")
+	col.add_child(UIKit.label(title, 44, UIKit.C.dark, true))
+	col.add_child(UIKit.label(AimMode.prompt(_aim_kind), 36, Color("3a2f4a"), false, true))
+	var row := UIKit.hbox(14)
+	col.add_child(row)
+	if AimMode.self_valid(_aim_kind, _v):
+		_add_btn(row, "Yo mismo", "normal", func() -> void: _aim_pick(_v.you), 40)
+	var cancel := _add_btn(row, "CANCELAR", "danger", _aim_cancel, 40)
+	cancel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_info_slot.add_child(panel)
 
 
 # ================================================================ interfaz (HUD)
@@ -1060,6 +1199,11 @@ func _update_hud() -> void:
 	_turn.add_theme_color_override("font_color", UIKit.C.toxic if my_turn else UIKit.C.ink)
 	_turn_panel.add_theme_stylebox_override("panel", UIKit.box(UIKit.C.panel, UIKit.C.toxic if my_turn else UIKit.C.line, 30, 5, Vector2(20, 8)))
 
+	# Modo puntería: asientos y fichas resaltados (también mientras se lleva una carta que pide objetivo)
+	var vis := _aim_vis_kind()
+	_aim.set_kind(vis, v, _seats)
+	_opps.set_aim({} if vis == "" else _aim_valid_map(vis))
+	_opps.set_pickable(_aim_kind != "")
 	_opps.update(v, session.level_of)
 	_risk.update(v)
 
@@ -1146,7 +1290,7 @@ func _update_zoom() -> void:
 		return
 	var type := ""
 	# Solo con una carta elegida y el dedo quieto: mientras se arrastra (por la mano o al tablero) se oculta
-	var show_id: String = "" if (_dragging or _carry != "") else (_sel[-1] if _sel.size() > 0 else "")
+	var show_id: String = "" if (_dragging or _carry != "" or _aim_kind != "") else (_sel[-1] if _sel.size() > 0 else "")
 	if show_id != "" and _v.over == null and _modal_root.get_child_count() == 0:
 		for c: Dictionary in _v.hand:
 			if c.id == show_id:
@@ -1203,7 +1347,18 @@ func _why_not(c: Dictionary) -> String:
 	return "No se puede jugar ahora."
 
 
+func _aim_valid_map(kind: String) -> Dictionary:
+	var out := {}
+	for p: Dictionary in _v.players:
+		if p.id != _v.you:
+			out[p.id] = AimMode.reason(kind, p, _v.you) == ""
+	return out
+
+
 func _build_selection_info() -> void:
+	if _aim_kind != "" and _v.over == null:
+		_build_aim_panel()
+		return
 	var cards := _sel_cards()
 	if cards.is_empty() or _v.over != null:
 		return
@@ -1333,11 +1488,11 @@ func _build_modal() -> void:
 		return
 	match _modal.type:
 		"target":
-			var dead: bool = _modal.kind == "dead"
-			var box := _open_modal("¿A qué muerto alimentas?" if dead else "¿Contra quién?")
+			var dead: bool = str(_modal.kind).begins_with("dead")
+			var box := _open_modal("¿A qué muerto eliges?" if dead else "¿Contra quién?")
 			var list: Array = []
 			for p: Dictionary in v.players:
-				if (not p.alive) if dead else (p.alive and p.id != v.you and p.count > 0):
+				if AimMode.reason(_modal.kind, p, v.you) == "":
 					list.append(p)
 			_player_buttons(box, list, func(id: String) -> void: _play_selected(id))
 			_add_btn(box, "Cancelar", "ghost", _close_modal)
@@ -1400,6 +1555,7 @@ func _build_modal() -> void:
 
 
 func _open_menu() -> void:
+	_exit_aim(false)
 	_modal = {"type": "menu"}
 	_update_hud()
 
@@ -1432,6 +1588,7 @@ func _coach_pick() -> void:
 		alive += 1 if p.alive else 0
 	var risk := 100.0 * (alive - 1) / maxi(1, int(_v.draw))
 	var checks := [
+		["aim", _aim_kind != ""],
 		["intro", true],
 		["dead", not me.alive],
 		["nope", _v.win != null and _v.win.canNope and not _v.win.passed],
@@ -1531,11 +1688,13 @@ func _record(e: Dictionary) -> void:
 
 
 func _open_discard() -> void:
+	_exit_aim(false)
 	_modal = {"type": "discard"}
 	_update_hud()
 
 
 func _open_history() -> void:
+	_exit_aim(false)
 	_modal = {"type": "history"}
 	_update_hud()
 
@@ -1628,6 +1787,72 @@ func debug_open_named() -> Array[String]:
 			_update_hud()
 			break
 	return _named_grid.debug_types() if is_instance_valid(_named_grid) else ([] as Array[String])
+
+
+## Modo puntería activo (prueba).
+func debug_aim_active() -> bool:
+	return _aim_kind != ""
+
+
+func debug_aim_kind() -> String:
+	return _aim_kind
+
+
+## Última jugada enviada sin error ({} si ninguna).
+func debug_last_play() -> Dictionary:
+	return _last_play.duplicate(true)
+
+
+## Último rival elegido en un modo puntería forzado.
+func debug_aim_pick() -> String:
+	return _aim_debug_pick
+
+
+## Carta de la mano que pide objetivo (Favor, etc.) o null.
+func debug_targeted_card() -> Card3D:
+	for c: Dictionary in _v.hand:
+		if _v.playable.get(c.id) is String and c.type != "nope":
+			return _hand.get(c.id)
+	return null
+
+
+## Dos cartas iguales de la mano (para una pareja) o [] si no hay.
+func debug_pair_cards() -> Array:
+	var seen := {}
+	for c: Dictionary in _v.hand:
+		if c.type in ["clone", "nope", "exploding"]:
+			continue
+		if seen.has(c.type):
+			return [_hand[seen[c.type]], _hand[c.id]]
+		seen[c.type] = c.id
+	return []
+
+
+## Prueba: fuerza el modo puntería (sin jugada detrás). Elegir a alguien solo lo anota en debug_aim_pick().
+func debug_force_aim(kind: String) -> void:
+	_aim_kind = kind
+	_aim_forced = true
+	_modal = {}
+	_update_hud()
+
+
+## Posición en pantalla (coordenadas del viewport) del avatar de un rival.
+func debug_seat_pos(id: String) -> Vector2:
+	return world.camera.unproject_position((_seats[id].avatar as Node3D).global_position)
+
+
+## Rivales válidos / no válidos para el tipo de objetivo actual (vacío si no hay puntería).
+func debug_aim_ids(valid: bool) -> Array:
+	var out: Array = []
+	for id: String in _seats:
+		if _aim.active() and _aim.is_valid(id) == valid:
+			out.append(id)
+	return out
+
+
+## Texto del panel inferior de selección/puntería.
+func debug_info_text() -> String:
+	return _info_text()
 
 
 ## Quita la selección de cartas (prueba).
