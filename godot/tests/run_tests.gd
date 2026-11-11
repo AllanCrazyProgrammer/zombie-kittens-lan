@@ -29,6 +29,7 @@ func _initialize() -> void:
 	_test_crypt_cards_2()
 	_test_plus_network()
 	_test_difficulty()
+	_test_plus_bots()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
 	quit(1 if _fails > 0 else 0)
 
@@ -1038,7 +1039,9 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 						if _check(err == "", "el jugador de pruebas no pudo jugar %s: %s" % [pl.eff, err]):
 							stats[pl.eff] = int(stats.get(pl.eff, 0)) + 1
 							acted = true
-		if not acted:
+		# decisión alter/bury sin responder: el jugador de pruebas deja vencer el plazo (los bots ya sabrían contestar)
+		var hold: bool = g.prompt != null and (g.prompt.type == "alter" or g.prompt.type == "bury")
+		if not acted and not hold:
 			for k in n:
 				var id := "b%d" % ((first + k) % n)
 				var a := bots.decide(id)
@@ -1662,3 +1665,460 @@ func _crypt_targeted_attack_self() -> void:
 	_play(g, "b3", ta, "b0")
 	_resolve(g)
 	_check(g.cur == 0 and g.turns_left == 2, "Ataque Dirigido: con el objetivo vivo no cambia nada")
+
+
+
+# ================================================================ IA de La Cripta (T24 + T33)
+
+var _keep: Rng = null   # mantiene vivo el generador que usa un bot durante una comprobación
+const NEW_CARDS := ["targeted_attack", "reverse", "draw_bottom", "crow_eye", "apocalypse", "alter_future", "bury", "soul_swap", "haunt"]
+
+
+func _zero() -> float:
+	return 0.0
+
+
+func _bots(g: Game, levels: Dictionary) -> Bots:
+	return Bots.new(g, levels, _zero, true)
+
+
+func _lv(g: Game, level: String) -> Dictionary:
+	var d := {}
+	for p in g.players:
+		d[p.id] = level
+	return d
+
+
+## Partida solo con bots (sin «jugador de pruebas»). `cheat`: en algunas decisiones comprueba que la jugada no cambia
+## al permutar lo que el bot no puede ver (manos ajenas y mazo). stats acumula jugadas, turnos y plazos vencidos.
+func _bot_game(n: int, seed_value: int, mode: String, levels: Array, plus: bool, packs: Array, stats: Dictionary, cheat: bool = false) -> String:
+	var rng := Rng.new(seed_value)
+	var g := _mk(n, 0, mode, rng, plus, packs)
+	var lv := {}
+	for i in n:
+		lv["b%d" % i] = levels[i % levels.size()]
+	var bots := Bots.new(g, lv, rng.next, plus)
+	var total := _count(g)
+	var now := 0
+	var steps := 0
+	var first := 0
+	var seen := 0
+	while g.over == null:
+		steps += 1
+		if not _check(steps < 20000, "partida interminable con bots (semilla %d, %d jugadores)" % [seed_value, n]):
+			return ""
+		g.tick(now)
+		bots.learn()
+		for e: Dictionary in g.events:
+			if e.seq > seen:
+				seen = e.seq
+				if e.type == "turn":
+					stats["turns"] = int(stats.get("turns", 0)) + 1
+		var acted := false
+		for k in n:
+			var id := "b%d" % ((first + k) % n)
+			var a: Dictionary
+			if cheat and steps % 9 == 0 and (g.prompt == null or g.prompt.type != "alter"):
+				_keep = Rng.new(steps * 7 + k)
+				bots.rnd = _keep.next
+				a = bots.decide(id)
+				if not a.is_empty():
+					var a2 := _decide_blind(g, bots, id, steps * 7 + k)
+					if not _check(JSON.stringify(a) == JSON.stringify(a2), "la decisión de %s cambió al permutar información oculta (semilla %d): %s / %s" % [id, seed_value, JSON.stringify(a), JSON.stringify(a2)]):
+						return ""
+					stats["cheat_checks"] = int(stats.get("cheat_checks", 0)) + 1
+				bots.rnd = rng.next
+			else:
+				a = bots.decide(id)
+			if a.is_empty():
+				continue
+			var pl := {}
+			if a.a == "play":
+				pl = g.plan(id, a.cards, a.get("target"), a.get("named"))
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			if plus and not _check(err == "", "acción rechazada de %s: %s (%s)" % [id, err, JSON.stringify(a)]):
+				return ""
+			if err == "":
+				stats["actions"] = int(stats.get("actions", 0)) + 1
+				if a.a == "play" and pl.has("eff"):
+					stats[pl.eff] = int(stats.get(pl.eff, 0)) + 1
+					stats["%d:%s" % [n, pl.eff]] = int(stats.get("%d:%s" % [n, pl.eff], 0)) + 1
+					if a.cards.size() == 1 and g.discard.size() > 0 and g.discard[g.discard.size() - 1].card.type == "clone":
+						stats["clon_como_" + pl.eff] = int(stats.get("clon_como_" + pl.eff, 0)) + 1
+			acted = true
+			first = (first + k + 1) % n
+			break
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if g.over != null:
+				break
+			if g.prompt != null and (g.prompt.type == "alter" or g.prompt.type == "bury"):
+				stats["exp_" + g.prompt.type] = int(stats.get("exp_" + g.prompt.type, 0)) + 1
+			if not _check(d >= 0, "partida atascada con bots (semilla %d, %d jugadores)" % [seed_value, n]):
+				return ""
+			now = maxi(now + 1, d)
+		if not _check(_count(g) == total, "se perdieron o duplicaron cartas con bots (semilla %d)" % seed_value):
+			return ""
+		if g.over == null:
+			var eks := 0
+			for c in g.draw:
+				eks += 1 if c.type == "exploding" else 0
+			if g.prompt != null:
+				eks += (1 if g.prompt.has("card") and g.prompt.card.type == "exploding" else 0) + (g.prompt.eks.size() if g.prompt.has("eks") else 0)
+			if not _check(eks == g.living().size() - 1, "explosivos en juego != vivos - 1 con bots (semilla %d)" % seed_value):
+				return ""
+	stats["games"] = int(stats.get("games", 0)) + 1
+	return g.over.winner
+
+
+## Decide con las cartas de los rivales y del mazo permutadas (se restauran después).
+func _decide_blind(g: Game, bots: Bots, id: String, seed_value: int) -> Dictionary:
+	var cards: Array = []
+	for p in g.players:
+		if p.id != id:
+			cards.append_array(p.hand)
+	cards.append_array(g.draw)
+	var orig: Array = cards.map(func(c: Game.Card) -> String: return c.type)
+	var k := cards.size()
+	for i in k:
+		cards[i].type = orig[(i + 1) % k]
+	_keep = Rng.new(seed_value)
+	bots.rnd = _keep.next
+	var a := bots.decide(id)
+	for i in k:
+		cards[i].type = orig[i]
+	return a
+
+
+func _plus_bot_sim() -> void:
+	var stats := {}
+	var mixes := [["easy", "normal", "hard"], ["hard", "normal"], ["hard"], ["normal", "easy", "hard", "normal"], ["normal"]]
+	var games := 0
+	for s in 170:
+		for n in [2, 3, 4, 5]:
+			if _bot_game(n, 12000 + s * 37 + n, "official" if s % 4 != 3 else "full", mixes[s % mixes.size()], true, ["crypt"], stats) == "":
+				return
+			games += 1
+	var ok := true
+	for n: int in [2, 3, 4, 5]:
+		var deck := _mk(n, 1, "official", null, true, ["crypt"]).deck_types
+		for t: String in NEW_CARDS:
+			if deck.has(t):
+				ok = _check(int(stats.get("%d:%s" % [n, t], 0)) > 0, "con %d jugadores los bots nunca jugaron %s" % [n, t]) and ok
+	ok = _check(int(stats.get("exp_alter", 0)) == 0 and int(stats.get("exp_bury", 0)) == 0, "venció un plazo de alter/bury con un bot (alter %d, bury %d)" % [int(stats.get("exp_alter", 0)), int(stats.get("exp_bury", 0))]) and ok
+	var line := []
+	for t: String in NEW_CARDS:
+		line.append("%s %d" % [t, int(stats.get(t, 0))])
+	print("    %d partidas con bots y La Cripta. Jugadas por los bots: %s" % [games, ", ".join(PackedStringArray(line))])
+	var cl := []
+	for k: String in stats:
+		if k.begins_with("clon_como_"):
+			cl.append("%s %d" % [k, stats[k]])
+	print("    Clon copiando: %s; plazos vencidos alter/bury: 0; combos: pareja %d, trío %d; feed_dead %d" % [", ".join(PackedStringArray(cl)), int(stats.get("combo2", 0)), int(stats.get("combo3", 0)), int(stats.get("feed_dead", 0))])
+	if ok:
+		_ok("%d partidas con bots solos: sin atascos ni cartas perdidas, cada carta nueva se juega y ningún plazo vence" % games)
+	# Sin trampas: la decisión no depende de manos ajenas ni del mazo
+	var cs := {}
+	for s in 40:
+		for n in [2, 3, 4]:
+			if _bot_game(n, 31000 + s * 11 + n, "official", mixes[s % mixes.size()], true, ["crypt"], cs, true) == "":
+				return
+	if _check(int(cs.get("cheat_checks", 0)) > 500, "pocas comprobaciones de «sin trampas» (%d)" % int(cs.get("cheat_checks", 0))):
+		_ok("sin trampas: %d decisiones idénticas al permutar manos ajenas y mazo" % int(cs.get("cheat_checks", 0)))
+
+
+func _duel_plus(a: String, b: String, n: int) -> int:
+	var w := 0
+	for i in n:
+		var levels := [a, b] if i % 2 == 1 else [b, a]
+		if _bot_game(2, 9000 + i, "official", levels, true, ["crypt"], {}) == ("b0" if i % 2 == 1 else "b1"):
+			w += 1
+	return int(round(100.0 * w / n))
+
+
+func _plus_difficulty() -> void:
+	var hn := _duel_plus("hard", "normal", 400)
+	var ne := _duel_plus("normal", "easy", 400)
+	var he := _duel_plus("hard", "easy", 400)
+	print("    Plus con La Cripta (2 jugadores) - difícil vs normal: %d%%   normal vs fácil: %d%%   difícil vs fácil: %d%%" % [hn, ne, he])
+	if _check(hn >= 60 and ne > 55 and he > 60, "en Plus las dificultades no están ordenadas con claridad"):
+		_ok("Plus: difícil > normal > fácil")
+
+
+func _plus_duration() -> void:
+	var mix := ["easy", "normal", "hard"]
+	for n: int in [2, 3, 4, 5]:
+		var cs := {}
+		var ps := {}
+		for s in 60:
+			_bot_game(n, 20000 + s * 13 + n, "official", mix, false, [], cs)
+			_bot_game(n, 20000 + s * 13 + n, "official", mix, true, ["crypt"], ps)
+		print("    %d jugadores - acciones/partida: clásico %.0f, Plus %.0f   turnos/partida: clásico %.0f, Plus %.0f" % [n, float(cs.actions) / cs.games, float(ps.actions) / ps.games, float(cs.turns) / cs.games, float(ps.turns) / ps.games])
+
+
+func _test_plus_bots() -> void:
+	print("Plus: IA de La Cripta")
+	var f0 := _fails
+	_plus_bot_sim()
+	_bot_cases()
+	_plus_difficulty()
+	_plus_duration()
+	if _fails == f0:
+		_ok("IA de La Cripta: simulaciones, casos dirigidos, dificultad y duración")
+
+
+func _bot_cases() -> void:
+	var f0 := _fails
+	# --- sabe que arriba hay un explosivo y juega Robar del Fondo
+	var g := _cg(3)
+	var b := _bots(g, _lv(g, "hard"))
+	_give(g, 0, "see_future")
+	var db := _give(g, 0, "draw_bottom")
+	_give(g, 0, "cat_a")
+	_setdraw(g, ["nope", "cat_b", "cat_c", "exploding"])
+	b.learn()
+	var a := b.decide("b0")
+	_check(a.get("a") == "play" and g.P("b0").find_id(a.cards[0]).type == "see_future", "difícil: con riesgo y sin información mira el futuro")
+	_check(g.act("b0", a, _clk) == "", "ver el futuro aceptado")
+	_resolve(g)
+	b.learn()
+	_check(b.known("b0", 0) == "exploding", "tras Ver el Futuro sabe que arriba hay un explosivo")
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards == [db.id], "difícil: sabe que arriba hay un explosivo y juega Robar del Fondo")
+	_check(g.act("b0", a, _clk) == "", "Robar del Fondo aceptado")
+	_resolve(g)
+	_check(g.P("b0").alive and g.P("b0").find_type("nope") != null and g.cur == 1, "robó el fondo (Nop) y sigue vivo")
+	# --- memoria tras robo del fondo
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	var sf := _give(g, 0, "see_future")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d", "exploding", "nope"])
+	b.learn()
+	_play(g, "b0", sf)
+	_resolve(g)
+	b.learn()
+	_check(b.known("b0", 0) == "nope" and b.known("b0", 1) == "exploding" and b.known("b0", 2) == "cat_d", "memoria: lo visto con Ver el Futuro")
+	g.cur = 1
+	var db2 := _give(g, 1, "draw_bottom")
+	_play(g, "b1", db2)
+	_resolve(g)
+	b.learn()
+	_check(g.draw.size() == 5 and b.known("b0", 0) == "nope" and b.known("b0", 1) == "exploding" and b.known("b0", 2) == "cat_d", "memoria: tras un robo del fondo lo de arriba sigue vigente")
+	_check(g.act("b2", {"a": "draw"}, _clk) == "", "b2 roba de arriba")
+	b.learn()
+	_check(b.known("b0", 0) == "exploding" and b.known("b0", 1) == "cat_d" and b.known("b0", 2) == "", "memoria: tras robar de arriba se desplaza")
+	# --- Alterar el Futuro: el explosivo le toca al siguiente rival
+	for turns: int in [1, 2]:
+		g = _cg(3)
+		b = _bots(g, _lv(g, "hard"))
+		var al := _give(g, 0, "alter_future")
+		_setdraw(g, ["cat_a", "cat_b", "cat_c", "exploding", "nope", "skip"])
+		if turns == 2:
+			g.turns_left = 2
+			g.attacked = true
+		_play(g, "b0", al)
+		_resolve(g)
+		a = b.decide("b0")
+		_check(a.get("a") == "reorder" and a.order == ([1, 2, 0] if turns == 1 else [1, 0, 2]), "alter (turnos %d): orden %s" % [turns, str(a.get("order"))])
+		_check(g.act("b0", a, _clk) == "" and g.prompt == null, "alter respondido (turnos %d)" % turns)
+		b.learn()
+		if turns == 1:
+			g.act("b0", {"a": "draw"}, _clk)
+			_check(g.P("b0").alive and g.P("b0").find_type("nope") != null, "b0 roba lo bueno")
+			g.act("b1", {"a": "draw"}, _clk)
+			_check(g.prompt != null or not g.P("b1").alive, "el rival siguiente roba el explosivo")
+		else:
+			_check(g.draw[g.draw.size() - 1].type == "nope" and g.draw[g.draw.size() - 2].type == "skip" and g.draw[g.draw.size() - 3].type == "exploding", "con dos turnos el explosivo queda lo más abajo de las 3")
+	# --- Entierro
+	for turns: int in [1, 2]:
+		g = _cg(3)
+		b = _bots(g, _lv(g, "hard"))
+		var by := _give(g, 0, "bury")
+		_setdraw(g, ["cat_a", "cat_b", "exploding"])
+		if turns == 2:
+			g.turns_left = 2
+			g.attacked = true
+		_play(g, "b0", by)
+		_resolve(g)
+		b.learn()
+		a = b.decide("b0")
+		_check(a.get("a") == "bury" and a.pos == (0 if turns == 1 else 2), "bury (turnos %d): pos %s" % [turns, str(a.get("pos"))])
+		_check(g.act("b0", a, _clk) == "", "bury respondido")
+		b.learn()
+		if turns == 1:
+			_check(b.known("b0", 0) == "exploding", "recuerda dónde enterró el explosivo")
+		else:
+			_check(b._bottom_hidden("b0"), "recuerda que escondió un explosivo al fondo")
+	# --- fácil y normal también contestan siempre
+	for lvl: String in ["easy", "normal"]:
+		g = _cg(3)
+		b = _bots(g, _lv(g, lvl))
+		var al2 := _give(g, 0, "alter_future")
+		_setdraw(g, ["cat_a", "cat_b", "exploding", "skip", "nope"])
+		_play(g, "b0", al2)
+		_resolve(g)
+		a = b.decide("b0")
+		_check(a.get("a") == "reorder" and g.act("b0", a, _clk) == "", "%s responde a alter" % lvl)
+		g = _cg(3)
+		b = _bots(g, _lv(g, lvl))
+		var by2 := _give(g, 0, "bury")
+		_setdraw(g, ["cat_a", "cat_b", "exploding", "skip", "nope"])
+		_play(g, "b0", by2)
+		_resolve(g)
+		a = b.decide("b0")
+		_check(a.get("a") == "bury" and g.act("b0", a, _clk) == "", "%s responde a bury" % lvl)
+	# --- bot muerto
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	g.P("b2").alive = false
+	_give(g, 2, "haunt")
+	_give(g, 0, "cat_a")
+	_give(g, 0, "cat_b")
+	for t: String in ["cat_a", "cat_b", "cat_c", "cat_d", "nope"]:
+		_give(g, 1, t)
+	a = b.decide("b2")
+	_check(a.get("a") == "play" and a.get("target") == "b1" and g.P("b2").find_id(a.cards[0]).type == "haunt", "muerto: juega Espanto contra el vivo con más cartas")
+	_check(g.act("b2", a, _clk) == "", "Espanto del bot muerto aceptado")
+	_resolve(g)
+	_check(g.P("b1").hand.size() == 4, "el Espanto descartó una carta")
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	g.P("b2").alive = false
+	_give(g, 2, "haunt")
+	_give(g, 1, "cat_a")
+	var fv := _give(g, 0, "favor")
+	_play(g, "b0", fv, "b1")
+	_check(b.decide("b2").is_empty(), "muerto: no espanta con la mesa ocupada")
+	g = _cg(3)
+	b = _bots(g, _lv(g, "normal"))
+	g.P("b2").alive = false
+	var fd := _give(g, 2, "feed_dead")
+	_give(g, 0, "cat_a")
+	_give(g, 1, "cat_b")
+	a = b.decide("b2")
+	_check(a.get("a") == "play" and a.cards == [fd.id] and a.get("target") == "b2", "muerto con pocas cartas: Alimenta a los Muertos sobre sí mismo")
+	# --- Nop contra jugadas que le perjudican
+	g = _cg(4)
+	b = _bots(g, _lv(g, "hard"))
+	var n1 := _give(g, 1, "nope")
+	_give(g, 2, "nope")
+	var ta := _give(g, 0, "targeted_attack")
+	_play(g, "b0", ta, "b1")
+	a = b.decide("b1")
+	_check(a.get("a") == "play" and a.cards == [n1.id], "Nop contra Ataque Dirigido hacia él")
+	_check(b.decide("b2").get("a") == "pass", "no anula un Ataque Dirigido que no va contra él")
+	g = _cg(4)
+	b = _bots(g, _lv(g, "hard"))
+	g.P("b3").alive = false
+	_give(g, 1, "nope")
+	var ht := _give(g, 3, "haunt")
+	_give(g, 1, "cat_a")
+	_play(g, "b3", ht, "b1")
+	_check(b.decide("b1").get("a") == "play", "Nop contra Espanto sobre él")
+	g = _cg(4)
+	b = _bots(g, _lv(g, "hard"))
+	_give(g, 1, "nope")
+	_give(g, 2, "nope")
+	var ap := _give(g, 0, "apocalypse")
+	_play(g, "b0", ap)
+	_check(b.decide("b1").get("a") == "play" and b.decide("b2").get("a") == "pass", "Nop contra Apocalipsis solo si él es el siguiente en robar")
+	g = _cg(4)
+	b = _bots(g, _lv(g, "hard"))
+	g.P("b3").alive = false
+	for i in 6:
+		_give(g, 3, "cat_a")
+	_give(g, 1, "nope")
+	var ss := _give(g, 0, "soul_swap")
+	_play(g, "b0", ss, "b3")
+	_check(b.decide("b1").get("a") == "play", "Nop contra Trueque de Almas cuando la mano del muerto es mucho mejor")
+	# --- Clon para esquivar
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	var cl := _give(g, 0, "clone")
+	_setdraw(g, ["cat_a", "cat_b", "exploding"])
+	g.emit("future", {"cards": ["exploding", "cat_b", "cat_a"], "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "b0")
+	g.discard.append({"card": _card("attack"), "by": "b1"})
+	b.learn()
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards == [cl.id], "Clon: copia el Ataque del descarte para esquivar")
+	_check(g.act("b0", a, _clk) == "", "Clon aceptado")
+	# --- Barajar tras un Ver el Futuro rival
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	var types: Array = ["exploding"]
+	for i in 6:
+		types.append("cat_a")
+	types.append("exploding")
+	for i in 7:
+		types.append("cat_b")
+	_setdraw(g, types)
+	g.cur = 1
+	var sf1 := _give(g, 1, "see_future")
+	_give(g, 2, "shuffle")
+	_give(g, 0, "shuffle")
+	_play(g, "b1", sf1)
+	b.learn()
+	_resolve(g)
+	b.learn()
+	a = b.decide("b2")
+	_check(a.get("a") == "play" and g.P("b2").find_id(a.cards[0]).type == "shuffle", "Barajar: el siguiente en robar rompe lo que vio el rival")
+	_check(b.decide("b0").is_empty(), "Barajar: quien no es el siguiente y tiene poco riesgo no baraja")
+	# --- Ojo de Cuervo + trío nombrando lo visto
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	var ce := _give(g, 0, "crow_eye")
+	for i in 3:
+		_give(g, 0, "cat_a")
+	var nopec := _give(g, 1, "nope")
+	_give(g, 1, "cat_b")
+	_give(g, 1, "cat_c")
+	_give(g, 2, "cat_d")
+	_setdraw(g, ["cat_a", "exploding", "cat_b", "exploding", "cat_c"])
+	b.learn()
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards == [ce.id] and a.get("target") == "b1", "difícil: mira la mano del rival antes del trío")
+	g.act("b0", a, _clk)
+	_resolve(g)
+	b.learn()
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards.size() == 3 and a.get("named") == "nope" and a.get("target") == "b1", "difícil: nombra en el trío lo que vio")
+	g.P("b1").hand.erase(nopec)
+	g.discard.append({"card": nopec, "by": "b1"})
+	b.learn()
+	_check(not b._peek_cards("b0", "b1").has("nope"), "lo visto caduca cuando el rival juega esa carta")
+	# --- Ataque Dirigido: al rival sin Zombi conocido
+	g = _cg(3)
+	b = _bots(g, _lv(g, "hard"))
+	var tgt := _give(g, 0, "targeted_attack")
+	_give(g, 1, "zombie")
+	_give(g, 1, "cat_a")
+	_give(g, 1, "cat_b")
+	_give(g, 2, "cat_c")
+	_setdraw(g, ["cat_a", "cat_b", "exploding"])
+	g.emit("future", {"cards": ["exploding", "cat_b", "cat_a"], "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "b0")
+	g.emit("peek", {"target": "b1", "cards": ["zombie", "cat_a", "cat_b"]}, "b0")
+	b.learn()
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards == [tgt.id] and a.get("target") == "b2", "Ataque Dirigido con explosivo arriba: al rival sin Zombi conocido")
+	# --- Apocalipsis: todos saben que arriba hay explosivos
+	g = _cg(3)
+	b = _bots(g, {"b0": "hard", "b1": "normal", "b2": "easy"})
+	var apo := _give(g, 0, "apocalypse")
+	_play(g, "b0", apo)
+	_resolve(g)
+	b.learn()
+	_check(b.known("b1", 0) == "exploding" and b.known("b1", 1) == "exploding" and b.known("b1", 2) != "exploding" and b.known("b2", 0) == "", "Apocalipsis: los no-fáciles saben que arriba hay N explosivos")
+	# --- trío de normal
+	g = _cg(3)
+	b = _bots(g, _lv(g, "normal"))
+	for i in 3:
+		_give(g, 0, "cat_a")
+	_give(g, 1, "cat_b")
+	a = b.decide("b0")
+	_check(a.get("a") == "play" and a.cards.size() == 3 and a.get("named") == "zombie", "normal: hace tríos de cartas baratas pidiendo Zombi")
+	if _fails == f0:
+		_ok("casos dirigidos: Robar del Fondo, memoria con tops, alter, bury, muerto, Nop, Clon, Barajar, Ojo de Cuervo, Apocalipsis y trío")
