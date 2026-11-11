@@ -28,6 +28,11 @@ func level_of(_id: String) -> String:
 	return ""
 
 
+## ¿La partida es de Zombie Kittens Plus? (decide qué pantalla de juego se abre)
+func is_plus() -> bool:
+	return false
+
+
 func is_network() -> bool:
 	return false
 

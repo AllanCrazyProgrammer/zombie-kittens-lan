@@ -16,7 +16,26 @@ func _ready() -> void:
 
 
 func types() -> Array:
-	return defs.keys()
+	return defs.keys()   # hoy todas las cartas son base; las de packs llevarán "pack" y no entrarán aquí
+
+
+## Cartas base (sin `pack`) más las de los packs indicados (p. ej. ["crypt"]).
+func types_for(packs: Array) -> Array:
+	var out: Array = []
+	for k: String in defs:
+		var pk: String = defs[k].get("pack", "")
+		if pk == "" or packs.has(pk):
+			out.append(k)
+	return out
+
+
+## {tipo: nombre} de las cartas de esos packs (el motor no lee CardDB).
+func names_for(packs: Array) -> Dictionary:
+	var out := {}
+	for k: String in defs:
+		if packs.has(defs[k].get("pack", "")):
+			out[k] = defs[k].get("name", k)
+	return out
 
 
 func display_name(type: String) -> String:

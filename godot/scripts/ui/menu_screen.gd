@@ -16,6 +16,9 @@ var page := "home"
 var status := ""
 var session: ClientSession      # solo en la sala de espera
 var profile := {"name": "", "avatar": 0}
+var plus := false               # modo elegido en la pantalla de inicio (user://settings.cfg, [game] plus)
+var _plus_ephemeral := false    # el modo viene de una prueba automática: no se guarda en el archivo
+var _title: Label
 var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official"}
 var _box: VBoxContainer
 var _rooms_box: VBoxContainer
@@ -31,6 +34,7 @@ func _ready() -> void:
 			_opts[k] = cfg.get_value("solo", k, _opts[k])
 		for k: String in profile.keys():
 			profile[k] = cfg.get_value("profile", k, profile[k])
+		plus = bool(cfg.get_value("game", "plus", false))
 	if str(profile.name).strip_edges() == "":
 		profile.name = "Gatito%d" % (10 + randi() % 90)
 	var root := Control.new()
@@ -42,6 +46,8 @@ func _ready() -> void:
 	title.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	title.offset_top = 110
 	root.add_child(title)
+	_title = title
+	_refresh_title()
 	var tag := UIKit.label("Explota. Revive. Vuelve a explotar.", 44, Color("ff5c8d"), true)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	tag.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -66,7 +72,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# La lista de salas se refresca sola, sin reconstruir el resto (para no perder lo que se está escribiendo)
 	if page == "join" and _rooms_box != null:
-		var sig := JSON.stringify(Net.rooms.keys()) + str(Net.rooms.values().map(func(r: Dictionary) -> String: return "%s%s%s" % [r.get("name"), r.get("players"), r.get("started")]))
+		var sig := JSON.stringify(Net.rooms.keys()) + str(Net.rooms.values().map(func(r: Dictionary) -> String: return "%s%s%s%s" % [r.get("name"), r.get("players"), r.get("started"), r.get("plus")]))
 		if sig != _rooms_sig:
 			_rooms_sig = sig
 			_fill_rooms()
@@ -95,9 +101,30 @@ func _on_lobby_updated() -> void:
 		_build()
 
 
+## En Plus el título dice «Zombie Kittens Plus» (más pequeño para que quepa en una línea).
+func _refresh_title() -> void:
+	if _title == null:
+		return
+	_title.text = "ZOMBIE KITTENS PLUS" if plus else "ZOMBIE KITTENS"
+	_title.add_theme_font_size_override("font_size", 96 if plus else 132)
+
+
+## Cambia el modo. `persist = false` solo para pruebas automáticas (no toca user://settings.cfg).
+func set_plus(value: bool, persist: bool = true) -> void:
+	plus = value
+	_plus_ephemeral = not persist
+	if persist:
+		save_profile()
+	_refresh_title()
+	if is_inside_tree() and page == "home":
+		_build()
+
+
 func save_profile() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS)
+	if not _plus_ephemeral:
+		cfg.set_value("game", "plus", plus)
 	for k: String in _opts.keys():
 		cfg.set_value("solo", k, _opts[k])
 	for k: String in profile.keys():
@@ -178,6 +205,11 @@ func _build_home() -> void:
 	row.add_child(col)
 	if status != "":
 		_note(status, 32, UIKit.C.gold)
+	var mode := UIKit.hbox(12)
+	_box.add_child(mode)
+	for m: Array in [["CLÁSICO", false], ["PLUS", true]]:
+		var mb := _add(m[0], "on" if plus == m[1] else "normal", set_plus.bind(m[1]), 38, mode)
+		mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_add("UN JUGADOR", "primary", _go.bind("solo"), 58)
 	_add("CREAR SALA", "normal", _on_host, 50)
 	_add("UNIRSE A UNA SALA", "normal", _go.bind("join"), 50)
@@ -267,6 +299,7 @@ func _on_solo_play() -> void:
 	var o := _opts.duplicate()
 	o["name"] = profile.name
 	o["avatar"] = profile.avatar
+	o["plus"] = plus
 	save_profile()
 	solo_requested.emit(o)
 
@@ -364,7 +397,8 @@ func _fill_rooms() -> void:
 		var r: Dictionary = Net.rooms[key]
 		var ip: String = r.ip
 		var started: bool = r.get("started", false)
-		var b := UIKit.button("Sala de %s  ·  %d/5%s" % [r.get("name", "?"), int(r.get("players", 0)), "  (en partida)" if started else ""], "on" if not started else "normal", 42)
+		var tag := "PLUS" if r.get("plus", false) else "CLÁSICO"
+		var b := UIKit.button("Sala de %s  ·  %d/5  ·  %s%s" % [r.get("name", "?"), int(r.get("players", 0)), tag, "  (en partida)" if started else ""], "on" if not started else "normal", 42)
 		b.pressed.connect(func() -> void: join_requested.emit(ip))
 		_rooms_box.add_child(b)
 
@@ -389,6 +423,8 @@ func _build_lobby() -> void:
 		if p.host:
 			host_name = p.name
 	_box.add_child(UIKit.label("Sala de %s   %d/5" % [host_name, n], 50, UIKit.C.toxic, true))
+	if session.is_plus():
+		_note("Modo PLUS", 30, UIKit.C.gold)
 	if is_host:
 		var ips: Array = Net.local_ips()
 		_note(("Los demás tocan «Unirse a una sala». Si no aparece, tu dirección es  %s" % ips[0]) if ips.size() > 0 else "Sin red local: conéctate a una Wi-Fi o activa tu zona Wi-Fi para que otros se unan.", 28, UIKit.C.ink)

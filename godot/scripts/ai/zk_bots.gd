@@ -15,12 +15,14 @@ var rnd: Callable
 var _mem := {}                  # id -> {at: {profundidad: tipo}, len, shuf}
 var _pending_ins := {}          # id -> posiciones elegidas al esconder explosivos
 var _seq := 0
+var plus := false               # Plus: se usará para las heurísticas nuevas (aún ninguna)
 
 
-func _init(p_game: ZKGame, p_levels: Dictionary, p_rnd: Callable) -> void:
+func _init(p_game: ZKGame, p_levels: Dictionary, p_rnd: Callable, p_plus: bool = false) -> void:
 	game = p_game
 	levels = p_levels
 	rnd = p_rnd
+	plus = p_plus
 
 
 static func val(t: String) -> int:

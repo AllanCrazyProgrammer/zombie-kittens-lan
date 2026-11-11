@@ -13,10 +13,11 @@ var levels := {}
 var _due := {}          # id del bot -> instante (ms) en que hará su jugada
 var _sig := ""
 var _rng: ZKRng
+var _plus := false
 var _me_delay := 900     # solo en modo demostración: cuánto tarda la IA en jugar por el humano
 
 
-## opts: {name, rivals: 1..4, level: easy|normal|hard|mix, deck_mode, autoplay?: bool, seed?: int}
+## opts: {name, rivals: 1..4, level: easy|normal|hard|mix, deck_mode, autoplay?: bool, seed?: int, plus?: bool, packs?: [], rules?: {}}
 func start(opts: Dictionary) -> void:
 	me_id = "p0"
 	var my_avatar := int(opts.get("avatar", 0))
@@ -30,8 +31,15 @@ func start(opts: Dictionary) -> void:
 		levels[me_id] = "normal"   # modo demostración: la IA juega también por el humano
 		_me_delay = int(opts.get("me_delay", 900))
 	_rng = ZKRng.new(int(opts.get("seed", randi())))
-	game = ZKGame.new({"players": players, "deck_mode": opts.get("deck_mode", "official"), "rng": _rng, "now": now()})
-	bots = ZKBots.new(game, levels, _rng.next)
+	_plus = bool(opts.get("plus", false))
+	var game_opts := {"players": players, "deck_mode": opts.get("deck_mode", "official"), "rng": _rng, "now": now()}
+	if _plus:
+		game_opts["plus"] = true
+		game_opts["packs"] = opts.get("packs", [])
+		game_opts["rules"] = opts.get("rules", {})
+		game_opts["names"] = CardDB.names_for(opts.get("packs", []))
+	game = ZKGame.new(game_opts)
+	bots = ZKBots.new(game, levels, _rng.next, _plus)
 	_due = {}
 	_sig = ""
 
@@ -45,6 +53,10 @@ func act(a: Dictionary) -> String:
 	var err := game.act(me_id, a, now())
 	_check_changed()
 	return err
+
+
+func is_plus() -> bool:
+	return _plus
 
 
 func level_of(id: String) -> String:

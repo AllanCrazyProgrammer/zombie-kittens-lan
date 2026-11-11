@@ -7,7 +7,8 @@ extends Node3D
 ##   --seed N                   semilla del reparto
 ##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
-##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir)
+##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
+##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen)
 ##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
@@ -24,7 +25,7 @@ const MAX_RECONNECTS := 6
 
 var _world: TableWorld
 var _menu: MenuScreen
-var _game: GameScreen
+var _game: Node3D          # GameScreen (clásico) o PlusGameScreen: misma API pública, por eso se usa con llamadas dinámicas
 var _session: GameSession
 var _room: RoomHost
 var _last_opts := {}
@@ -85,9 +86,10 @@ func _ready() -> void:
 		_quit_after = float(arg.call("--quit-after"))
 	if arg.call("--drop") != "":
 		_drop_at = float(arg.call("--drop"))
-	if args.has("--uitest"):
+	if args.has("--uitest") or args.has("--uitest-plus"):
 		_show_menu()
-		_ui_test(arg.call("--uitest"))
+		var plus_test := args.has("--uitest-plus")
+		_ui_test(arg.call("--uitest-plus" if plus_test else "--uitest"), plus_test)
 	elif args.has("--nettest"):
 		_nettest = arg.call("--nettest")
 		_show_menu()
@@ -186,7 +188,10 @@ func _open_game() -> void:
 	_hide_menu()
 	if _game:
 		_game.queue_free()
-	_game = GameScreen.new().setup(_session, _world)
+	if _session.is_plus():
+		_game = PlusGameScreen.new().setup(_session, _world)
+	else:
+		_game = GameScreen.new().setup(_session, _world)
 	_game.exit_requested.connect(_on_game_exit)
 	_game.rematch_requested.connect(func() -> void: _start_solo(_last_opts))
 	_game.lobby_requested.connect(func() -> void: (_session as ClientSession).send({"t": "toLobby"}))
@@ -254,6 +259,7 @@ func _on_host() -> void:
 		_show_menu("home", "No se pudo crear la sala: el puerto está ocupado. Cierra otras copias del juego.")
 		return
 	_room = RoomHost.new()
+	_room.configure(_menu != null and _menu.plus)   # el modo se fija al crear la sala
 	add_child(_room)
 	var cs := ClientSession.new().setup(_room)
 	_bind_client(cs)
@@ -485,9 +491,12 @@ func _wait(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout
 
 
-func _ui_test(dir: String) -> void:
+func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var report: Array = []
 	await _wait(1.2)
+	_menu.set_plus(plus_mode, false)     # sin guardar: la prueba no cambia los ajustes del usuario
+	await _wait(0.3)
+	_say(report, "selector de modo visible: %s | modo de la prueba: %s" % [str(_find_button(self, "PLUS") != null and _find_button(self, "CLÁSICO") != null), "PLUS" if plus_mode else "CLÁSICO"])
 	await _save_shot(dir + "/t1_menu.png")
 	await _tap_control(_find_button(self, "UN JUGADOR"))
 	await _wait(0.4)
@@ -499,6 +508,9 @@ func _ui_test(dir: String) -> void:
 	await _tap_control(_find_button(self, "¡JUGAR!"))
 	await _wait(1.5)
 	_say(report, "partida creada: %s" % str(_game != null))
+	_say(report, "pantalla de juego: %s | sesión Plus: %s" % [_game.get_script().get_global_name(), str(_session.is_plus())])
+	if _game.get_script().get_global_name() != ("PlusGameScreen" if plus_mode else "GameScreen"):
+		_say(report, "ERROR: la pantalla de juego no corresponde al modo")
 	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
 	var card: Card3D = null
 	for _i in 180:
@@ -568,7 +580,7 @@ func _ui_test(dir: String) -> void:
 		var hand_before: int = lm.game.P("p0").hand.size()
 		await _drag(from_pos, center, true)
 		await _save_shot(dir + "/t7_llevando.png")
-		var mid := _game.debug_carry()
+		var mid: String = _game.debug_carry()
 		_say(report, "carta grande visible mientras se lleva al tablero: %s" % str(_game.debug_zoom_visible()))
 		await _drag(center, center, false)
 		await _wait(1.2)

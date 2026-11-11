@@ -2,7 +2,7 @@ class_name RoomHost
 extends Node
 ## Sala de juego en el dispositivo anfitrión: lobby, reconexión por ficha (token), bots y la partida.
 ## Port de la sala de web/www/room.js. Habla con cada jugador mediante mensajes {t: ...}:
-##   recibe: hello, set, addBot, botLevel, kick, settings, start, toLobby, act
+##   recibe: hello (con proto), set, addBot, botLevel, kick, settings, start, toLobby, act
 ##   envía:  welcome, lobby, state, err, kicked, full
 
 signal local_message(m: Dictionary)
@@ -12,8 +12,12 @@ const LEVELS := ["easy", "normal", "hard"]
 const MAX_PLAYERS := 5
 const LOCAL := 1   # el propio anfitrión
 
+const PACKS := ["crypt"]
+const PLUS_REJECT := "Esta sala es de Zombie Kittens Plus. Actualiza el juego para entrar."
+
 var players: Array[Dictionary] = []   # {id, token, name, avatar, bot, level, peer}  (peer 0 = sin conexión)
-var settings := {"deck_mode": "official"}
+## {deck_mode, plus, packs, rules}. `plus` se fija al crear la sala y no cambia; en una sala clásica packs = [] y rules = {}.
+var settings := {"deck_mode": "official", "plus": false, "packs": [], "rules": {}}
 var game: ZKGame
 var bots: ZKBots
 var _rng: ZKRng
@@ -44,7 +48,14 @@ func beacon_info() -> Dictionary:
 	for p in players:
 		if p.peer == LOCAL:
 			host_name = p.name
-	return {"name": host_name, "players": players.size(), "started": game != null}
+	return {"name": host_name, "players": players.size(), "started": game != null, "plus": bool(settings.plus), "proto": Net.PROTO}
+
+
+## Fija el modo de la sala. Solo vale antes de que entre nadie (el anfitrión local lo indica al crearla).
+func configure(plus: bool) -> void:
+	if not players.is_empty() or game != null:
+		return
+	settings.plus = plus
 
 
 func _by_peer(peer: int) -> Dictionary:
@@ -134,6 +145,11 @@ func on_msg(peer: int, m: Dictionary) -> void:
 				return
 			if m.get("deck_mode", "") in ["official", "full"]:
 				settings.deck_mode = m.deck_mode
+			if settings.plus:   # packs y reglas solo existen en salas Plus; en las clásicas se rechazan en silencio
+				if m.get("packs") is Array:
+					settings.packs = (m.packs as Array).filter(func(k: Variant) -> bool: return k is String and PACKS.has(k))
+				if m.get("rules") is Dictionary:
+					settings.rules = _clean_rules(m.rules)
 			_send_lobby()
 		"start":
 			if not is_host or game != null:
@@ -174,7 +190,24 @@ func _clean_name(raw: String, me: Dictionary) -> String:
 	return n
 
 
+## Solo deja pasar las reglas opcionales conocidas y con valores razonables.
+func _clean_rules(raw: Dictionary) -> Dictionary:
+	var out: Dictionary = settings.rules.duplicate()
+	if raw.get("turn_ms") is int or raw.get("turn_ms") is float:
+		out["turn_ms"] = clampi(int(raw.turn_ms), 0, 120000)
+	if raw.get("hand") is int or raw.get("hand") is float:
+		out["hand"] = clampi(int(raw.hand), 5, 10)
+	for k: String in ["nope_fixed", "sudden_death"]:
+		if raw.get(k) is bool:
+			out[k] = raw[k]
+	return out
+
+
 func _hello(peer: int, m: Dictionary) -> void:
+	# Las salas Plus exigen cliente con protocolo 3; las clásicas aceptan a cualquiera (clientes 2.x incluidos)
+	if settings.plus and int(m.get("proto", 0)) < 3:
+		send(peer, {"t": "full", "msg": PLUS_REJECT})
+		return
 	var token := str(m.get("token", ""))
 	var p := {}
 	for x in players:
@@ -214,7 +247,7 @@ func _hello(peer: int, m: Dictionary) -> void:
 
 func _lobby_msg() -> Dictionary:
 	return {
-		"t": "lobby", "settings": settings.duplicate(), "started": game != null,
+		"t": "lobby", "settings": settings.duplicate(true), "started": game != null,
 		"players": players.map(func(p: Dictionary) -> Dictionary: return {"id": p.id, "name": p.name, "avatar": p.avatar, "bot": p.bot, "host": p.peer == LOCAL, "level": p.level}),
 	}
 
@@ -234,8 +267,14 @@ func _start() -> void:
 		if p.bot:
 			levels[p.id] = p.level
 	_rng = ZKRng.new(randi())
-	game = ZKGame.new({"players": list, "deck_mode": settings.deck_mode, "rng": _rng, "now": now()})
-	bots = ZKBots.new(game, levels, _rng.next)
+	var game_opts := {"players": list, "deck_mode": settings.deck_mode, "rng": _rng, "now": now()}
+	if settings.plus:
+		game_opts["plus"] = true
+		game_opts["packs"] = settings.packs.duplicate()
+		game_opts["rules"] = settings.rules.duplicate()
+		game_opts["names"] = CardDB.names_for(settings.packs)
+	game = ZKGame.new(game_opts)
+	bots = ZKBots.new(game, levels, _rng.next, bool(settings.plus))
 	for p in players:
 		if not p.bot and p.peer == 0:
 			game.set_connected(p.id, false, now())

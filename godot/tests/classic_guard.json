@@ -1,0 +1,560 @@
+{
+	"every": 7,
+	"games": [
+		{
+			"actions": "e5c7a3768015dc1d7aa424bc2b1673383b16b8e2b8a8cba6e7990699c81ec775",
+			"events": "145afa62d9faf83dcb2868003f46113295f54f2e2b5e20376ff5d87127d9e691",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "full",
+			"n": 2,
+			"seed": 4001,
+			"steps": 50,
+			"views": "ad8b3b85c814426f07ac75919d2a88aca4d3c7097f40e20dc6ef68fb922576e6",
+			"winner": "b1"
+		},
+		{
+			"actions": "842fd0ba818a26d356cda65a687809910fef5fc119907612235a58b2c45b5ece",
+			"events": "5d86d7eeaa491c590d6e79402e6f7a34898271b4d8e16800101ea10e253680d1",
+			"levels": [
+				"hard"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 4038,
+			"steps": 47,
+			"views": "e650068b51cfc98adac91e5f753dfc0410b75f5d71b33362c34e6623e01e7b1c",
+			"winner": "b0"
+		},
+		{
+			"actions": "8bc7d2ecfb38befcb85aa9edd6516731a5c2d42160b4c186dab22581e832f1dd",
+			"events": "0a2684b9114771c03324248279ade97764fe0bcf482d99366739e97bb2e02bb6",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 4075,
+			"steps": 70,
+			"views": "ab7c200cb6e4eae6c52a29433a55ee06f421083c9a21fe6c6a8506f0ba27427f",
+			"winner": "b1"
+		},
+		{
+			"actions": "e965f96353f44f4937967c565216eb9d996d9d651159a8808ad6943d04fad853",
+			"events": "9fc63c1b0f6fd6e1bf52c6996880c513208b193af05ceb1a1d254421c9c90874",
+			"levels": [
+				"easy"
+			],
+			"mode": "full",
+			"n": 5,
+			"seed": 4112,
+			"steps": 78,
+			"views": "69ecd48e332f02e615cf3014914e41d4792f87cd8293f57a967d8340a726d859",
+			"winner": "b4"
+		},
+		{
+			"actions": "e98aa0b3f97e7521a145c21ff3e3d88afd28f3151deb744affa714649f6d8abc",
+			"events": "78261066d0b6696bfb93f66d731b372fe4107f6dbe06ef62e1d10c8e1ef1f9ec",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 4149,
+			"steps": 34,
+			"views": "8a08097a479b5e8f19c39ed783d92b0d142503e674991056fcb3e452092f5454",
+			"winner": "b0"
+		},
+		{
+			"actions": "7254b24c8cc861f31df9a284d35ddbd36b63a160b2610d0ab7a1282be5306f6d",
+			"events": "39f3134ad6f5adab11560a10c07734e8e90aa7d5bbb539fd08c4028d90fb14ed",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 4186,
+			"steps": 43,
+			"views": "2aaa61c2d56b96b58a70293ee0dcd0303635e0906de4c6807af76a1ab5ee9381",
+			"winner": "b1"
+		},
+		{
+			"actions": "6a57978a9c9aa1bafc7d9f10aa440a99f785190e05a3f9d27e842acea5dbcdf6",
+			"events": "bad6b5f7800af29d9acd4a5de41201172e184c8638e90cc470a82fc33268dde3",
+			"levels": [
+				"hard"
+			],
+			"mode": "full",
+			"n": 4,
+			"seed": 4223,
+			"steps": 101,
+			"views": "9cc8b6d19083dfec94b9213f93015683a6978d1686dd6682cdcda391e73fe4ac",
+			"winner": "b1"
+		},
+		{
+			"actions": "863bbeb3fc837b14ba2c8310e6d72c095fb97ec23cdfa049913e0171e347c5c1",
+			"events": "8d8cb34e6217842c710ae004b260b1e09231495a17f8e7c77c611866619f57d0",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 4260,
+			"steps": 101,
+			"views": "0f277f82682107745f820fd4a50fd9399802a5aea2fe9c4dc525e88758ae3142",
+			"winner": "b3"
+		},
+		{
+			"actions": "8eb142d24aef173df3b132dda57cae951929b8f32a865cd6ae6c7b5349354457",
+			"events": "62e21bc84699c0acbdbac5d662079cf5ef9547284f8871ad10578f7722612fc7",
+			"levels": [
+				"normal"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 4297,
+			"steps": 37,
+			"views": "47e0b51907e351d622639f550626b5d2ca077924cdd93e880f32627a0524279c",
+			"winner": "b0"
+		},
+		{
+			"actions": "3b2ab5649373c2c28f4af238db666655ea1c75035fdf124fc3ceb21ceeaf7d99",
+			"events": "4528b921cfb730e9fb906d9664850562943098543810db899c426bc27a8b798a",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "full",
+			"n": 3,
+			"seed": 4334,
+			"steps": 99,
+			"views": "745bac21b8469087b9cd8e1b067f17f5a1013de29f6df471129846db45e17fc6",
+			"winner": "b2"
+		},
+		{
+			"actions": "2ed4acffb9c220af7d3b909dde6a1f1da0fced17c6c02d8a7c9ce498bb9235d3",
+			"events": "93c2924c356f403105d311d8a220c9226f686e7a6d49545ab176473b0ab9c139",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 4371,
+			"steps": 104,
+			"views": "242f90ff7c3114b56c8fca92d966c2c8be873344ef0c8adc1096b25746761875",
+			"winner": "b1"
+		},
+		{
+			"actions": "b5d17d69512f69cb809623b352385ff89cb1194dab6123e379c75f0609e0a2a8",
+			"events": "8cfc954968d75f769c7f5c6d2b3ac5fb788bc3830e5866210c5fd46866b1da7e",
+			"levels": [
+				"hard"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 4408,
+			"steps": 115,
+			"views": "5b3586a8a48130053cf720861669f82d56b24fc8029e3c3f2a62a2d59920d915",
+			"winner": "b0"
+		},
+		{
+			"actions": "138634a8d9f855d2116029d09d364c7c8fc491adc7e844135b0b3d94b0282790",
+			"events": "22367bc679b46637adc1d1a1cb8855d27afc24f03ad3e1c7ceec5b0854f14c0e",
+			"levels": [
+				"easy"
+			],
+			"mode": "full",
+			"n": 2,
+			"seed": 4445,
+			"steps": 56,
+			"views": "8216754b15b4b2ae989d57cff47d1d68baae71d52ea2aab3586ba76c6ae07bf3",
+			"winner": "b1"
+		},
+		{
+			"actions": "c031a2992fcc3eb6ae0259e3cf59caa80e05f3de93fcd76cf717c17b90de4c79",
+			"events": "8fc7aea6470fb57aaefc7eaf695583057e5fea5b20f6abbceee5ce52474409a7",
+			"levels": [
+				"normal"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 4482,
+			"steps": 33,
+			"views": "6b6173123b23e14c02d0cd06f5d81d07128bb8fa04e8fc294ba8ab446bcd36fd",
+			"winner": "b2"
+		},
+		{
+			"actions": "46ef78cd1411b6463cc2a76643ba9994a9fcbfe3a0f0c7fc092f7ef98354f664",
+			"events": "86651e161230a40c13f30d918a0a6953da0a1bd991eea29e149d08eb007d918d",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 4519,
+			"steps": 60,
+			"views": "913f5a50ef039be3fecbbd63f45b9f5d4f073c490fc87099c92e99980b8486ef",
+			"winner": "b0"
+		},
+		{
+			"actions": "a4ff0bd0f604720b671467b1f01044ae39a401c42540c6273a834dab68ad29b4",
+			"events": "510e2cb0759eb7d0360835dde645f7016e6753a53abc7f852072107282805c50",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "full",
+			"n": 5,
+			"seed": 4556,
+			"steps": 82,
+			"views": "e8b1816bfcfc94092a73eb4b409e785121295d5663dab30918215b6f7c5ecf0f",
+			"winner": "b4"
+		},
+		{
+			"actions": "5c2a2a703f8e8a7d6568a4f3961499ced4ff8302e0c809c1e584ae7974c58fdb",
+			"events": "1c061ad81bfb02d7c7e999e19968d54a0ec9b5eabfaa0ca62ae0799d5126a3c9",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 4593,
+			"steps": 37,
+			"views": "688df135089843b616e798209c7dd78fb1c0f5aff41e5f950bc28da97c26b64b",
+			"winner": "b0"
+		},
+		{
+			"actions": "323b51d71e744294a92a758ad8cbd094021db2182e76eeb07139d99de4fa5a05",
+			"events": "e84be85b5c8ce3d80f3ba1387e2dfa927a083c98f231e40dc8104b1a3af429d1",
+			"levels": [
+				"easy"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 4630,
+			"steps": 32,
+			"views": "9f19749993d012f36abe1988004080bca92c123d639e2083d12bdecddea66885",
+			"winner": "b2"
+		},
+		{
+			"actions": "55efecce43856eaa75772ab702d77cf0d642fda7d30a8ea3ac8950e779d6c2de",
+			"events": "8775a9114e9547392dda84b9a4173d94f678857b6894fbb55dd0608e146c4617",
+			"levels": [
+				"normal"
+			],
+			"mode": "full",
+			"n": 4,
+			"seed": 4667,
+			"steps": 82,
+			"views": "a685bbd4c5587a8545a1a73645a21f8223024d6f401587615801db241effd198",
+			"winner": "b2"
+		},
+		{
+			"actions": "eaa103b21391363fa3de9d8096a21b36bfed8e740217e7f0c77c1a5c14c0912e",
+			"events": "81e21e59224fb90b5c657459abb3d6d37de93e9979fc04bba0cefaaa87b67d0f",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 4704,
+			"steps": 90,
+			"views": "3b0b5ab35c5deb01659ddfbacb652e7a6866866ca9a26939775a1f889ac59ff2",
+			"winner": "b2"
+		},
+		{
+			"actions": "e8bdb205e92b09b77359011ca579e85958112694ccd56a40f58ef38d864c6ea0",
+			"events": "a72b293e4fb71b3a0a179878f3d7622813afb5261f3c1f17d898439a5130a2f7",
+			"levels": [
+				"hard"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 4741,
+			"steps": 37,
+			"views": "6eb397b3e3d4586802d8fb50256ac3a3007e09506669780b053562e917f23425",
+			"winner": "b1"
+		},
+		{
+			"actions": "04a666429dc85ae43bd9e431993994403507e17353d7c4635618ce361a1bb0e5",
+			"events": "a3688dce5460922377467f3d2eca6c6fd61d0bd2f777d87d015f3e08db007a41",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "full",
+			"n": 3,
+			"seed": 4778,
+			"steps": 101,
+			"views": "4ca65e277a13682f13463933c55fe5554f078c6817ed7d828da3e04380e14d16",
+			"winner": "b1"
+		},
+		{
+			"actions": "ec5f9a63d8e75df4c0e555271e1a14ad1edb9fda121007449ff9cfbd1549b8d7",
+			"events": "691a0a5124b015ffd66102a27bb58aa8b90e688a4a9ee628692481478cfbdff6",
+			"levels": [
+				"easy"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 4815,
+			"steps": 83,
+			"views": "d41fd60c528850fe200245b2b25292a993acce591057bd9a0e7225b2ad33bf0f",
+			"winner": "b0"
+		},
+		{
+			"actions": "0649eaef4119840c597cf776c234bf2bafe3b85df453982b0ac1cd447d855e5c",
+			"events": "749afa18a8266200b77c28e5f24566433d79d0d608e8085d1022658faeb874ba",
+			"levels": [
+				"normal"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 4852,
+			"steps": 99,
+			"views": "02d4e8d491c42a3a46158fe9ffdbcc08e5216ad4b0c367e844682ec4af72ed50",
+			"winner": "b4"
+		},
+		{
+			"actions": "33affb9f49991078c9ae73a8219a62ee74581f68c41d4c9616cf776f939e9601",
+			"events": "e0ee85c9c64c2519199eb51d7b69dd76b97903ee71196352a1eab7381d9da346",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "full",
+			"n": 2,
+			"seed": 4889,
+			"steps": 20,
+			"views": "ef3ea871188966a78185be6066a50b23e1069f26514644e2802e16f8c630b614",
+			"winner": "b1"
+		},
+		{
+			"actions": "ea38f36d42ef47ef2a27bb009678c436af3d57fb3c061c1a5146c48cc72cbc0e",
+			"events": "38c161b1a1ee2ce1faa50e188d7059f103eece0aca877ca76c5f440034472141",
+			"levels": [
+				"hard"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 4926,
+			"steps": 51,
+			"views": "f92cac3e0fb524ae7f58fc6d8abb72cbe4b49b047e3cf00b8346db0359aadd74",
+			"winner": "b2"
+		},
+		{
+			"actions": "3bf131370563533cd7bd20420d966c1f46127ada19af21fc43caeb7b6d6e890a",
+			"events": "8d7ae59c5815b943af62ca30a700661f2001c731d0f350226bc8a2952e3aa106",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 4963,
+			"steps": 79,
+			"views": "3222368cfc9a068cc2137fc26f081e61b50e829ee95bb9ef0a77c84ca687615d",
+			"winner": "b0"
+		},
+		{
+			"actions": "e019abf9cffbca1c7a4a32896f6ad4da8feef7f041ca78337c03861a7c0d8504",
+			"events": "7846f75adbf9aff9529b153d1dd79b073bc9e4d466b47fc1511353259586bbf4",
+			"levels": [
+				"easy"
+			],
+			"mode": "full",
+			"n": 5,
+			"seed": 5000,
+			"steps": 45,
+			"views": "932db94f382694ead6428b6366a8fb6c09a4aa20ebb8a81607ef4a078247dad2",
+			"winner": "b1"
+		},
+		{
+			"actions": "7cb9d0562c5215a05dfdec28aa6092883215432266fa1274e26ca0a796686240",
+			"events": "e9990464894958e8d615b741ba9fb7fb0c0b7d5330095c6f13838d71712f0266",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 5037,
+			"steps": 28,
+			"views": "ce6e04361a4704da6d8495cb6a8bad91ec17a68bfd28bfcfad9ad65743899943",
+			"winner": "b0"
+		},
+		{
+			"actions": "f4e6a4555a77c37032ebf850e06152e0ab3b46a5c75cf1eb66f305c655bb278c",
+			"events": "2a8da7df30ad9ec69420b25f3f8a40d11ad20323a4c3c51d16775a21c9887425",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 5074,
+			"steps": 49,
+			"views": "d669f1db4707b803494570de515dbc2e088bbb6f4a7feb414a9d30bb594bc18f",
+			"winner": "b2"
+		},
+		{
+			"actions": "34d1f0604b21047d569856680d04652078e2826ed3a668094abf142c63616084",
+			"events": "b9d86299a502cdf853bb6b5a57a2e751c480efcb6ba60e4ccc601b3e153536fe",
+			"levels": [
+				"hard"
+			],
+			"mode": "full",
+			"n": 4,
+			"seed": 5111,
+			"steps": 46,
+			"views": "fad6e2e61167760aa609168bc4e1912a25913294bef5ce1899263c227a93a020",
+			"winner": "b3"
+		},
+		{
+			"actions": "810ea3d2ef013c8495bc23bbe9564cfb01d0b36a1c0a54677711a8ccbcb1d428",
+			"events": "7347476284cc0d42fbf681a63957183f11efcee719a4745de991eee8b6471ff1",
+			"levels": [
+				"normal",
+				"hard",
+				"easy"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 5148,
+			"steps": 85,
+			"views": "6c22395faee6a06da82632f92e89383b33530a9b62e89216cdfef590229e4534",
+			"winner": "b4"
+		},
+		{
+			"actions": "163f43ad68215a1bf629848df908816c27b39867a1fadade657484a00b2a34f8",
+			"events": "da4e8594c158a1c61afc73ef463f920d55288339d6e8291742b5d946870b4551",
+			"levels": [
+				"normal"
+			],
+			"mode": "official",
+			"n": 2,
+			"seed": 5185,
+			"steps": 20,
+			"views": "bf7bcd6610f07354edc2b71af334b07f5aab8fcab26bb005e5af52180a15ba3b",
+			"winner": "b0"
+		},
+		{
+			"actions": "ec02c1f6156c3ca3a1c79cdb596cf9142debc3f6b17a97fcb2476be32b51de2f",
+			"events": "2aebece272fb74319f7b5ae91a93573bdd28e946272fbdb32578378a1ce82e9b",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "full",
+			"n": 3,
+			"seed": 5222,
+			"steps": 60,
+			"views": "e9b9786b7270aa1b1ce44640673f7b5c520fb29fcc174e2c19deb22d7161ece7",
+			"winner": "b2"
+		},
+		{
+			"actions": "5b19e677a3826104032f210f694932c75faee91b9673367131e4f0674e115331",
+			"events": "aca476df8d2dcf3b4d7b1f0f414b30acdef338854507f8b7922a4a63632d8cad",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 5259,
+			"steps": 85,
+			"views": "cbdd9be5b3a46894c24f9a48e0f3a486b3ce6ec5299e1f68bda16ff6aff7f974",
+			"winner": "b3"
+		},
+		{
+			"actions": "844d6e5fe908ea51f0fd536ed6ec0703bed6f8eb0d9cf2c22b929cc91cc1d6d0",
+			"events": "77995aae6bc01e88553fc37717ce375ba1357be9ab5a4792594defc26689563a",
+			"levels": [
+				"hard"
+			],
+			"mode": "official",
+			"n": 5,
+			"seed": 5296,
+			"steps": 88,
+			"views": "a1cd4fb4cab0dc79be8d30139297a44bd583b8d8abf5de7c928f4c24afb96a6d",
+			"winner": "b0"
+		},
+		{
+			"actions": "6fb4af01338af649e4521abaa7d30b5ddbd8be1faf65ded8b663104bbbb21c3e",
+			"events": "31bb5cc0e0c84e619d9a87e31a81c5f948499ef0b3bae0e7262e8e4f885bb2e0",
+			"levels": [
+				"easy"
+			],
+			"mode": "full",
+			"n": 2,
+			"seed": 5333,
+			"steps": 70,
+			"views": "4db2175d20a1afb19f39550948cb754a6d6a34fc78b2cc01b38dc532e559b001",
+			"winner": "b1"
+		},
+		{
+			"actions": "00544edb0572ba2762455b6e0ab511164b481c0d8bbb8df175248b167108d600",
+			"events": "ab6f2987230782baf3f86b58ef43d55e031f33d715047f749ed9a22753dfab8f",
+			"levels": [
+				"normal"
+			],
+			"mode": "official",
+			"n": 3,
+			"seed": 5370,
+			"steps": 42,
+			"views": "51bfcb9f8c0942b8f318b2b8e97edf9d6831d5d3ac0702b8f18384df0edcd356",
+			"winner": "b0"
+		},
+		{
+			"actions": "96183922302a748361a336afbb7c9d1541c7883c5d3067771b23cfe1d9139200",
+			"events": "81a5919299277562740827cc11b4aa58f07c6dd1d5a3974c01fb500bed4707b1",
+			"levels": [
+				"hard",
+				"normal"
+			],
+			"mode": "official",
+			"n": 4,
+			"seed": 5407,
+			"steps": 70,
+			"views": "41fee7aa87481afc0b70b012b85d8fbc2db47ad6e79dbb196e5997a8b4258ec0",
+			"winner": "b0"
+		},
+		{
+			"actions": "dfff3e35397b141316313adb147a1c22f25a0bbba748fa38f1427b5b05d1ae84",
+			"events": "f6ead413d6a60c74f6f1c20d7994ed6b1ee374b29dfa429e62fbabce2b0dec48",
+			"levels": [
+				"easy",
+				"normal",
+				"hard"
+			],
+			"mode": "full",
+			"n": 5,
+			"seed": 5444,
+			"steps": 86,
+			"views": "5c357c7d38587c77cbc54ff0e33bbf83902ddd2b0f51d00e4619d20c99d64681",
+			"winner": "b1"
+		}
+	]
+}

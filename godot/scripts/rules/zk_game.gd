@@ -15,6 +15,8 @@ const DECK := [
 	["dig_deeper", 2, 2], ["clairvoyance", 1, 1],
 	["cat_a", 2, 2], ["cat_b", 2, 2], ["cat_c", 2, 2], ["cat_d", 2, 2],
 ]
+## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta» se añadirá en tareas posteriores.
+const DECK_CRYPT := []
 const NAMES := {
 	"exploding": "Gatito Explosivo", "zombie": "Gatito Zombi", "attack": "Ataque (2x)",
 	"attack_dead": "Ataque de los Muertos", "nope": "Nop", "skip": "Saltar", "super_skip": "Súper Salto",
@@ -82,6 +84,14 @@ var cur: int = 0
 var turns_left: int = 1
 var attacked: bool = false
 var idle_since: int = 0
+# --- Plus (con plus = false no se lee ni se cambia nada observable)
+var plus: bool = false
+var packs: Array = []
+var rules: Dictionary = {}
+var names: Dictionary = {}          # {tipo: nombre} de las cartas de packs (el motor no lee CardDB)
+var dir: int = 1                    # sentido de juego (+1 / -1)
+var tops: int = 0                   # cartas retiradas de ARRIBA del mazo desde el último cambio de `shuf`
+var deck_types: Array[String] = []  # tipos presentes en esta partida (sin exploding)
 
 
 static func is_cat(t: String) -> bool:
@@ -107,6 +117,11 @@ func _init(opts: Dictionary) -> void:
 		rnd = opts.get("rnd", func() -> float: return randf())
 	cfg = DEFAULT_CFG.duplicate()
 	cfg.merge(opts.get("cfg", {}), true)
+	plus = bool(opts.get("plus", false))
+	if plus:
+		packs = (opts.get("packs", []) as Array).duplicate()
+		rules = (opts.get("rules", {}) as Dictionary).duplicate()
+		names = (opts.get("names", {}) as Dictionary).duplicate()
 	for d: Dictionary in opts["players"]:
 		var p := Player.new()
 		p.id = d["id"]
@@ -124,7 +139,10 @@ func _setup(mode: String) -> void:
 	var cards: Array[Card] = []
 	var zombies: Array[Card] = []
 	var eks: Array[Card] = []
-	for row: Array in DECK:
+	var rows: Array = DECK.duplicate()
+	if plus and packs.has("crypt"):
+		rows.append_array(DECK_CRYPT)
+	for row: Array in rows:
 		var type: String = row[0]
 		var groups: Array = []
 		if mode == "full" or n >= 4:
@@ -134,6 +152,8 @@ func _setup(mode: String) -> void:
 		else:
 			groups = [[row[2], false]]
 		for g: Array in groups:
+			if int(g[0]) > 0 and not deck_types.has(type):
+				deck_types.append(type)
 			for _i in int(g[0]):
 				next_id += 1
 				var c := Card.new("c%d" % next_id, type, g[1])
@@ -209,6 +229,8 @@ func emit(type: String, data: Dictionary = {}, to: String = "") -> Dictionary:
 	seq += 1
 	var e := {"seq": seq, "type": type}
 	e.merge(data)
+	if plus and (type == "future" or type == "clair" or type == "inserted"):
+		e["tops"] = tops
 	if to != "":
 		e["to"] = to
 	events.append(e)
@@ -221,12 +243,13 @@ func shuffle_draw() -> void:
 	shuffle_arr(draw, rnd)
 	mut += 1
 	shuf += 1
+	tops = 0
 
 
 func next_living_idx(from: int) -> int:
 	var n := players.size()
 	for k in range(1, n + 1):
-		var i := (from + k) % n
+		var i := posmod(from + k * dir, n)
 		if players[i].alive:
 			return i
 	return from
@@ -355,7 +378,7 @@ func plan(player_id: String, ids: Variant, target: Variant = null, named: Varian
 	if combo == "combo3":
 		if _none(named):
 			return {"need": "named", "eff": combo, "cards": cards, "target": target, "of": real[0].type}
-		if not NAMES.has(named) or named == "exploding":
+		if (not deck_types.has(named) if plus else not NAMES.has(named)) or named == "exploding":
 			return {"err": "Carta inválida."}
 	return {"kind": "action", "eff": combo, "cards": cards, "target": target, "named": named if combo == "combo3" else null, "of": real[0].type}
 
@@ -547,6 +570,7 @@ func _apply(s: Dictionary, now: int) -> void:
 				emit("info", {"text": "Solo queda 1 carta en el mazo: Cava Más Hondo no tiene efecto."})
 				return
 			var card: Card = draw.pop_back()
+			tops += 1
 			mut += 1
 			prompt = {"type": "dig", "player": p.id, "card": card, "start": now, "deadline": _dl([p.id], now)}
 		"combo2":
@@ -619,6 +643,7 @@ func _do_draw(p: Player, now: int) -> String:
 	if not idle():
 		return "Espera a que termine la acción en curso."
 	var c: Card = draw.pop_back()
+	tops += 1
 	mut += 1
 	emit("draw", {"player": p.id})
 	_receive(p, c, now)
@@ -706,6 +731,7 @@ func _finish_insert(now: int) -> void:
 		draw.insert(maxi(0, draw.size() - pr.pendingPos[i]), pr.eks[i])
 	mut += 1
 	shuf += 1
+	tops = 0
 	for w: String in pr.watchers:
 		emit("clair", {"positions": pr.pendingPos.duplicate(), "len": draw.size(), "shuf": shuf, "text": "Clarividencia: viste dónde quedó cada Gatito Explosivo."}, w)
 	prompt = null
@@ -728,6 +754,7 @@ func _do_dig(p: Player, keep: bool, now: int) -> String:
 		draw.append(pr.card)
 		mut += 1
 		shuf += 1
+		tops = 0
 		emit("info", {"text": p.name + " no quiso la primera carta… y roba la siguiente."})
 		_receive(p, second, now)
 	_settle(now)
@@ -854,6 +881,8 @@ func signature() -> String:
 			s += str(prompt.watchers.size())
 	for p in players:
 		s += "1" if p.connected else "0"
+	if plus:
+		s += "|d%d" % dir
 	return s
 
 
@@ -876,6 +905,15 @@ func view(player_id: String, now: int) -> Dictionary:
 		"win": null, "prompt": null, "over": over,
 		"events": events.filter(func(e: Dictionary) -> bool: return not e.has("to") or e.to == player_id),
 	}
+	if plus:
+		v["plus"] = true
+		v["packs"] = packs.duplicate()
+		v["dir"] = dir
+		v["deckTypes"] = deck_types.duplicate()
+		v["tops"] = tops
+		v["shuf"] = shuf
+		v["rules"] = rules.duplicate()
+		v["discard"] = discard.slice(maxi(0, discard.size() - 20)).map(func(d: Dictionary) -> Dictionary: return {"id": d.card.id, "type": d.card.type, "by": d.by})
 	if me != null:
 		for c in me.hand:
 			var pl := plan(player_id, [c.id])

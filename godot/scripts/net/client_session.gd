@@ -34,7 +34,7 @@ func send(m: Dictionary) -> void:
 
 
 func hello(player_name: String, avatar: int, token: String) -> void:
-	send({"t": "hello", "name": player_name, "avatar": avatar, "token": token})
+	send({"t": "hello", "name": player_name, "avatar": avatar, "token": token, "proto": Net.PROTO})
 
 
 func receive(m: Dictionary) -> void:
@@ -74,6 +74,10 @@ func level_of(id: String) -> String:
 		if p.id == id and p.bot:
 			return p.level
 	return ""
+
+
+func is_plus() -> bool:
+	return bool(lobby.get("settings", {}).get("plus", false))
 
 
 func is_network() -> bool:
