@@ -26,6 +26,7 @@ func _initialize() -> void:
 	_test_classic_guard()
 	_test_plus_engine()
 	_test_crypt_cards_1()
+	_test_crypt_cards_2()
 	_test_plus_network()
 	_test_difficulty()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
@@ -228,6 +229,8 @@ func _simulate(n: int, seed_value: int, mode: String, levels: Array, plus: bool 
 			now += 400
 		else:
 			var d := g.next_deadline()
+			if g.over != null:
+				break   # la partida pudo terminar dentro de tick(): no es un atasco
 			if not _check(d >= 0, "partida atascada (semilla %d)" % seed_value):
 				return ""
 			now = maxi(now + 1, d)
@@ -502,6 +505,7 @@ func _test_plus_network() -> void:
 # ---------------------------------------------------------------- Plus (T23): La Cripta, cartas 1-5
 
 const CRYPT_1 := ["targeted_attack", "reverse", "draw_bottom", "crow_eye", "apocalypse"]
+const CRYPT_2 := ["alter_future", "bury", "soul_swap", "haunt"]
 
 var _clk := 0
 var _tid := 0
@@ -578,7 +582,7 @@ func _test_crypt_cards_1() -> void:
 
 func _crypt_deal() -> void:
 	var want := {2: [0, 0, 1, 1, 0], 3: [2, 2, 2, 1, 1], 4: [2, 2, 3, 2, 1], 5: [2, 2, 3, 2, 1]}
-	var extra := {2: 2, 3: 8, 4: 10, 5: 10}
+	var extra := {2: 4, 3: 13, 4: 17, 5: 17}   # con las cartas 1-9 del pack
 	for n: int in [2, 3, 4, 5]:
 		var g := _mk(n, 7, "official", null, true, ["crypt"])
 		var base := _mk(n, 7, "official", null, true)
@@ -958,8 +962,57 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 		bots.learn()
 		var acted := false
 		var c := g.cur_p()
-		if c.alive and g.idle() and tp.next() < 0.4:
-			var opts: Array = c.hand.filter(func(x: Game.Card) -> bool: return x.type == "clone" or CRYPT_1.has(x.type))
+		# decisiones alter / bury: a veces se responde (a veces mal), a veces se deja vencer el plazo
+		if g.prompt != null and (g.prompt.type == "alter" or g.prompt.type == "bury"):
+			var pr: Dictionary = g.prompt
+			var r := tp.next()
+			var who: String = pr.player
+			if pr.type == "alter":
+				var m: int = pr.cards.size()
+				var order: Array = []
+				for i in m:
+					order.append(i)
+				if r < 0.5:
+					for i in range(m - 1, 0, -1):
+						var j := int(tp.next() * (i + 1))
+						var t: Variant = order[i]
+						order[i] = order[j]
+						order[j] = t
+					if _check(g.act(who, {"a": "reorder", "order": order}, now) == "", "reorder válido rechazado (semilla %d)" % seed_value):
+						stats["resp_alter"] = int(stats.get("resp_alter", 0)) + 1
+						acted = true
+				elif r < 0.6:
+					var before := g.signature()
+					_check(g.act(who, {"a": "reorder", "order": order + [m]}, now) != "" and g.signature() == before, "reorder inválido aceptado (semilla %d)" % seed_value)
+			else:
+				if r < 0.5:
+					var pos := int(tp.next() * (g.draw.size() + 1))
+					if _check(g.act(who, {"a": "bury", "pos": pos}, now) == "", "bury válido rechazado (semilla %d)" % seed_value):
+						stats["resp_bury"] = int(stats.get("resp_bury", 0)) + 1
+						acted = true
+				elif r < 0.6:
+					var before2 := g.signature()
+					_check(g.act(who, {"a": "bury", "pos": g.draw.size() + 1}, now) != "" and g.signature() == before2, "bury inválido aceptado (semilla %d)" % seed_value)
+		# jugadores muertos que espantan
+		if not acted and g.over == null and tp.next() < 0.3:
+			for dp in g.players:
+				var hc: Game.Card = dp.find_type("haunt") if not dp.alive else null
+				if hc == null:
+					continue
+				var plh := g.plan(dp.id, [hc.id])
+				if plh.has("err"):
+					continue
+				var cands: Array = g.players.filter(func(o: Game.Player) -> bool: return o.alive and o.hand.size() > 0)
+				if cands.is_empty():
+					continue
+				var errh := g.act(dp.id, {"a": "play", "cards": [hc.id], "target": cands[int(tp.next() * cands.size())].id}, now)
+				if _check(errh == "", "el muerto no pudo espantar: %s" % errh):
+					stats["dead_haunt"] = int(stats.get("dead_haunt", 0)) + 1
+					stats["haunt"] = int(stats.get("haunt", 0)) + 1
+					acted = true
+				break
+		if not acted and c.alive and g.idle() and tp.next() < 0.4:
+			var opts: Array = c.hand.filter(func(x: Game.Card) -> bool: return x.type == "clone" or CRYPT_1.has(x.type) or CRYPT_2.has(x.type))
 			if not opts.is_empty():
 				var card: Game.Card = opts[int(tp.next() * opts.size())]
 				var pl := g.plan(c.id, [card.id])
@@ -975,6 +1028,8 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 								return o.hand.size() > 0
 							if pl.need == "dead":
 								return not o.alive
+							if pl.need == "dead_hand":
+								return not o.alive and o.hand.size() > 0
 							return o.alive and o.hand.size() > 0)
 						if not cand.is_empty():
 							target = cand[int(tp.next() * cand.size())].id
@@ -1001,6 +1056,8 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 			var d := g.next_deadline()
 			if g.over != null:
 				break   # la partida pudo terminar al resolverse una jugada en tick()
+			if g.prompt != null and (g.prompt.type == "alter" or g.prompt.type == "bury"):
+				stats["exp_" + g.prompt.type] = int(stats.get("exp_" + g.prompt.type, 0)) + 1
 			if not _check(d >= 0, "partida atascada con La Cripta (semilla %d)" % seed_value):
 				return ""
 			now = maxi(now + 1, d)
@@ -1009,9 +1066,13 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 		if steps % 5 == 0:
 			for p in g.players:
 				for e: Dictionary in g.view(p.id, now).events:
-					if e.type == "peek" and e.get("to", "") != p.id:
-						_check(false, "el peek llegó a quien no debía (semilla %d)" % seed_value)
+					if (e.type == "peek" or e.type == "buried" or e.type == "future") and e.get("to", "") != p.id:
+						_check(false, "un evento privado llegó a quien no debía (semilla %d)" % seed_value)
 						return ""
+				var vp: Variant = g.view(p.id, now).prompt
+				if vp != null and (vp.type == "alter" or vp.type == "bury") and not vp.mine and (vp.has("cards") or vp.has("card")):
+					_check(false, "la decisión oculta se filtró a otro jugador (semilla %d)" % seed_value)
+					return ""
 		if g.over == null:
 			var eks := 0
 			for x in g.draw:
@@ -1026,13 +1087,578 @@ func _crypt_sim_game(n: int, seed_value: int, mode: String, levels: Array, stats
 func _crypt_simulation() -> void:
 	var stats := {}
 	var games := 0
-	for s in 80:
+	for s in 110:
 		for n in [2, 3, 4, 5]:
 			if _crypt_sim_game(n, 5000 + s * 29 + n, "full" if s % 4 == 0 else "official", [["easy", "normal", "hard"], ["hard"], ["normal", "easy"]][s % 3], stats) == "":
 				return
 			games += 1
 	var played := true
-	for t: String in CRYPT_1:
+	for t: String in CRYPT_1 + CRYPT_2:
 		played = _check(int(stats.get(t, 0)) > 0, "la simulación nunca jugó %s" % t) and played
+	for k: String in ["resp_alter", "resp_bury", "exp_alter", "exp_bury", "dead_haunt"]:
+		played = _check(int(stats.get(k, 0)) > 0, "la simulación nunca ejerció %s" % k) and played
 	if played:
 		print("    %d partidas con La Cripta sin atascos ni cartas perdidas; jugadas de prueba: %s" % [games, stats])
+
+
+# ---------------------------------------------------------------- La Cripta, cartas 6-9 (+ arreglo del Ataque Dirigido)
+
+## Sustituye el mazo: types[0] = fondo … types.back() = arriba. Ids x0, x1…
+func _setdraw(g: Game, types: Array) -> Array[Game.Card]:
+	var out: Array[Game.Card] = []
+	for i in types.size():
+		out.append(Game.Card.new("x%d" % i, types[i], false))
+	g.draw.clear()
+	g.draw.append_array(out)
+	return out
+
+
+func _public_info(g: Game) -> Array:
+	return _evs(g, "info").filter(func(e: Dictionary) -> bool: return not e.has("to"))
+
+
+func _test_crypt_cards_2() -> void:
+	print("Plus: La Cripta (cartas 6-9)")
+	var f0 := _fails
+	_crypt2_deal()
+	_crypt_alter_future()
+	_crypt_bury()
+	_crypt_soul_swap()
+	_crypt_haunt()
+	_crypt_targeted_attack_self()
+	if _fails == f0:
+		_ok("Alterar el Futuro, Entierro, Trueque de Almas, Espanto y el arreglo del Ataque Dirigido: reparto, casos y contadores")
+
+
+func _crypt2_deal() -> void:
+	var want := {2: [1, 1, 0, 0], 3: [1, 1, 1, 2], 4: [2, 2, 1, 2], 5: [2, 2, 1, 2]}
+	var extra := {2: 4, 3: 13, 4: 17, 5: 17}
+	var kinds := {2: 4, 3: 9, 4: 9, 5: 9}
+	for n: int in [2, 3, 4, 5]:
+		var g := _mk(n, 7, "official", null, true, ["crypt"])
+		var base := _mk(n, 7, "official", null, true)
+		for i in CRYPT_2.size():
+			var got := _count_type(g, CRYPT_2[i])
+			_check(got == want[n][i], "%d jugadores: %d copias de %s (salieron %d)" % [n, want[n][i], CRYPT_2[i], got])
+			_check((got > 0) == g.deck_types.has(CRYPT_2[i]), "%d jugadores: deck_types coherente con %s" % [n, CRYPT_2[i]])
+			_check(_count_type(base, CRYPT_2[i]) == 0 and not base.deck_types.has(CRYPT_2[i]), "%d jugadores, plus sin packs: no aparece %s" % [n, CRYPT_2[i]])
+		_check(_count(g) == _count(base) + extra[n], "%d jugadores: %d cartas más que sin pack con las cartas 1-9 (hay %d)" % [n, extra[n], _count(g) - _count(base)])
+		var nt := 0
+		for t: String in CRYPT_1 + CRYPT_2:
+			nt += 1 if g.deck_types.has(t) else 0
+		_check(nt == kinds[n], "%d jugadores: %d tipos nuevos en deck_types (hay %d)" % [n, kinds[n], nt])
+
+
+# ---- Alterar el Futuro
+
+func _crypt_alter_future() -> void:
+	var g := _cg(4)
+	var al := _give(g, 0, "alter_future")
+	var cs := _setdraw(g, ["cat_a", "cat_b", "super_skip", "see_future", "dig_deeper"])
+	g.tops = 3
+	_check(g.plan("b0", [al.id]).get("kind") == "action" and g.view("b0", 0).playable.get(al.id) == 1, "Alterar el Futuro: jugable sin objetivo")
+	var ob := _give(g, 1, "alter_future")
+	_check(g.plan("b1", [ob.id]).has("err"), "Alterar el Futuro: fuera de turno rechazado")
+	g.players[1].hand.clear()
+	_check(_play(g, "b0", al) == "", "Alterar el Futuro: se juega")
+	_check(_evs(g, "play")[0].text == "B0 juega Alterar el Futuro (3x).", "Alterar el Futuro: texto del evento play")
+	_resolve(g)
+	var pr: Variant = g.prompt
+	_check(pr != null and pr.type == "alter" and pr.player == "b0" and pr.cards.size() == 3 and pr.cards[0] == cs[4] and pr.cards[1] == cs[3] and pr.cards[2] == cs[2], "Alterar el Futuro: abre la decisión con las 3 de arriba (la primera es la próxima)")
+	_check(g.draw.size() == 5 and g.cur == 0 and _in_discard(g, al), "Alterar el Futuro: las cartas siguen en el mazo y la carta jugada va al descarte")
+	var v0 := g.view("b0", _clk)
+	var v1 := g.view("b1", _clk)
+	_check(v0.prompt.type == "alter" and v0.prompt.mine and v0.prompt.player == "b0" and v0.prompt.cards == ["dig_deeper", "see_future", "super_skip"], "Alterar el Futuro: quien decide ve los tipos")
+	_check(v1.prompt.type == "alter" and not v1.prompt.mine and v1.prompt.player == "b0" and not v1.prompt.has("cards") and not v1.prompt.has("card") and v1.prompt.remain > 0 and v1.prompt.total == 40000, "Alterar el Futuro: los demás solo ven quién decide y el tiempo")
+	_check(g.next_deadline() == pr.deadline, "Alterar el Futuro: next_deadline es el plazo de la decisión")
+	# estados y argumentos inválidos
+	var sig := g.signature()
+	var ids := _ids(g.draw)
+	var bad: Array = [[0, 1], [0, 1, 2, 3], [0, 0, 1], [0, 1, 3], [-1, 0, 1], [0, 1, "2"], [0.5, 1, 2], [0, 1, null], null, "012", {}, [true, 0, 1], []]
+	var all_bad := true
+	for o: Variant in bad:
+		all_bad = all_bad and g.act("b0", {"a": "reorder", "order": o}, _clk) != ""
+	all_bad = all_bad and g.act("b0", {"a": "reorder"}, _clk) != ""
+	_check(all_bad and g.prompt == pr and g.signature() == sig and _ids(g.draw) == ids, "Alterar el Futuro: órdenes inválidos rechazados sin cambiar nada")
+	_check(g.act("b1", {"a": "reorder", "order": [0, 1, 2]}, _clk) != "" and g.act("b0", {"a": "bury", "pos": 0}, _clk) != "" and g.act("b0", {"a": "draw"}, _clk) != "", "Alterar el Futuro: otro jugador, otra acción o robar son rechazados")
+	var hc := _give(g, 0, "skip")
+	_check(g.plan("b0", [hc.id]).has("err") and g.act("b0", {"a": "pass"}, _clk) != "", "Alterar el Futuro: mientras decide no se puede jugar otra carta")
+	g.players[0].hand.clear()
+	# respuesta válida
+	var m0 := g.mut
+	var s0 := g.shuf
+	g.events.clear()
+	_check(g.act("b0", {"a": "reorder", "order": [2, 0, 1]}, _clk) == "", "Alterar el Futuro: reorder [2, 0, 1] aceptado")
+	_check(g.draw[4] == cs[2] and g.draw[3] == cs[4] and g.draw[2] == cs[3] and g.draw[1] == cs[1] and g.draw[0] == cs[0], "Alterar el Futuro: order[0] pasa a ser la próxima carta y el resto del mazo no cambia")
+	_check(g.prompt == null and g.mut == m0 + 1 and g.shuf == s0 + 1 and g.tops == 0, "Alterar el Futuro: mut + 1, shuf + 1, tops a 0")
+	_check(g.cur == 0 and g.turns_left == 1 and not g.attacked, "Alterar el Futuro: NO termina el turno")
+	var fu := _evs(g, "future")
+	_check(fu.size() == 1 and fu[0].to == "b0" and fu[0].cards == ["super_skip", "dig_deeper", "see_future"] and fu[0].mut == g.mut and fu[0].shuf == g.shuf and fu[0].len == 5 and fu[0].tops == 0, "Alterar el Futuro: evento future privado con el orden nuevo y tops")
+	var pub := _public_info(g)
+	_check(pub.size() == 1 and pub[0].text == "B0 reordena el futuro.", "Alterar el Futuro: info público «X reordena el futuro.»")
+	_check(g.view("b1", _clk).events.filter(func(e: Dictionary) -> bool: return e.type == "future").is_empty() and g.view("b1", _clk).tops == 0 and g.view("b1", _clk).shuf == s0 + 1, "Alterar el Futuro: el future no llega a otros y view.tops/shuf reflejan los contadores")
+	# mismos campos que Ver el Futuro
+	var sf := _give(g, 0, "see_future")
+	g.events.clear()
+	_play(g, "b0", sf)
+	_resolve(g)
+	var k1: Array = fu[0].keys()
+	var k2: Array = _evs(g, "future")[0].keys()
+	k1.sort()
+	k2.sort()
+	_check(k1 == k2, "Alterar el Futuro: el future lleva los mismos campos que el de Ver el Futuro")
+	_check(_evs(g, "future")[0].cards == ["super_skip", "dig_deeper", "see_future"], "Ver el Futuro tras alterar: ve el orden nuevo")
+	# order con números reales (como llega por JSON)
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	cs = _setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", al)
+	_resolve(g)
+	_check(g.act("b0", {"a": "reorder", "order": [1.0, 2.0, 0.0]}, _clk) == "" and g.draw[2] == cs[1] and g.draw[1] == cs[0] and g.draw[0] == cs[2], "Alterar el Futuro: acepta índices enteros en coma flotante")
+	# anulada con Nop
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	var nope := _give(g, 1, "nope")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	ids = _ids(g.draw)
+	_play(g, "b0", al)
+	g.act("b1", {"a": "play", "cards": [nope.id]}, _clk)
+	_resolve(g)
+	_check(g.prompt == null and _ids(g.draw) == ids and g.shuf == 0 and _in_discard(g, al) and _evs(g, "cancel").size() == 1, "Alterar el Futuro anulado: sin decisión, sin cambios y la carta se pierde")
+	# con Clon
+	g = _cg(3)
+	g.discard.append({"card": _card("alter_future"), "by": "b2"})
+	var cl := _give(g, 0, "clone")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_check(g.plan("b0", [cl.id]).get("kind") == "action", "Clon de Alterar el Futuro: jugable sin objetivo")
+	_play(g, "b0", cl)
+	_check(_evs(g, "play")[0].text == "B0 juega Clon (como Alterar el Futuro (3x)).", "Clon de Alterar el Futuro: texto")
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.type == "alter" and g.prompt.cards.size() == 3, "Clon de Alterar el Futuro: abre la decisión")
+	# sin efecto si dejó de ser mi turno
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", al)
+	g.cur = 2
+	_resolve(g)
+	_check(g.prompt == null, "Alterar el Futuro: sin efecto si dejó de ser mi turno")
+	# menos de 3 cartas
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	cs = _setdraw(g, ["cat_a", "cat_b"])
+	_play(g, "b0", al)
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.cards.size() == 2 and g.act("b0", {"a": "reorder", "order": [0, 1, 2]}, _clk) != "" and g.act("b0", {"a": "reorder", "order": [0]}, _clk) != "", "Alterar el Futuro con 2 cartas: la permutación es de 2")
+	_check(g.act("b0", {"a": "reorder", "order": [1, 0]}, _clk) == "" and g.draw[1] == cs[0] and g.draw[0] == cs[1], "Alterar el Futuro con 2 cartas: reordena")
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	cs = _setdraw(g, ["cat_a"])
+	_play(g, "b0", al)
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.cards.size() == 1 and g.act("b0", {"a": "reorder", "order": [0]}, _clk) == "" and g.draw[0] == cs[0], "Alterar el Futuro con 1 carta: decisión de tamaño 1")
+	g = _cg(3)
+	al = _give(g, 0, "alter_future")
+	_setdraw(g, [])
+	_play(g, "b0", al)
+	_resolve(g)
+	_check(g.prompt == null and g.cur == 0 and _evs(g, "info").size() == 1, "Alterar el Futuro con el mazo vacío: no hace nada y no deja la partida atascada")
+	# plazo vencido: se deja el orden original
+	g = _cg(3)
+	g.players[0].bot = false
+	al = _give(g, 0, "alter_future")
+	cs = _setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d"])
+	_play(g, "b0", al)
+	_resolve(g)
+	var dl: int = g.prompt.deadline
+	_check(g.next_deadline() == dl, "Alterar el Futuro: el plazo cuenta (next_deadline)")
+	g.set_connected("b0", false, _clk)
+	_check(g.prompt.deadline <= _clk + int(g.cfg["GONE_MS"]) and g.prompt.deadline < dl, "Alterar el Futuro: set_connected acorta el plazo si quien decide se desconecta")
+	g.set_connected("b0", true, _clk)
+	g.events.clear()
+	m0 = g.mut
+	g.tick(g.prompt.deadline - 1)
+	_check(g.prompt != null, "Alterar el Futuro: antes del plazo sigue esperando")
+	g.tick(g.prompt.deadline)
+	_check(g.prompt == null and g.draw[3] == cs[3] and g.draw[2] == cs[2] and g.draw[1] == cs[1] and g.draw[0] == cs[0], "Alterar el Futuro: plazo vencido deja el orden original")
+	_check(g.cur == 0 and g.turns_left == 1 and g.mut == m0 + 1 and _evs(g, "future").size() == 1 and _evs(g, "future")[0].cards == ["cat_d", "cat_c", "cat_b"], "Alterar el Futuro: plazo vencido no termina el turno y emite el future")
+
+
+# ---- Entierro
+
+func _bury_game(n: int, types: Array) -> Game:
+	var g := _cg(n)
+	var by := _give(g, 0, "bury")
+	_setdraw(g, types)
+	_play(g, "b0", by)
+	_resolve(g)
+	return g
+
+
+func _crypt_bury() -> void:
+	var g := _cg(4)
+	var by := _give(g, 0, "bury")
+	var cs := _setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d", "super_skip"])
+	g.tops = 7
+	var m0 := g.mut
+	_check(g.plan("b0", [by.id]).get("kind") == "action" and g.view("b0", 0).playable.get(by.id) == 1, "Entierro: jugable sin objetivo")
+	var ob := _give(g, 1, "bury")
+	_check(g.plan("b1", [ob.id]).has("err"), "Entierro: fuera de turno rechazado")
+	g.players[1].hand.clear()
+	_play(g, "b0", by)
+	_check(_evs(g, "play")[0].text == "B0 juega Entierro.", "Entierro: texto del evento play")
+	_resolve(g)
+	var pr: Variant = g.prompt
+	_check(pr != null and pr.type == "bury" and pr.player == "b0" and pr.card == cs[4] and g.draw.size() == 4 and g.draw[3] == cs[3], "Entierro: la carta de arriba sale del mazo y abre la decisión")
+	_check(g.mut == m0 + 1 and g.tops == 8 and g.players[0].hand.is_empty() and _in_discard(g, by), "Entierro: mut + 1, tops + 1 y la carta no entra en la mano")
+	var v0 := g.view("b0", _clk)
+	var v1 := g.view("b1", _clk)
+	_check(v0.prompt.type == "bury" and v0.prompt.mine and v0.prompt.card == "super_skip", "Entierro: quien decide ve la carta")
+	_check(v1.prompt.type == "bury" and not v1.prompt.mine and v1.prompt.player == "b0" and not v1.prompt.has("card") and not v1.prompt.has("cards") and v1.prompt.remain > 0, "Entierro: los demás solo ven quién decide y el tiempo")
+	_check(g.next_deadline() == pr.deadline and g.draw.size() == 4, "Entierro: next_deadline es el plazo de la decisión")
+	# argumentos inválidos
+	var sig := g.signature()
+	var all_bad := true
+	for pos: Variant in [-1, 5, 1.5, "1", null, true, [0], 4.001, {}]:
+		all_bad = all_bad and g.act("b0", {"a": "bury", "pos": pos}, _clk) != ""
+	all_bad = all_bad and g.act("b0", {"a": "bury"}, _clk) != ""
+	_check(all_bad and g.prompt == pr and g.signature() == sig and g.draw.size() == 4, "Entierro: posiciones inválidas rechazadas sin cambiar nada")
+	_check(g.act("b1", {"a": "bury", "pos": 0}, _clk) != "" and g.act("b0", {"a": "reorder", "order": [0]}, _clk) != "" and g.act("b0", {"a": "draw"}, _clk) != "", "Entierro: otro jugador, otra acción o robar son rechazados")
+	# posiciones válidas: 0 = arriba … 4 = fondo
+	for pos: int in [0, 2, 4]:
+		g = _bury_game(4, ["cat_a", "cat_b", "cat_c", "cat_d", "super_skip"])
+		var bc: Game.Card = g.prompt.card
+		g.tops = 7
+		m0 = g.mut
+		var s0 := g.shuf
+		g.events.clear()
+		_check(g.act("b0", {"a": "bury", "pos": pos}, _clk) == "", "Entierro: pos %d aceptada" % pos)
+		_check(g.draw.size() == 5 and g.draw[4 - pos] == bc, "Entierro: pos %d deja la carta con %d cartas encima" % [pos, pos])
+		var rest := g.draw.filter(func(c: Game.Card) -> bool: return c != bc)
+		_check(_ids(rest) == "x0,x1,x2,x3", "Entierro: el resto del mazo conserva el orden (pos %d)" % pos)
+		_check(g.mut == m0 + 1 and g.shuf == s0 + 1 and g.tops == 0 and g.prompt == null, "Entierro: mut + 1, shuf + 1, tops a 0 (pos %d)" % pos)
+		var bu := _evs(g, "buried")
+		_check(bu.size() == 1 and bu[0].to == "b0" and bu[0].pos == pos and bu[0].len == 5, "Entierro: evento buried privado {pos, len} (pos %d)" % pos)
+		var pub := _public_info(g)
+		_check(pub.size() == 1 and pub[0].text == "B0 entierra una carta en el mazo.", "Entierro: info público «X entierra una carta en el mazo.»")
+		_check(g.cur == 1 and g.turns_left == 1, "Entierro: termina el turno (pos %d)" % pos)
+		var seen := 0
+		for o in ["b1", "b2", "b3"]:
+			seen += g.view(o, _clk).events.filter(func(e: Dictionary) -> bool: return e.type == "buried").size()
+		_check(seen == 0 and g.view("b0", _clk).events.filter(func(e: Dictionary) -> bool: return e.type == "buried").size() == 1, "Entierro: buried solo lo ve quien entierra")
+		_check(g.view("b2", _clk).tops == 0 and g.view("b2", _clk).shuf == s0 + 1, "Entierro: view.tops/shuf reflejan los contadores")
+	# un explosivo NO explota: se entierra
+	for with_zombie: bool in [true, false]:
+		g = _cg(3)
+		by = _give(g, 0, "bury")
+		if with_zombie:
+			_give(g, 0, "zombie")
+		var ek := Game.Card.new("e1", "exploding", false)
+		g.draw.clear()
+		g.draw.append_array([Game.Card.new("d0", "cat_a", false), ek])
+		var total := _count(g)
+		_play(g, "b0", by)
+		_resolve(g)
+		_check(g.prompt != null and g.prompt.type == "bury" and g.prompt.card == ek and g.players[0].alive and _evs(g, "boom").is_empty() and _evs(g, "died").is_empty(), "Entierro con explosivo (zombi: %s): no explota" % with_zombie)
+		_check(g.view("b0", _clk).prompt.card == "exploding" and not g.view("b1", _clk).prompt.has("card"), "Entierro con explosivo: solo quien entierra ve qué es")
+		_check(_count(g) == total and g.act("b0", {"a": "bury", "pos": 1}, _clk) == "" and g.draw[0] == ek and g.draw.size() == 2, "Entierro con explosivo: lo entierra en el fondo sin perder cartas")
+		_check(g.players[0].alive and g.cur == 1 and _count(g) == total, "Entierro con explosivo: sigue vivo y pasa el turno")
+	# anulado con Nop
+	g = _cg(3)
+	by = _give(g, 0, "bury")
+	var nope := _give(g, 1, "nope")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	var ids := _ids(g.draw)
+	g.tops = 4
+	_play(g, "b0", by)
+	g.act("b1", {"a": "play", "cards": [nope.id]}, _clk)
+	_resolve(g)
+	_check(g.prompt == null and _ids(g.draw) == ids and g.tops == 4 and g.cur == 0 and _in_discard(g, by), "Entierro anulado: no saca ninguna carta, no termina el turno y la carta se pierde")
+	# con Clon
+	g = _cg(3)
+	g.discard.append({"card": _card("bury"), "by": "b2"})
+	var cl := _give(g, 0, "clone")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", cl)
+	_check(_evs(g, "play")[0].text == "B0 juega Clon (como Entierro).", "Clon de Entierro: texto")
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.type == "bury" and g.prompt.card.type == "cat_c", "Clon de Entierro: abre la decisión")
+	# sin efecto si dejó de ser mi turno
+	g = _cg(3)
+	by = _give(g, 0, "bury")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", by)
+	g.cur = 2
+	_resolve(g)
+	_check(g.prompt == null and g.draw.size() == 3, "Entierro: sin efecto si dejó de ser mi turno")
+	# atacado: gasta un turno de los pendientes
+	g = _cg(3)
+	g.turns_left = 2
+	g.attacked = true
+	by = _give(g, 0, "bury")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", by)
+	_resolve(g)
+	g.act("b0", {"a": "bury", "pos": 1}, _clk)
+	_check(g.cur == 0 and g.turns_left == 1, "Entierro atacado: gasta un turno de los dos")
+	# mazo de una sola carta: tras sacarla solo cabe la posición 0
+	g = _bury_game(3, ["cat_a"])
+	_check(g.prompt != null and g.draw.is_empty() and g.act("b0", {"a": "bury", "pos": 1}, _clk) != "" and g.act("b0", {"a": "bury", "pos": 0}, _clk) == "" and g.draw.size() == 1, "Entierro con 1 carta en el mazo: solo vale pos 0")
+	# mazo vacío
+	g = _cg(3)
+	by = _give(g, 0, "bury")
+	_setdraw(g, [])
+	_play(g, "b0", by)
+	_resolve(g)
+	_check(g.prompt == null and g.cur == 0, "Entierro con el mazo vacío: no hace nada y no deja la partida atascada")
+	# plazo vencido: posición al azar con rnd
+	for pair: Array in [[0.0, 0], [0.999, 2], [0.5, 1]]:
+		g = _bury_game(3, ["cat_a", "cat_b", "cat_c"])
+		g.players[0].bot = false
+		var bc2: Game.Card = g.prompt.card
+		var dl: int = g.prompt.deadline
+		g.set_connected("b0", false, _clk)
+		_check(g.prompt.deadline < dl and g.next_deadline() == g.prompt.deadline, "Entierro: set_connected acorta el plazo si quien decide se desconecta")
+		g.set_connected("b0", true, _clk)
+		g.prompt.deadline = dl
+		g.rnd = func() -> float: return pair[0]
+		g.events.clear()
+		g.tick(dl - 1)
+		_check(g.prompt != null, "Entierro: antes del plazo sigue esperando")
+		g.tick(dl)
+		_check(g.prompt == null and g.draw.size() == 3 and g.draw[2 - int(pair[1])] == bc2, "Entierro: plazo vencido entierra en una posición al azar (rnd %s → pos %d)" % [pair[0], pair[1]])
+		_check(g.cur == 1 and _evs(g, "buried").size() == 1 and _evs(g, "buried")[0].pos == pair[1], "Entierro: plazo vencido termina el turno y emite buried")
+
+
+# ---- Trueque de Almas
+
+func _crypt_soul_swap() -> void:
+	var g := _cg(4)
+	var ss := _give(g, 0, "soul_swap")
+	var keep := _give(g, 0, "cat_a")
+	var z := _give(g, 1, "zombie")
+	var sk := _give(g, 1, "skip")
+	var cb := _give(g, 1, "cat_b")
+	g.players[1].alive = false
+	_give(g, 2, "cat_c")
+	g.players[3].alive = false
+	_check(g.plan("b0", [ss.id]).get("need") == "dead_hand" and g.view("b0", 0).playable.get(ss.id) == "dead_hand", "Trueque de Almas: need dead_hand (en plan y en view)")
+	_check(g.plan("b0", [ss.id], "b2").has("err") and g.plan("b0", [ss.id], "b3").has("err") and g.plan("b0", [ss.id], "b0").has("err") and g.plan("b0", [ss.id], "zz").has("err"), "Trueque de Almas: vivo, muerto sin cartas, uno mismo y desconocido rechazados")
+	_check(g.plan("b0", [ss.id], "b1").get("kind") == "action", "Trueque de Almas: vale un muerto con cartas")
+	_check(_play(g, "b0", ss, "b2") != "" and _play(g, "b0", ss, "b3") != "" and _play(g, "b0", ss) != "", "Trueque de Almas: act rechaza objetivo inválido o ausente")
+	var os := _give(g, 2, "soul_swap")
+	_check(g.plan("b2", [os.id], "b1").has("err"), "Trueque de Almas: fuera de turno rechazado")
+	g.players[2].hand.erase(os)
+	_check(_play(g, "b0", ss, "b1") == "", "Trueque de Almas: se juega")
+	_check(_evs(g, "play")[0].text == "B0 juega Trueque de Almas y quiere la mano de B1.", "Trueque de Almas: texto del evento play")
+	_resolve(g)
+	_check(g.players[0].hand.size() == 3 and g.players[0].hand[0] == z and g.players[0].hand[1] == sk and g.players[0].hand[2] == cb, "Trueque de Almas: b0 recibe la mano del muerto")
+	_check(g.players[1].hand.size() == 1 and g.players[1].hand[0] == keep and not g.players[1].alive, "Trueque de Almas: el muerto recibe la mano de b0 y sigue muerto")
+	var sw := _evs(g, "swap")
+	_check(sw.size() == 1 and sw[0].player == "b0" and sw[0].target == "b1" and not sw[0].has("to"), "Trueque de Almas: evento swap público {player, target}")
+	var gots := _evs(g, "got")
+	_check(gots.size() == 2 and gots.any(func(e: Dictionary) -> bool: return e.to == "b0" and e.n == 3) and gots.any(func(e: Dictionary) -> bool: return e.to == "b1" and e.n == 1), "Trueque de Almas: got privado con el número de cartas a cada uno")
+	_check(g.view("b2", _clk).events.filter(func(e: Dictionary) -> bool: return e.type == "got").is_empty(), "Trueque de Almas: got no llega a terceros")
+	_check(g.cur == 0 and g.turns_left == 1 and _in_discard(g, ss), "Trueque de Almas: no termina el turno")
+	# sin muertos con cartas: error
+	var g2 := _cg(3)
+	var s2 := _give(g2, 0, "soul_swap")
+	_check(g2.plan("b0", [s2.id]).has("err"), "Trueque de Almas: sin muertos con cartas es un error")
+	g2.players[1].alive = false
+	_check(g2.plan("b0", [s2.id]).has("err"), "Trueque de Almas: un muerto sin cartas no cuenta")
+	# anulado con Nop
+	g = _cg(3)
+	ss = _give(g, 0, "soul_swap")
+	_give(g, 0, "cat_a")
+	_give(g, 1, "cat_b")
+	g.players[1].alive = false
+	var nope := _give(g, 2, "nope")
+	_play(g, "b0", ss, "b1")
+	g.act("b2", {"a": "play", "cards": [nope.id]}, _clk)
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and g.players[0].hand[0].type == "cat_a" and g.players[1].hand.size() == 1 and g.players[1].hand[0].type == "cat_b" and _evs(g, "swap").is_empty() and _in_discard(g, ss), "Trueque de Almas anulado: las manos no cambian y la carta se pierde")
+	# con Clon
+	g = _cg(3)
+	g.discard.append({"card": _card("soul_swap"), "by": "b2"})
+	var cl := _give(g, 0, "clone")
+	var mine := _give(g, 0, "cat_a")
+	var theirs := _give(g, 1, "cat_b")
+	g.players[1].alive = false
+	_check(g.plan("b0", [cl.id]).get("need") == "dead_hand", "Clon de Trueque de Almas: pide objetivo dead_hand")
+	_check(g.plan("b0", [cl.id], "b2").has("err"), "Clon de Trueque de Almas: objetivo vivo rechazado")
+	_check(_play(g, "b0", cl, "b1") == "", "Clon de Trueque de Almas: se juega")
+	_check(_evs(g, "play")[0].text == "B0 juega Clon (como Trueque de Almas) y quiere la mano de B1.", "Clon de Trueque de Almas: texto")
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and g.players[0].hand[0] == theirs and g.players[1].hand.size() == 1 and g.players[1].hand[0] == mine, "Clon de Trueque de Almas: intercambia las manos")
+	# el muerto fue revivido antes de resolverse
+	g = _cg(3)
+	ss = _give(g, 0, "soul_swap")
+	_give(g, 0, "cat_a")
+	_give(g, 1, "cat_b")
+	g.players[1].alive = false
+	_play(g, "b0", ss, "b1")
+	g.players[1].alive = true
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and g.players[0].hand[0].type == "cat_a" and g.players[1].hand[0].type == "cat_b" and _evs(g, "swap").is_empty(), "Trueque de Almas: si el muerto fue revivido, no tiene efecto")
+	# el muerto se quedó sin cartas
+	g = _cg(3)
+	ss = _give(g, 0, "soul_swap")
+	_give(g, 0, "cat_a")
+	_give(g, 1, "cat_b")
+	g.players[1].alive = false
+	_play(g, "b0", ss, "b1")
+	g.players[1].hand.clear()
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and g.players[1].hand.is_empty() and _evs(g, "swap").is_empty(), "Trueque de Almas: si el muerto ya no tiene cartas, no tiene efecto")
+	# en pareja se ignora su texto
+	g = _cg(3)
+	var pa := _give(g, 0, "soul_swap")
+	var pb := _give(g, 0, "soul_swap")
+	_give(g, 1, "skip")
+	_check(_play(g, "b0", [pa, pb], "b1") == "", "Trueque de Almas en pareja: se juega como combo")
+	_resolve(g)
+	_check(_evs(g, "swap").is_empty() and _evs(g, "steal").size() == 1, "Trueque de Almas en pareja: roba una carta y no intercambia")
+
+
+# ---- Espanto
+
+func _crypt_haunt() -> void:
+	var g := _cg(4)
+	var hc := _give(g, 1, "haunt")
+	var sk := _give(g, 0, "skip")
+	var ca := _give(g, 0, "cat_a")
+	_give(g, 2, "cat_b")
+	g.players[1].alive = false
+	g.rnd = func() -> float: return 0.0
+	_check(g.plan("b1", [hc.id]).get("need") == "living" and g.view("b1", 0).playable.get(hc.id) == "living", "Espanto: un muerto lo juega fuera de turno con need living")
+	_check(g.plan("b1", [hc.id], "b3").has("err"), "Espanto: objetivo vivo sin cartas rechazado")
+	_check(g.plan("b1", [hc.id], "b1").has("err") and g.plan("b1", [hc.id], "zz").has("err"), "Espanto: uno mismo y desconocido rechazados")
+	g.players[3].alive = false
+	_check(g.plan("b1", [hc.id], "b3").has("err"), "Espanto: objetivo muerto rechazado")
+	g.players[3].alive = true
+	_check(_play(g, "b1", hc, "b3") != "" and _play(g, "b1", hc) != "", "Espanto: act rechaza objetivo inválido o ausente")
+	# un vivo no puede jugarlo
+	var live := _give(g, 0, "haunt")
+	_check(g.plan("b0", [live.id], "b2").get("err") == "Solo los muertos pueden espantar.", "Espanto: un vivo en su turno recibe «Solo los muertos pueden espantar.»")
+	_check(_play(g, "b0", live, "b2") == "Solo los muertos pueden espantar." and not g.view("b0", 0).playable.has(live.id), "Espanto: act y view.playable lo rechazan para un vivo")
+	var live2 := _give(g, 2, "haunt")
+	_check(g.plan("b2", [live2.id], "b0").get("err") == "Solo los muertos pueden espantar.", "Espanto: un vivo fuera de turno recibe el mismo error")
+	g.players[0].hand.erase(live)
+	g.players[2].hand.erase(live2)
+	g.discard.append({"card": _card("haunt"), "by": "b1"})
+	var cl := _give(g, 0, "clone")
+	_check(g.plan("b0", [cl.id], "b2").get("err") == "Solo los muertos pueden espantar.", "Espanto: un vivo no puede clonarlo")
+	g.players[0].hand.erase(cl)
+	g.discard.pop_back()
+	# caso normal
+	g.events.clear()
+	_check(_play(g, "b1", hc, "b0") == "", "Espanto: el muerto lo juega fuera de turno")
+	_check(_evs(g, "play")[0].text == "B1 juega Espanto desde el más allá contra B0.", "Espanto: texto del evento play")
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and g.players[0].hand[0] == ca and g.cur == 0 and g.turns_left == 1, "Espanto: quita una carta al azar al objetivo y no toca el turno")
+	var td: Variant = g.top_discard()
+	_check(td != null and td.card == sk and td.by == "b0", "Espanto: la carta descartada queda arriba del descarte con by = objetivo")
+	_check(g.discard[g.discard.size() - 2].card == hc and g.discard[g.discard.size() - 2].by == "b1", "Espanto: la carta del Espanto queda justo debajo")
+	var ev := _evs(g, "haunt")
+	_check(ev.size() == 1 and ev[0].player == "b1" and ev[0].target == "b0" and ev[0].card == "skip" and not ev[0].has("to"), "Espanto: evento haunt público {player, target, card}")
+	_check(g.view("b2", _clk).discard.back().type == "skip" and g.view("b2", _clk).events.any(func(e: Dictionary) -> bool: return e.type == "haunt"), "Espanto: todos ven la carta descartada")
+	# un Clon posterior la copia
+	var cl2 := _give(g, 0, "clone")
+	g.events.clear()
+	_check(_play(g, "b0", cl2) == "" and _evs(g, "play")[0].text == "B0 juega Clon (como Saltar).", "Espanto: un Clon posterior copia la carta descartada")
+	_resolve(g)
+	_check(g.cur == 2, "Espanto: el Clon de la carta descartada se resuelve (Saltar termina el turno; b1 está muerto)")
+	# otras tiradas del azar
+	g = _cg(3)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	_give(g, 0, "cat_a")
+	_give(g, 0, "cat_b")
+	_give(g, 0, "cat_c")
+	g.rnd = func() -> float: return 0.999
+	_play(g, "b1", hc, "b0")
+	_resolve(g)
+	_check(g.top_discard().card.type == "cat_c" and g.players[0].hand.size() == 2, "Espanto: la carta elegida sale de rnd")
+	# se puede jugar con una jugada pendiente (⚡) pero no durante una decisión
+	g = _cg(4)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	var skp := _give(g, 0, "skip")
+	_give(g, 0, "cat_a")
+	_play(g, "b0", skp)
+	_check(g.plan("b1", [hc.id], "b0").get("kind") == "action", "Espanto: se puede jugar con una jugada pendiente en la pila (⚡)")
+	g = _cg(4)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	var al := _give(g, 0, "alter_future")
+	_give(g, 0, "cat_a")
+	_setdraw(g, ["cat_a", "cat_b", "cat_c"])
+	_play(g, "b0", al)
+	_resolve(g)
+	_check(g.prompt != null and g.plan("b1", [hc.id], "b0").has("err"), "Espanto: no se puede jugar durante una decisión")
+	# anulado con Nop
+	g = _cg(4)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	_give(g, 0, "cat_a")
+	var nope := _give(g, 2, "nope")
+	_play(g, "b1", hc, "b0")
+	g.act("b2", {"a": "play", "cards": [nope.id]}, _clk)
+	_resolve(g)
+	_check(g.players[0].hand.size() == 1 and _evs(g, "haunt").is_empty() and _in_discard(g, hc), "Espanto anulado: el objetivo conserva su mano y la carta se pierde")
+	# el objetivo ya no tiene cartas / ya no vive al resolverse
+	g = _cg(4)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	_give(g, 0, "cat_a")
+	_play(g, "b1", hc, "b0")
+	g.players[0].hand.clear()
+	_resolve(g)
+	_check(_evs(g, "haunt").is_empty() and g.discard.size() == 1, "Espanto: si el objetivo se quedó sin cartas, no hace nada")
+	g = _cg(4)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	_give(g, 0, "cat_a")
+	_play(g, "b1", hc, "b0")
+	g.players[0].alive = false
+	_resolve(g)
+	_check(_evs(g, "haunt").is_empty() and g.players[0].hand.size() == 1, "Espanto: si el objetivo murió, no hace nada")
+	# nadie tiene cartas
+	g = _cg(3)
+	hc = _give(g, 1, "haunt")
+	g.players[1].alive = false
+	_check(g.plan("b1", [hc.id]).has("err"), "Espanto: sin vivos con cartas es un error")
+
+
+# ---- Arreglo de Ataque Dirigido: nadie se ataca a sí mismo
+
+func _crypt_targeted_attack_self() -> void:
+	var g := _cg(4)
+	g.cur = 3
+	var ta := _give(g, 3, "targeted_attack")
+	_play(g, "b3", ta, "b2")
+	g.players[2].alive = false
+	_resolve(g)
+	_check(g.cur == 0 and g.turns_left == 2 and g.attacked and _evs(g, "attack")[0].target == "b0" and _evs(g, "attack")[0].player == "b3", "Ataque Dirigido: si el siguiente vivo es quien lo jugó, salta al siguiente")
+	g = _cg(4)
+	g.cur = 3
+	ta = _give(g, 3, "targeted_attack")
+	_play(g, "b3", ta, "b2")
+	g.players[2].alive = false
+	g.players[0].alive = false
+	_resolve(g)
+	_check(g.cur == 1 and g.turns_left == 2, "Ataque Dirigido: el salto también se salta a los muertos")
+	g = _cg(4)
+	g.cur = 1
+	g.dir = -1
+	ta = _give(g, 1, "targeted_attack")
+	_play(g, "b1", ta, "b2")
+	g.players[2].alive = false
+	_resolve(g)
+	_check(g.cur == 0 and g.turns_left == 2, "Ataque Dirigido: con dir = -1 también evita al que lo jugó")
+	g = _cg(4)
+	g.cur = 3
+	ta = _give(g, 3, "targeted_attack")
+	_play(g, "b3", ta, "b0")
+	_resolve(g)
+	_check(g.cur == 0 and g.turns_left == 2, "Ataque Dirigido: con el objetivo vivo no cambia nada")

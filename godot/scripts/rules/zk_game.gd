@@ -15,9 +15,10 @@ const DECK := [
 	["dig_deeper", 2, 2], ["clairvoyance", 1, 1],
 	["cat_a", 2, 2], ["cat_b", 2, 2], ["cat_c", 2, 2], ["cat_d", 2, 2],
 ]
-## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: faltan las cartas 6-10 (otra tarea).
+## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: falta la carta 10, `rotten` (otra tarea).
 const DECK_CRYPT := [
 	["targeted_attack", 0, 2], ["reverse", 0, 2], ["draw_bottom", 1, 2], ["crow_eye", 1, 1], ["apocalypse", 0, 1],
+	["alter_future", 1, 1], ["bury", 1, 1], ["soul_swap", 0, 1], ["haunt", 0, 2],
 ]
 ## Respaldo de nombres de las cartas de packs (si la partida no recibe `names`, p. ej. en pruebas)
 const NAMES_CRYPT := {
@@ -35,6 +36,8 @@ const NAMES := {
 }
 ## Cartas ⚡: se pueden jugar fuera de turno e incluso estando muerto
 const NOW := {"shuffle": true, "feed_dead": true, "clairvoyance": true}
+## Cartas ⚡ añadidas por el modo Plus (el Espanto solo lo juega un muerto)
+const NOW_PLUS := {"haunt": true}
 const DEFAULT_CFG := {"NOPE_MS": 6500, "FAST_MS": 900, "PROMPT_MS": 40000, "GONE_MS": 6000, "CLAIR_MS": 4000, "HAND": 7}
 
 
@@ -318,6 +321,8 @@ func plan(player_id: String, ids: Variant, target: Variant = null, named: Varian
 			eff = td.card.type
 			if is_cat(eff) or eff == "exploding":
 				return {"err": "Clonar esa carta sola no hace nada. Úsalo en pareja con otra carta."}
+		if plus and eff == "haunt" and p.alive:
+			return {"err": "Solo los muertos pueden espantar."}
 		if eff == "zombie":
 			if not (pr != null and pr.type == "explode" and pr.player == player_id):
 				return {"err": "El Gatito Zombi se juega cuando sacas un Gatito Explosivo (o en combos)."}
@@ -339,7 +344,16 @@ func plan(player_id: String, ids: Variant, target: Variant = null, named: Varian
 			return {"kind": "action", "eff": eff, "cards": cards}
 		if pr != null:
 			return {"err": "Espera a que termine la acción en curso."}
-		if NOW.has(eff):
+		if NOW.has(eff) or (plus and NOW_PLUS.has(eff)):
+			if plus and eff == "haunt":
+				if not players.any(func(o: Player) -> bool: return o.id != player_id and o.alive and o.hand.size() > 0):
+					return {"err": "Nadie tiene cartas que espantar."}
+				if _none(target):
+					return {"need": "living", "eff": eff, "cards": cards}
+				var th := P(target)
+				if th == null or not th.alive or th.id == player_id or th.hand.is_empty():
+					return {"err": "Elige a un jugador vivo con cartas."}
+				return {"kind": "action", "eff": eff, "cards": cards, "target": target}
 			if eff == "feed_dead":
 				if dead_n == 0:
 					return {"err": "No hay jugadores muertos."}
@@ -355,6 +369,15 @@ func plan(player_id: String, ids: Variant, target: Variant = null, named: Varian
 			return {"err": "Espera a que se resuelva la jugada anterior."}
 		if (eff == "attack_dead" or eff == "grave_robber") and dead_n == 0:
 			return {"err": "No hay jugadores muertos: no puedes jugar esta carta."}
+		if plus and eff == "soul_swap":
+			if not players.any(func(o: Player) -> bool: return not o.alive and o.hand.size() > 0):
+				return {"err": "Ningún jugador muerto tiene cartas."}
+			if _none(target):
+				return {"need": "dead_hand", "eff": eff, "cards": cards}
+			var ts := P(target)
+			if ts == null or ts.alive or ts.hand.is_empty():
+				return {"err": "Elige a un jugador muerto con cartas."}
+			return {"kind": "action", "eff": eff, "cards": cards, "target": target}
 		if plus and (eff == "targeted_attack" or eff == "crow_eye"):
 			var any_hand: bool = eff == "crow_eye"
 			if not players.any(func(o: Player) -> bool: return o.id != player_id and (o.alive or any_hand) and (o.hand.size() > 0 or not any_hand)):
@@ -425,6 +448,8 @@ func act(player_id: String, a: Variant, now: int) -> String:
 		"die": err = _do_die(p, now)
 		"revive": err = _do_revive(p, a.get("target"), now)
 		"insert": err = _do_insert(p, a.get("positions"), now)
+		"reorder": err = _do_reorder(p, a.get("order"), now)
+		"bury": err = _do_bury(p, a.get("pos"), now)
 		"give": err = _do_give(p, a.get("card"), now)
 		"dig": err = _do_dig(p, bool(a.get("keep", false)), now)
 		_: err = "Acción desconocida."
@@ -489,6 +514,10 @@ func _do_play(p: Player, a: Dictionary, now: int) -> String:
 		text = p.name + " juega " + card_name + " contra " + tn + "."
 	elif eff == "crow_eye":
 		text = p.name + " mira la mano de " + tn + " con " + card_name + "."
+	elif eff == "soul_swap":
+		text = p.name + " juega " + card_name + " y quiere la mano de " + tn + "."
+	elif eff == "haunt":
+		text = p.name + " juega " + card_name + " desde el más allá contra " + tn + "."
 	else:
 		text = p.name + " juega " + card_name + "."
 	emit("play", {"player": p.id, "eff": eff, "text": text})
@@ -632,6 +661,8 @@ func _apply(s: Dictionary, now: int) -> void:
 			var idx := players.find(t)
 			if t == null or not t.alive:
 				idx = next_living_idx(idx if idx >= 0 else cur)
+				if players[idx].id == p.id:
+					idx = next_living_idx(idx)   # nadie se ataca a sí mismo
 			var n: int = (turns_left if attacked else 0) + 2
 			cur = idx
 			turns_left = n
@@ -684,6 +715,48 @@ func _apply(s: Dictionary, now: int) -> void:
 			emit("apocalypse", {"n": eks.size(), "text": "Los " + str(eks.size()) + " explosivos están arriba del mazo."})
 			if is_cur:
 				_advance(1, false, now)
+		"alter_future":
+			if not plus or not is_cur:
+				return
+			if draw.is_empty():
+				emit("info", {"text": "El mazo está vacío: Alterar el Futuro no tiene efecto."})
+				return
+			var seen: Array[Card] = []
+			for i in range(draw.size() - 1, maxi(-1, draw.size() - 4), -1):
+				seen.append(draw[i])
+			prompt = {"type": "alter", "player": p.id, "cards": seen, "start": now, "deadline": _dl([p.id], now)}
+		"bury":
+			if not plus or not is_cur:
+				return
+			if draw.is_empty():
+				emit("info", {"text": "El mazo está vacío: Entierro no tiene efecto."})
+				return
+			var buried: Card = draw.pop_back()
+			mut += 1
+			tops += 1
+			prompt = {"type": "bury", "player": p.id, "card": buried, "start": now, "deadline": _dl([p.id], now)}
+		"soul_swap":
+			if not plus:
+				return
+			var t := P(s.target)
+			if t == null or t.alive or t.hand.is_empty():
+				return
+			var mine: Array[Card] = p.hand
+			p.hand = t.hand
+			t.hand = mine
+			emit("swap", {"player": p.id, "target": t.id, "text": p.name + " intercambia su mano con la de " + t.name + "."})
+			emit("got", {"n": p.hand.size(), "text": "Recibiste " + str(p.hand.size()) + " cartas de " + t.name + "."}, p.id)
+			emit("got", {"n": t.hand.size(), "text": "Recibiste " + str(t.hand.size()) + " cartas de " + p.name + "."}, t.id)
+		"haunt":
+			if not plus:
+				return
+			var t := P(s.target)
+			if t == null or not t.alive or t.hand.is_empty():
+				return
+			var c: Card = t.hand.pop_at(int(floor(rnd.call() * t.hand.size())))
+			discard.append({"card": c, "by": t.id})
+			emit("haunt", {"player": p.id, "target": t.id, "card": c.type, "text": p.name + " espanta a " + t.name + ": descarta " + _name(c.type) + "."})
+
 
 
 func _start_give(reason: String, to: Variant, givers: Array, now: int) -> void:
@@ -829,6 +902,53 @@ func _finish_insert(now: int) -> void:
 	_settle(now)
 
 
+## Alterar el Futuro: `order` es una permutación de los índices de prompt.cards; order[0] será la próxima carta.
+func _do_reorder(p: Player, order: Variant, now: int) -> String:
+	var pr: Variant = prompt
+	if pr == null or pr.type != "alter" or pr.player != p.id:
+		return "No puedes hacer eso ahora."
+	var cards: Array = pr.cards
+	if not (order is Array) or order.size() != cards.size():
+		return "Orden inválido."
+	var idxs: Array[int] = []
+	for v: Variant in order:
+		if not (v is int or v is float) or float(v) != floor(float(v)) or v < 0 or v >= cards.size() or idxs.has(int(v)):
+			return "Orden inválido."
+		idxs.append(int(v))
+	var kinds: Array = []
+	for k in idxs.size():
+		draw[draw.size() - 1 - k] = cards[idxs[k]]
+		kinds.append(cards[idxs[k]].type)
+	mut += 1
+	shuf += 1
+	tops = 0
+	prompt = null
+	emit("info", {"text": p.name + " reordena el futuro."})
+	emit("future", {"cards": kinds, "mut": mut, "len": draw.size(), "shuf": shuf}, p.id)
+	_settle(now)
+	return ""
+
+
+## Entierro: `pos` 0 = arriba del mazo … draw.size() = fondo.
+func _do_bury(p: Player, pos: Variant, now: int) -> String:
+	var pr: Variant = prompt
+	if pr == null or pr.type != "bury" or pr.player != p.id:
+		return "No puedes hacer eso ahora."
+	if not (pos is int or pos is float) or float(pos) != floor(float(pos)) or pos < 0 or pos > draw.size():
+		return "Posición fuera del mazo."
+	var at: int = int(pos)
+	draw.insert(draw.size() - at, pr.card)
+	mut += 1
+	shuf += 1
+	tops = 0
+	prompt = null
+	emit("info", {"text": p.name + " entierra una carta en el mazo."})
+	emit("buried", {"pos": at, "len": draw.size(), "shuf": shuf, "text": "Enterraste " + _name(pr.card.type) + " en la posición " + str(at + 1) + " del mazo."}, p.id)
+	_end_turn(now)
+	_settle(now)
+	return ""
+
+
 func _do_dig(p: Player, keep: bool, now: int) -> String:
 	var pr: Variant = prompt
 	if pr == null or pr.type != "dig" or pr.player != p.id:
@@ -953,6 +1073,13 @@ func _auto_prompt(now: int) -> void:
 				_do_give(p, _pick(p.hand).id, now)
 		"dig":
 			_do_dig(P(pr.player), true, now)
+		"alter":
+			var ident: Array = []
+			for i in pr.cards.size():
+				ident.append(i)
+			_do_reorder(P(pr.player), ident, now)
+		"bury":
+			_do_bury(P(pr.player), int(floor(rnd.call() * (draw.size() + 1))), now)
 
 
 ## Huella barata del estado: si cambia, hay algo nuevo que mostrar a los jugadores.
@@ -1036,5 +1163,15 @@ func view(player_id: String, now: int) -> Dictionary:
 				o.player = pr.player
 				o.mine = pr.player == player_id
 				o.card = pr.card.type if o.mine else null
+			"alter":
+				o.player = pr.player
+				o.mine = pr.player == player_id
+				if o.mine:
+					o.cards = pr.cards.map(func(c: Card) -> String: return c.type)
+			"bury":
+				o.player = pr.player
+				o.mine = pr.player == player_id
+				if o.mine:
+					o.card = pr.card.type
 		v.prompt = o
 	return v
