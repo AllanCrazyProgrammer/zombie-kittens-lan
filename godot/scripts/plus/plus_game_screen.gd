@@ -14,7 +14,6 @@ const HAND_STEP := 0.012
 const HAND_SCALE := 0.86
 ## Media altura de una carta (del centro al borde superior)
 const SIZE_Z := 0.441
-const LEVEL_NAMES := {"easy": "Fácil", "normal": "Normal", "hard": "Difícil"}
 
 var session: GameSession
 var world: TableWorld
@@ -61,8 +60,8 @@ const TIPS := {
 
 var _turn: Label
 var _turn_panel: PanelContainer
-var _opps: HBoxContainer
-var _risk: Label
+var _opps: RivalChips
+var _risk: RiskMeter
 var _status: Label
 var _status_timer: ProgressBar
 var _buttons: HBoxContainer
@@ -161,6 +160,16 @@ func _process(delta: float) -> void:
 	for t: Array in _timers:
 		if is_instance_valid(t[0]):
 			t[0].value = clampf(float(t[1] - now) / float(maxi(1, t[2])), 0.0, 1.0) * 100.0
+
+
+## Fichas de rivales construidas hasta ahora (prueba: no cambia al seleccionar cartas).
+func debug_chip_builds() -> int:
+	return _opps.debug_chip_builds()
+
+
+## Porcentaje y tramo del medidor de riesgo: {pct, tier, name}.
+func debug_risk() -> Dictionary:
+	return _risk.debug_risk()
 
 
 ## Resumen de lo que hay en pantalla (para las capturas de depuración).
@@ -948,11 +957,9 @@ func _build_hud() -> void:
 	hist.size_flags_horizontal = Control.SIZE_SHRINK_END
 	hist.pressed.connect(_open_history)
 	bar.add_child(hist)
-	_opps = UIKit.hbox(12)
-	_opps.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_opps = RivalChips.new()
 	tv.add_child(_opps)
-	_risk = UIKit.label("", 34, UIKit.C.dim)
-	_risk.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_risk = RiskMeter.new()
 	tv.add_child(_risk)
 	_toasts = UIKit.vbox(8)
 	_toasts.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1043,47 +1050,8 @@ func _update_hud() -> void:
 	_turn.add_theme_color_override("font_color", UIKit.C.toxic if my_turn else UIKit.C.ink)
 	_turn_panel.add_theme_stylebox_override("panel", UIKit.box(UIKit.C.panel, UIKit.C.toxic if my_turn else UIKit.C.line, 30, 5, Vector2(20, 8)))
 
-	# Rivales, en orden de turno a partir de mí
-	_clear(_opps)
-	var n: int = v.players.size()
-	var my_idx := 0
-	for i in n:
-		if v.players[i].id == v.you:
-			my_idx = i
-	for k in range(1, n):
-		var p: Dictionary = v.players[(my_idx + k) % n]
-		var is_cur: bool = p.id == v.cur
-		var chip := UIKit.panel(Color("241a38") if not p.alive else UIKit.C.panel, UIKit.C.toxic if is_cur else UIKit.C.line, Vector2(10, 10))
-		chip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var ch := UIKit.hbox(6)
-		chip.add_child(ch)
-		if n <= 4:
-			var pic := UIKit.avatar_icon(_avatar_index(p.id))
-			pic.modulate = Color.WHITE if p.alive else Color(0.4, 0.4, 0.5)
-			ch.add_child(pic)
-		var cv := UIKit.vbox(0)
-		cv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		ch.add_child(cv)
-		var name_l := UIKit.label(p.name, 44, UIKit.C.dim if not p.alive else UIKit.C.ink, true)
-		name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		name_l.clip_text = true
-		cv.add_child(name_l)
-		var info := "%d cartas" % p.count
-		var info_l := UIKit.label(info, 32, UIKit.C.dim)
-		info_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		cv.add_child(info_l)
-		var state: String = "sin conexión" if (not p.connected and not p.bot) else "MUERTO" if not p.alive else (("juega ×%d" % v.turnsLeft) if is_cur and v.turnsLeft > 1 else ("su turno" if is_cur else LEVEL_NAMES.get(session.level_of(p.id), "")))
-		var state_l := UIKit.label(state, 30, UIKit.C.red if not p.alive else (UIKit.C.toxic if is_cur else UIKit.C.dim))
-		state_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		cv.add_child(state_l)
-		_opps.add_child(chip)
-
-	var alive := 0
-	for p: Dictionary in v.players:
-		alive += 1 if p.alive else 0
-	var eks := alive - 1
-	_risk.text = "Explosivos: %d en %d cartas  ·  riesgo %d%%" % [eks, v.draw, int(round(100.0 * eks / maxi(1, v.draw)))]
+	_opps.update(v, session.level_of)
+	_risk.update(v)
 
 	# Barra del jugador: solo donde sobra espacio bajo la mesa
 	_clear(_me_bar)

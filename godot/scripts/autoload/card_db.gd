@@ -16,7 +16,7 @@ func _ready() -> void:
 
 
 func types() -> Array:
-	return defs.keys()   # hoy todas las cartas son base; las de packs llevarán "pack" y no entrarán aquí
+	return types_for([])   # solo las cartas base: las de packs llevan "pack" y no entran aquí (el clásico depende de esto)
 
 
 ## Cartas base (sin `pack`) más las de los packs indicados (p. ej. ["crypt"]).

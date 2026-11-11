@@ -5,6 +5,7 @@ extends Node3D
 ## Argumentos de depuración (tras "--"):
 ##   --auto [rivales] [nivel]   partida de un jugador en la que la IA también juega por el humano
 ##   --seed N                   semilla del reparto
+##   --plus                     con --auto, partida en modo Plus
 ##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
 ##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
@@ -112,6 +113,8 @@ func _ready() -> void:
 			opts.seed = int(arg.call("--seed"))
 		if args.has("--slow"):
 			opts.me_delay = 5200
+		if args.has("--plus"):
+			opts.plus = true
 		_start_solo(opts)
 	elif args.has("--tutorial"):
 		_start_solo({"rivals": 1, "level": "easy", "deck_mode": "official", "name": "Allan", "tutorial": true, "seed": 4})
@@ -525,8 +528,18 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	if card:
 		var before: int = (_session as LocalMatch).game.discard.size()
 		await _wait(0.5)
+		var chips_before: int = _game.debug_chip_builds() if plus_mode else 0
 		await _tap_3d(card, Vector3(-0.24, 0, -0.3))   # esquina superior izquierda: la parte que no tapa la carta vecina
 		await _wait(0.6)
+		if plus_mode:
+			var gm: ZKGame = (_session as LocalMatch).game
+			var alive := 0
+			for pl in gm.players:
+				alive += 1 if pl.alive else 0
+			var rk: Dictionary = _game.debug_risk()
+			var expect := int(round(100.0 * (alive - 1) / maxi(1, gm.draw.size())))
+			_say(report, "Plus: fichas construidas antes/después de seleccionar: %d / %d | %s" % [chips_before, _game.debug_chip_builds(), "OK" if chips_before == _game.debug_chip_builds() else "ERROR: se recrearon"])
+			_say(report, "Plus: riesgo %d%% (esperado %d%%), tramo %s | %s" % [rk.pct, expect, rk.name, "OK" if absi(rk.pct - expect) <= 1 else "ERROR: incoherente"])
 		await _save_shot(dir + "/t2_seleccion.png")
 		_say(report, "carta grande visible con la carta elegida y el dedo quieto: %s" % str(_game.debug_zoom_visible()))
 		_say(report, "carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
