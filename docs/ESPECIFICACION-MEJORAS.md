@@ -115,18 +115,18 @@ Se activa con `packs: ["crypt"]`. Las cartas se añaden con el mismo formato que
 
 | # | id | Nombre | Tipo | Huella / sin | 2 j | 3 j | 4–5 j | Coste |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | `targeted_attack` | Ataque Dirigido | Acción | 0 / 2 | 0 | 2 | 2 | Bajo |
-| 2 | `reverse` | Marcha Atrás | Acción | 0 / 2 | 0 | 2 | 2 | Bajo |
-| 3 | `draw_bottom` | Robar del Fondo | Acción | 1 / 2 | 1 | 2 | 3 | Bajo |
+| 1 | `targeted_attack` | Ataque Dirigido | Acción | 0 / 1 | 0 | 1 | 1 | Bajo |
+| 2 | `reverse` | Marcha Atrás | Acción | 0 / 1 | 0 | 1 | 1 | Bajo |
+| 3 | `draw_bottom` | Robar del Fondo | Acción | 0 / 1 | 0 | 1 | 1 | Bajo |
 | 4 | `crow_eye` | Ojo de Cuervo | Acción | 1 / 1 | 1 | 1 | 2 | Bajo |
 | 5 | `apocalypse` | Apocalipsis Zombi | Acción | 0 / 1 | 0 | 1 | 1 | Bajo |
 | 6 | `alter_future` | Alterar el Futuro (3x) | Acción | 1 / 1 | 1 | 1 | 2 | Medio |
-| 7 | `bury` | Entierro | Acción | 1 / 1 | 1 | 1 | 2 | Medio |
+| 7 | `bury` | Entierro | Acción | 0 / 1 | 0 | 1 | 1 | Medio |
 | 8 | `soul_swap` | Trueque de Almas | Acción | 0 / 1 | 0 | 1 | 1 | Medio |
-| 9 | `haunt` | Espanto | ⚡ solo muerto | 0 / 2 | 0 | 2 | 2 | Medio |
+| 9 | `haunt` | Espanto | ⚡ solo muerto | 0 / 1 | 0 | 1 | 1 | Medio |
 | 10 | `rotten` | Gatito Putrefacto | Peligro | — | 0 | 1 | 1 | Alto |
 
-Cartas añadidas: +4 (2 j), +13 (3 j), +17 (4–5 j). El Putrefacto **sustituye** a un explosivo, no se suma.
+Cartas añadidas: +2 (2 j), +9 (3 j), +11 (4–5 j). Con 2 jugadores solo existen Ojo de Cuervo y Alterar el Futuro. El Putrefacto **sustituye** a un explosivo, no se suma.
 
 Reglas comunes a todas, salvo que se indique lo contrario:
 - Se pueden anular con Nop (pasan por `stack` como cualquier acción).
@@ -276,8 +276,11 @@ de bots (500 partidas por configuración, ver §9):
 - Duración media en turnos: no más de +20 % respecto al juego base con el mismo número de jugadores.
 - Ningún asiento gana más de 5 puntos porcentuales por encima del reparto uniforme.
 - Difícil contra fácil mantiene al menos la ventaja que tiene hoy.
-- Si la duración se dispara, primero se reduce la mano inicial a 6 con el pack activo; después se
-  recortan copias de `draw_bottom` y `bury`.
+- Resultado medido: reducir la mano inicial ALARGA la partida (hay menos cartas de reserva), así que no
+  sirve como palanca. El ajuste aplicado es mano inicial 8 con el pack activo (si no hay `rules.hand`
+  explícito) y una sola copia de Ataque Dirigido, Marcha Atrás, Robar del Fondo, Entierro y Espanto.
+  Duración frente al clásico: aproximadamente 0–3 % con 2 jugadores, +7–12 % con 4, +13–16 % con 5 y
+  +29–36 % con 3; este último NO cumple el objetivo de +20 % y queda como pendiente conocido.
 
 ---
 

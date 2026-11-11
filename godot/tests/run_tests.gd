@@ -456,22 +456,27 @@ func _test_plus_levers() -> void:
 	for h: int in [4, 5, 6, 7, 8]:
 		var g: Game = mk.call(true, {"hand": h})
 		_check(g.players[0].hand.size() == h + 1 and g.players[2].hand.size() == h + 1, "rules.hand = %d reparte %d cartas (+ zombi)" % [h, h + 1])
-	_check((mk.call(true, {}) as Game).players[0].hand.size() == 8, "sin rules.hand la mano sigue siendo 7 (+ zombi)")
+	_check((mk.call(true, {}) as Game).players[0].hand.size() == 9, "Plus con pack y sin rules.hand: mano por defecto 8 (+ zombi)")
+	var nopack := Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(77), "now": 0, "plus": true, "packs": [], "rules": {}})
+	_check(nopack.players[0].hand.size() == 8, "Plus sin pack: la mano por defecto sigue siendo 7 (+ zombi)")
+	_check(Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(77), "now": 0}).players[0].hand.size() == 8, "clásico: la mano por defecto sigue siendo 7 (+ zombi)")
+	_check((mk.call(false, {}) as Game).players[0].hand.size() == 8, "plus = false con pack: mano 7 (+ zombi)")
+	_check((mk.call(true, {"hand": 7}) as Game).players[0].hand.size() == 8, "rules.hand = 7 explícito manda sobre el 8 por defecto del pack")
 	_check((mk.call(true, {"hand": 99}) as Game).players[0].hand.size() == 9 and (mk.call(true, {"hand": 1}) as Game).players[0].hand.size() == 5, "rules.hand se limita a 4-8")
 	_check((mk.call(false, {"hand": 5}) as Game).players[0].hand.size() == 8, "con plus = false rules.hand se ignora")
 	var base: Game = mk.call(true, {})
 	var same: Game = mk.call(false, {"hand": 5})
 	var cl: Game = Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(77), "now": 0})
 	_check(same.signature() == cl.signature() and base.deck_types.has("bury"), "plus = false con rules sigue idéntico al clásico")
-	# crypt_copies (3 jugadores = grupo «sin huella»; base: draw_bottom 2, bury 1, haunt 2)
-	_check(_count_type(base, "draw_bottom") == 2 and _count_type(base, "bury") == 1 and _count_type(base, "haunt") == 2, "base: copias de La Cripta sin huella")
+	# crypt_copies (3 jugadores = grupo «sin huella»; base: draw_bottom 1, bury 1, haunt 1)
+	_check(_count_type(base, "draw_bottom") == 1 and _count_type(base, "bury") == 1 and _count_type(base, "haunt") == 1, "base: copias de La Cripta sin huella")
 	var g2: Game = mk.call(true, {"crypt_copies": {"draw_bottom": [1, 1], "bury": [0, 0], "haunt": [3, 3], "nada": [1, 1], "reverse": [4, 1], "crow_eye": [1]}})
 	_check(_count_type(g2, "draw_bottom") == 1 and _count_type(g2, "bury") == 0 and _count_type(g2, "haunt") == 3, "crypt_copies sobrescribe las copias")
-	_check(not g2.deck_types.has("bury") and _count_type(g2, "reverse") == 2 and _count_type(g2, "crow_eye") == 1 and not g2.deck_types.has("nada"), "crypt_copies ignora tipos desconocidos y valores fuera de 0-3 o mal formados")
+	_check(not g2.deck_types.has("bury") and _count_type(g2, "reverse") == 1 and _count_type(g2, "crow_eye") == 1 and not g2.deck_types.has("nada"), "crypt_copies ignora tipos desconocidos y valores fuera de 0-3 o mal formados")
 	var g3: Game = mk.call(false, {"crypt_copies": {"draw_bottom": [3, 3]}})
 	_check(g3.signature() == cl.signature() and _count_type(g3, "draw_bottom") == 0, "con plus = false crypt_copies se ignora")
 	var tot := _count(g2)
-	_check(tot == _count(_mk(3, 77, "official", null, true, ["crypt"])) - 2 + 1, "crypt_copies: el total de cartas cuadra")
+	_check(tot == _count(_mk(3, 77, "official", null, true, ["crypt"])) - 0 + 1, "crypt_copies: el total de cartas cuadra")
 	if _fails == f0:
 		_ok("palancas hand y crypt_copies: límites, sobrescritura e inocuas con plus = false")
 
@@ -618,8 +623,8 @@ func _test_crypt_cards_1() -> void:
 
 
 func _crypt_deal() -> void:
-	var want := {2: [0, 0, 1, 1, 0], 3: [2, 2, 2, 1, 1], 4: [2, 2, 3, 2, 1], 5: [2, 2, 3, 2, 1]}
-	var extra := {2: 4, 3: 13, 4: 17, 5: 17}   # con las cartas 1-9 del pack
+	var want := {2: [0, 0, 0, 1, 0], 3: [1, 1, 1, 1, 1], 4: [1, 1, 1, 2, 1], 5: [1, 1, 1, 2, 1]}
+	var extra := {2: 2, 3: 9, 4: 11, 5: 11}   # con las cartas 1-9 del pack
 	for n: int in [2, 3, 4, 5]:
 		var g := _mk(n, 7, "official", null, true, ["crypt"])
 		var base := _mk(n, 7, "official", null, true)
@@ -1170,9 +1175,9 @@ func _test_crypt_cards_2() -> void:
 
 
 func _crypt2_deal() -> void:
-	var want := {2: [1, 1, 0, 0], 3: [1, 1, 1, 2], 4: [2, 2, 1, 2], 5: [2, 2, 1, 2]}
-	var extra := {2: 4, 3: 13, 4: 17, 5: 17}
-	var kinds := {2: 4, 3: 9, 4: 9, 5: 9}
+	var want := {2: [1, 0, 0, 0], 3: [1, 1, 1, 1], 4: [2, 1, 1, 1], 5: [2, 1, 1, 1]}
+	var extra := {2: 2, 3: 9, 4: 11, 5: 11}
+	var kinds := {2: 2, 3: 9, 4: 9, 5: 9}
 	for n: int in [2, 3, 4, 5]:
 		var g := _mk(n, 7, "official", null, true, ["crypt"])
 		var base := _mk(n, 7, "official", null, true)
@@ -2195,10 +2200,12 @@ class CountGame:
 		return super(type, data, to)
 
 
+## Nota: las variantes D-N se definieron sobre las copias ANTIGUAS; sus `crypt_copies` se aplican ahora sobre las nuevas por defecto.
 const BAL_VARIANTS := {
 	"A": {"d": "Clásico (plus=false)", "plus": false, "packs": [], "rules": {}},
 	"B": {"d": "Plus sin pack", "plus": true, "packs": [], "rules": {}},
-	"C": {"d": "Plus+pack, mano 7", "plus": true, "packs": ["crypt"], "rules": {}},
+	"C": {"d": "Plus+pack, estado por defecto actual (mano 8, copias reducidas)", "plus": true, "packs": ["crypt"], "rules": {}},
+	"O": {"d": "Plus+pack, valores ANTIGUOS (mano 7, copias antiguas)", "plus": true, "packs": ["crypt"], "rules": {"hand": 7, "crypt_copies": {"targeted_attack": [0, 2], "reverse": [0, 2], "draw_bottom": [1, 2], "bury": [1, 1], "haunt": [0, 2]}}},
 	"D": {"d": "Plus+pack, mano 6", "plus": true, "packs": ["crypt"], "rules": {"hand": 6}},
 	"E": {"d": "Plus+pack, mano 5", "plus": true, "packs": ["crypt"], "rules": {"hand": 5}},
 	"F": {"d": "Plus+pack, mano 7, bottom/bury<=1", "plus": true, "packs": ["crypt"], "rules": {"crypt_copies": {"draw_bottom": [1, 1], "bury": [1, 1]}}},

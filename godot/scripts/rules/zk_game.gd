@@ -17,8 +17,8 @@ const DECK := [
 ]
 ## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: falta la carta 10, `rotten` (otra tarea).
 const DECK_CRYPT := [
-	["targeted_attack", 0, 2], ["reverse", 0, 2], ["draw_bottom", 1, 2], ["crow_eye", 1, 1], ["apocalypse", 0, 1],
-	["alter_future", 1, 1], ["bury", 1, 1], ["soul_swap", 0, 1], ["haunt", 0, 2],
+	["targeted_attack", 0, 1], ["reverse", 0, 1], ["draw_bottom", 0, 1], ["crow_eye", 1, 1], ["apocalypse", 0, 1],
+	["alter_future", 1, 1], ["bury", 0, 1], ["soul_swap", 0, 1], ["haunt", 0, 1],
 ]
 ## Respaldo de nombres de las cartas de packs (si la partida no recibe `names`, p. ej. en pruebas)
 const NAMES_CRYPT := {
@@ -142,6 +142,8 @@ func _init(opts: Dictionary) -> void:
 		names = (opts.get("names", {}) as Dictionary).duplicate()
 		if rules.has("hand"):
 			cfg["HAND"] = clampi(int(rules["hand"]), 4, 8)   # M-04: mano inicial (solo Plus)
+		elif packs.has("crypt") and not (opts.get("cfg", {}) as Dictionary).has("HAND"):
+			cfg["HAND"] = 8   # Plus con La Cripta y sin mano explícita: 8 (equilibrio de duración)
 	for d: Dictionary in opts["players"]:
 		var p := Player.new()
 		p.id = d["id"]
