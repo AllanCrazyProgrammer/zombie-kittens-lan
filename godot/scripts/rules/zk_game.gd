@@ -140,6 +140,8 @@ func _init(opts: Dictionary) -> void:
 		packs = (opts.get("packs", []) as Array).duplicate()
 		rules = (opts.get("rules", {}) as Dictionary).duplicate()
 		names = (opts.get("names", {}) as Dictionary).duplicate()
+		if rules.has("hand"):
+			cfg["HAND"] = clampi(int(rules["hand"]), 4, 8)   # M-04: mano inicial (solo Plus)
 	for d: Dictionary in opts["players"]:
 		var p := Player.new()
 		p.id = d["id"]
@@ -151,6 +153,26 @@ func _init(opts: Dictionary) -> void:
 	_setup(opts.get("deck_mode", "official"))
 
 
+## Filas de La Cripta de esta partida: DECK_CRYPT con `rules.crypt_copies` {tipo: [con_huella, sin_huella]} encima
+## (palanca de pruebas/ajuste). Se ignoran tipos desconocidos y entradas que no sean [0-3, 0-3].
+func _crypt_rows() -> Array:
+	var over_rows: Variant = rules.get("crypt_copies", null)
+	if not (over_rows is Dictionary):
+		return DECK_CRYPT
+	var out: Array = []
+	for row: Array in DECK_CRYPT:
+		var o: Variant = (over_rows as Dictionary).get(row[0], null)
+		if o is Array and (o as Array).size() == 2 and _copies_ok(o[0]) and _copies_ok(o[1]):
+			out.append([row[0], int(o[0]), int(o[1])])
+		else:
+			out.append(row)
+	return out
+
+
+static func _copies_ok(v: Variant) -> bool:
+	return (v is int or (v is float and v == floorf(v))) and int(v) >= 0 and int(v) <= 3
+
+
 func _setup(mode: String) -> void:
 	var n := players.size()
 	var next_id := 0
@@ -159,7 +181,7 @@ func _setup(mode: String) -> void:
 	var eks: Array[Card] = []
 	var rows: Array = DECK.duplicate()
 	if plus and packs.has("crypt"):
-		rows.append_array(DECK_CRYPT)
+		rows.append_array(_crypt_rows())
 	for row: Array in rows:
 		var type: String = row[0]
 		var groups: Array = []

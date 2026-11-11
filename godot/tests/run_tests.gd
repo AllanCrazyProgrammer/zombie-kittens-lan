@@ -19,12 +19,17 @@ func _initialize() -> void:
 		_record_guard()
 		quit(1 if _fails > 0 else 0)
 		return
+	if "--balance" in OS.get_cmdline_user_args():
+		_balance(OS.get_cmdline_user_args())
+		quit(0)
+		return
 	_test_versions()
 	_test_rng_and_setup()
 	_test_traces()
 	_test_simulations()
 	_test_classic_guard()
 	_test_plus_engine()
+	_test_plus_levers()
 	_test_crypt_cards_1()
 	_test_crypt_cards_2()
 	_test_plus_network()
@@ -438,6 +443,37 @@ func _test_plus_engine() -> void:
 				return
 			done += 1
 	_ok("vista, tops, sentido de juego y %d partidas con plus = true sin cartas nuevas" % done)
+
+
+## Palancas de ajuste de Plus: rules.hand y rules.crypt_copies (solo con plus = true)
+func _test_plus_levers() -> void:
+	var f0 := _fails
+	var ps: Array = []
+	for i in 3:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+	var mk := func(plus: bool, rules: Dictionary) -> Game:
+		return Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(77), "now": 0, "plus": plus, "packs": ["crypt"], "rules": rules})
+	for h: int in [4, 5, 6, 7, 8]:
+		var g: Game = mk.call(true, {"hand": h})
+		_check(g.players[0].hand.size() == h + 1 and g.players[2].hand.size() == h + 1, "rules.hand = %d reparte %d cartas (+ zombi)" % [h, h + 1])
+	_check((mk.call(true, {}) as Game).players[0].hand.size() == 8, "sin rules.hand la mano sigue siendo 7 (+ zombi)")
+	_check((mk.call(true, {"hand": 99}) as Game).players[0].hand.size() == 9 and (mk.call(true, {"hand": 1}) as Game).players[0].hand.size() == 5, "rules.hand se limita a 4-8")
+	_check((mk.call(false, {"hand": 5}) as Game).players[0].hand.size() == 8, "con plus = false rules.hand se ignora")
+	var base: Game = mk.call(true, {})
+	var same: Game = mk.call(false, {"hand": 5})
+	var cl: Game = Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(77), "now": 0})
+	_check(same.signature() == cl.signature() and base.deck_types.has("bury"), "plus = false con rules sigue idéntico al clásico")
+	# crypt_copies (3 jugadores = grupo «sin huella»; base: draw_bottom 2, bury 1, haunt 2)
+	_check(_count_type(base, "draw_bottom") == 2 and _count_type(base, "bury") == 1 and _count_type(base, "haunt") == 2, "base: copias de La Cripta sin huella")
+	var g2: Game = mk.call(true, {"crypt_copies": {"draw_bottom": [1, 1], "bury": [0, 0], "haunt": [3, 3], "nada": [1, 1], "reverse": [4, 1], "crow_eye": [1]}})
+	_check(_count_type(g2, "draw_bottom") == 1 and _count_type(g2, "bury") == 0 and _count_type(g2, "haunt") == 3, "crypt_copies sobrescribe las copias")
+	_check(not g2.deck_types.has("bury") and _count_type(g2, "reverse") == 2 and _count_type(g2, "crow_eye") == 1 and not g2.deck_types.has("nada"), "crypt_copies ignora tipos desconocidos y valores fuera de 0-3 o mal formados")
+	var g3: Game = mk.call(false, {"crypt_copies": {"draw_bottom": [3, 3]}})
+	_check(g3.signature() == cl.signature() and _count_type(g3, "draw_bottom") == 0, "con plus = false crypt_copies se ignora")
+	var tot := _count(g2)
+	_check(tot == _count(_mk(3, 77, "official", null, true, ["crypt"])) - 2 + 1, "crypt_copies: el total de cartas cuadra")
+	if _fails == f0:
+		_ok("palancas hand y crypt_copies: límites, sobrescritura e inocuas con plus = false")
 
 
 ## Sala de pruebas: recoge los mensajes en lugar de enviarlos por la red. Se crea al vuelo con load() porque
@@ -2122,3 +2158,217 @@ func _bot_cases() -> void:
 	_check(a.get("a") == "play" and a.cards.size() == 3 and a.get("named") == "zombie", "normal: hace tríos de cartas baratas pidiendo Zombi")
 	if _fails == f0:
 		_ok("casos dirigidos: Robar del Fondo, memoria con tops, alter, bury, muerto, Nop, Clon, Barajar, Ojo de Cuervo, Apocalipsis y trío")
+
+
+
+# ---------------------------------------------------------------- medición de equilibrio (NO forma parte de la suite)
+# godot --headless --path godot -s tests/run_tests.gd -- --balance [--games=400] [--variants=A,C,D] [--players=2,3,4,5]
+#                                                            [--levels=mixed,normal] [--difficulty=C,D] [--seed=50000]
+# Sin opciones: todas las variantes, 2-5 jugadores, niveles mezclados y todos «normal», 400 partidas por celda.
+# Los asientos de niveles mezclados rotan de una partida a otra, así el % por asiento no queda sesgado por el nivel.
+# Las semillas dependen solo del número de partida y de jugadores: todas las variantes juegan los mismos barajados base.
+
+## Partida con contador de turnos reales: un turno termina cada vez que _end_turn se ejecuta, o que el turno pasa
+## de mano por otra vía (Ataque, Súper Salto, muerte, Ataque Dirigido). No cuenta eventos ni robos fuera de turno.
+class CountGame:
+	extends Game
+	var turn_ends := 0
+	var _in_end := false
+	var _in_adv := false
+
+	func _end_turn(now: int) -> void:
+		turn_ends += 1
+		_in_end = true
+		super(now)
+		_in_end = false
+
+	func _advance(n: int, was_attacked: bool, now: int) -> void:
+		if not _in_end:
+			turn_ends += 1
+		_in_adv = true
+		super(n, was_attacked, now)
+		_in_adv = false
+
+	func emit(type: String, data: Dictionary = {}, to: String = "") -> Dictionary:
+		if type == "turn" and not _in_adv:
+			turn_ends += 1   # Ataque Dirigido: cambia de jugador sin pasar por _advance
+		return super(type, data, to)
+
+
+const BAL_VARIANTS := {
+	"A": {"d": "Clásico (plus=false)", "plus": false, "packs": [], "rules": {}},
+	"B": {"d": "Plus sin pack", "plus": true, "packs": [], "rules": {}},
+	"C": {"d": "Plus+pack, mano 7", "plus": true, "packs": ["crypt"], "rules": {}},
+	"D": {"d": "Plus+pack, mano 6", "plus": true, "packs": ["crypt"], "rules": {"hand": 6}},
+	"E": {"d": "Plus+pack, mano 5", "plus": true, "packs": ["crypt"], "rules": {"hand": 5}},
+	"F": {"d": "Plus+pack, mano 7, bottom/bury<=1", "plus": true, "packs": ["crypt"], "rules": {"crypt_copies": {"draw_bottom": [1, 1], "bury": [1, 1]}}},
+	"G": {"d": "Plus+pack, mano 6, bottom/bury<=1", "plus": true, "packs": ["crypt"], "rules": {"hand": 6, "crypt_copies": {"draw_bottom": [1, 1], "bury": [1, 1]}}},
+	"H": {"d": "Plus+pack, mano 8", "plus": true, "packs": ["crypt"], "rules": {"hand": 8}},
+	"I": {"d": "Plus+pack, mano 8, bottom/bury<=1", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [1, 1], "bury": [1, 1]}}},
+	"J": {"d": "Plus+pack, mano 8, bottom/bury/reverse/targeted/haunt<=1", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [1, 1], "bury": [1, 1], "reverse": [0, 1], "targeted_attack": [0, 1], "haunt": [0, 1]}}},
+	"K": {"d": "Plus+pack, mano 8, J + bottom/bury solo sin huella", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [0, 1], "bury": [0, 1], "reverse": [0, 1], "targeted_attack": [0, 1], "haunt": [0, 1]}}},
+	"L": {"d": "K + sin apocalypse ni soul_swap", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [0, 1], "bury": [0, 1], "reverse": [0, 1], "targeted_attack": [0, 1], "haunt": [0, 1], "apocalypse": [0, 0], "soul_swap": [0, 0]}}},
+	"M": {"d": "K + sin haunt ni reverse", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [0, 1], "bury": [0, 1], "reverse": [0, 0], "targeted_attack": [0, 1], "haunt": [0, 0]}}},
+	"N": {"d": "K + sin targeted ni reverse", "plus": true, "packs": ["crypt"], "rules": {"hand": 8, "crypt_copies": {"draw_bottom": [0, 1], "bury": [0, 1], "reverse": [0, 0], "targeted_attack": [0, 0], "haunt": [0, 1]}}},
+}
+
+
+static func _bal_arg(args: PackedStringArray, key: String, def: String) -> String:
+	for a in args:
+		if a.begins_with("--%s=" % key):
+			return a.substr(key.length() + 3)
+	return def
+
+
+## Juega una partida de bots y rellena out con turns, actions, winner (índice de asiento), deaths y revives.
+func _bal_game(n: int, seed_value: int, levels: Array, shift: int, v: Dictionary, out: Dictionary) -> bool:
+	var rng := Rng.new(seed_value)
+	var players: Array = []
+	for i in n:
+		players.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+	var opts := {"players": players, "deck_mode": "official", "rng": rng, "now": 0}
+	if v.plus:
+		opts["plus"] = true
+		opts["packs"] = v.packs
+		opts["rules"] = v.rules
+	var g := CountGame.new(opts)
+	var lv := {}
+	for i in n:
+		lv["b%d" % i] = levels[(i + shift) % levels.size()]
+	var bots := Bots.new(g, lv, rng.next, bool(v.plus))
+	var now := 0
+	var steps := 0
+	var first := 0
+	var actions := 0
+	while g.over == null:
+		steps += 1
+		if steps > 20000:
+			push_error("balance: partida interminable (semilla %d, %d jugadores)" % [seed_value, n])
+			return false
+		g.tick(now)
+		bots.learn()
+		var acted := false
+		for k in n:
+			var id := "b%d" % ((first + k) % n)
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			if err == "":
+				actions += 1
+			acted = true
+			first = (first + k + 1) % n
+			break
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if g.over != null:
+				break
+			if d < 0:
+				push_error("balance: partida atascada (semilla %d, %d jugadores)" % [seed_value, n])
+				return false
+			now = maxi(now + 1, d)
+	var deaths := 0
+	var revives := 0
+	for e: Dictionary in g.events:
+		if e.type == "died":
+			deaths += 1
+		elif e.type == "revived":
+			revives += 1
+	out["turns"] = g.turn_ends
+	out["actions"] = actions
+	out["winner"] = int(str(g.over.winner).substr(1)) if g.over.winner != null else -1
+	out["deaths"] = deaths
+	out["revives"] = revives
+	return true
+
+
+func _bal_median(a: Array) -> float:
+	var b := a.duplicate()
+	b.sort()
+	if b.is_empty():
+		return 0.0
+	var m := b.size() / 2
+	return float(b[m]) if b.size() % 2 == 1 else (float(b[m - 1]) + float(b[m])) / 2.0
+
+
+## Duelo 2 jugadores con la variante: % de victorias de `a` sobre `b` (asientos alternados).
+func _bal_duel(v: Dictionary, a: String, b: String, n: int) -> int:
+	var w := 0
+	for i in n:
+		var out := {}
+		var a_first := i % 2 == 1
+		if not _bal_game(2, 9000 + i, [a, b] if a_first else [b, a], 0, v, out):
+			continue
+		if out.winner == (0 if a_first else 1):
+			w += 1
+	return int(round(100.0 * w / n))
+
+
+func _balance(args: PackedStringArray) -> void:
+	var games := int(_bal_arg(args, "games", "400"))
+	var base_seed := int(_bal_arg(args, "seed", "50000"))
+	var ids := Array(_bal_arg(args, "variants", ",".join(PackedStringArray(BAL_VARIANTS.keys()))).split(",", false))
+	var counts := Array(_bal_arg(args, "players", "2,3,4,5").split(",", false)).map(func(s: String) -> int: return int(s))
+	var sets := Array(_bal_arg(args, "levels", "mixed,normal").split(",", false))
+	var diff := Array(_bal_arg(args, "difficulty", "").split(",", false))
+	if not ids.has("A"):
+		ids.push_front("A")   # referencia obligatoria: de ella salen % de duración y umbral de «larga»
+	var t0 := Time.get_ticks_msec()
+	for n: int in counts:
+		print("\n=== %d jugadores, %d partidas por celda (mazo official, semillas %d+) ===" % [n, games, base_seed])
+		print("turnos = veces que un jugador termina un turno; dur% = turnos medios frente a A con los mismos niveles; >2xMed = % de partidas con más del doble de la mediana de turnos de A")
+		print("%-3s %-8s %6s %6s %7s %7s  %-*s %6s %6s %6s %7s" % ["var", "niveles", "t.med", "t.mdn", "dur%", "accion", n * 5 + 4, "victoria por asiento %", "maxdev", "muert", "reviv", ">2xMed"])
+		var ref := {}   # niveles -> {mean, med}
+		for vid: String in ids:
+			var v: Dictionary = BAL_VARIANTS[vid]
+			for lvset: String in sets:
+				var levels: Array = ["easy", "normal", "hard"] if lvset == "mixed" else ["normal"]
+				var turns: Array = []
+				var acts := 0.0
+				var deaths := 0.0
+				var revs := 0.0
+				var wins: Array = []
+				wins.resize(n)
+				wins.fill(0)
+				var done := 0
+				for i in games:
+					var out := {}
+					if not _bal_game(n, base_seed + i * 37 + n, levels, i, v, out):
+						continue
+					done += 1
+					turns.append(out.turns)
+					acts += out.actions
+					deaths += out.deaths
+					revs += out.revives
+					if out.winner >= 0:
+						wins[out.winner] += 1
+				var tsum := 0
+				for t: int in turns:
+					tsum += t
+				var tmean := float(tsum) / maxi(done, 1)
+				var tmed := _bal_median(turns)
+				if vid == "A":
+					ref[lvset] = {"mean": tmean, "med": tmed}
+				var r: Dictionary = ref[lvset]
+				var long := 0
+				for t: int in turns:
+					if t > 2.0 * r.med:
+						long += 1
+				var ws: Array = []
+				var maxdev := 0.0
+				for w: int in wins:
+					var pct := 100.0 * w / maxi(done, 1)
+					ws.append("%4.1f" % pct)
+					maxdev = maxf(maxdev, pct - 100.0 / n)
+				print("%-3s %-8s %6.1f %6.1f %+6.0f%% %7.0f  %-*s %6.1f %6.2f %6.2f %6.1f%%" % [vid, lvset, tmean, tmed, 100.0 * (tmean / r.mean - 1.0), acts / maxi(done, 1), n * 5 + 4, " ".join(PackedStringArray(ws)), maxdev, deaths / maxi(done, 1), revs / maxi(done, 1), 100.0 * long / maxi(done, 1)])
+	if not diff.is_empty():
+		print("\n=== Dificultad (2 jugadores, 400 partidas por duelo; objetivo: difícil>normal>fácil) ===")
+		for vid: String in diff:
+			var v: Dictionary = BAL_VARIANTS[vid]
+			print("%s (%s): difícil vs normal %d%%   normal vs fácil %d%%   difícil vs fácil %d%%" % [vid, v.d, _bal_duel(v, "hard", "normal", 400), _bal_duel(v, "normal", "easy", 400), _bal_duel(v, "hard", "easy", 400)])
+	print("\nLeyenda: " + "; ".join(PackedStringArray(BAL_VARIANTS.keys().map(func(k: String) -> String: return "%s = %s" % [k, BAL_VARIANTS[k].d]))))
+	print("(%d ms)" % (Time.get_ticks_msec() - t0))
