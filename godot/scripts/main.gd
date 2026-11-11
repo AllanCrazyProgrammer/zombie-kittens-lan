@@ -724,6 +724,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	_game.debug_clear_selection()
 	await _ui_test_aim(dir, report)
 	await _ui_test_cripta(dir, report)
+	await _ui_test_memoria(dir, report)
 
 
 ## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
@@ -1032,7 +1033,7 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 		if g.dir != dir0:
 			await _wait(0.8)
 			var ds: Dictionary = _game.debug_dir()
-			_cripta_line(report, "reverse", "dir %d -> %d | flecha visible=%s dir=%d | rótulo «%s»%s" % [dir0, g.dir, str(ds.visible), int(ds.dir), str(ds.label), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ds.visible and int(ds.dir) == g.dir and str(ds.label) != "")
+			_cripta_line(report, "reverse", "dir %d -> %d | flecha visible=%s dir=%d | rótulo «%s»%s" % [dir0, g.dir, str(ds.visible), int(ds.dir), str(ds.label), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ds.visible and int(ds.dir) == g.dir and (str(ds.label) != "" or g.dir > 0))
 			await _save_shot(dir + "/t12_sentido.png")
 			done = true
 			break
@@ -1327,3 +1328,304 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 func _say(report: Array, line: String) -> void:
 	report.append(line)
 	print("UITEST " + line)
+
+
+# ---------------------------------------------------------------- recordatorio del futuro, mazo visual y eventos antiguos
+
+func _memo_line(report: Array, what: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/memoria: %s | %s | %s" % [what, detail, "OK" if ok else "ERROR"])
+
+
+## Deja las `n` cartas de arriba sin explosivos (se cambian por otras del mazo) para poder robarlas sin riesgo.
+func _memo_safe_top(g: ZKGame, n: int) -> void:
+	if g.draw.size() < n + 2:
+		return
+	for k in n:
+		var idx := g.draw.size() - 1 - k
+		if g.draw[idx].type != "exploding":
+			continue
+		for j in range(0, g.draw.size() - n):
+			if g.draw[j].type != "exploding":
+				var tmp: ZKGame.Card = g.draw[idx]
+				g.draw[idx] = g.draw[j]
+				g.draw[j] = tmp
+				break
+
+
+func _memo_top_types(g: ZKGame, n: int) -> Array:
+	var out: Array = []
+	for k in mini(n, g.draw.size()):
+		out.append(g.draw[g.draw.size() - 1 - k].type)
+	return out
+
+
+## Lo que el recordatorio recuerda ahora: tipos en orden (profundidades, aparte).
+func _memo_known() -> Array:
+	return _game.debug_memory().known(_session.view())
+
+
+func _memo_types(known: Array) -> Array:
+	return known.map(func(k: Dictionary) -> String: return k.type)
+
+
+func _memo_depths(known: Array) -> Array:
+	return known.map(func(k: Dictionary) -> int: return int(k.depth))
+
+
+## Juega Ver el Futuro de verdad y cierra la ventana. Devuelve {types, shuf, tops} o {} si se anuló.
+func _memo_see_future(lm: LocalMatch) -> Dictionary:
+	var g: ZKGame = lm.game
+	for attempt in 3:
+		await _cripta_close_windows()
+		await _cripta_my_turn(lm, true, attempt)
+		g.turns_left = 8        # que el turno no pase a un bot mientras se comprueba
+		_memo_safe_top(g, 3)
+		_session.updated.emit()
+		await _cripta_give(lm, "see_future")
+		var seq0 := g.seq
+		await _cripta_play(lm, "see_future")
+		if not _cripta_event(lm, "future", seq0).is_empty():
+			await _wait(0.5)
+			await _cripta_close_windows()
+			await _wait(0.2)
+			return {"types": _memo_top_types(g, 3), "shuf": g.shuf, "tops": g.tops}
+		_cripta_drop(lm, "see_future")
+	return {}
+
+
+func _ui_test_memoria(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null or not (g.packs as Array).has("crypt"):
+		_say(report, "Plus/memoria: AVISO, partida terminada o sin el pack; se omite el recorrido")
+		return
+	for pl in g.players:
+		pl.alive = true
+	var strip: DeckMemoryStrip = _game.debug_strip()
+	await _cripta_close_windows()
+	await _cripta_my_turn(lm)
+	while g.draw.size() < 24:       # tras la partida de la prueba el mazo puede estar casi vacío: se repone (cartas Saltar)
+		_cripta_n += 1
+		g.draw.insert(0, ZKGame.Card.new("z%d" % _cripta_n, "skip", false))
+	_session.updated.emit()
+	await _wait(0.3)
+
+	g.shuf += 1        # la memoria empieza de cero: solo cuenta lo que se aprende en este recorrido
+	g.tops = 0
+	_session.updated.emit()
+	await _wait(0.2)
+
+	# 1. Ver el Futuro -> tira con 3
+	var snap := await _memo_see_future(lm)
+	if snap.is_empty():
+		_memo_line(report, "ver el futuro", "no se pudo jugar tras 3 intentos", false)
+		return
+	var kn := _memo_known()
+	_memo_line(report, "ver el futuro", "tira con %s (esperado 3: %s) | tipos %s = arriba del mazo %s | visible=%s" % [str(strip.debug_items()), str(snap.types), str(_memo_types(kn)), str(snap.types), str(strip.visible)], strip.visible and strip.debug_items() == ["carta", "carta", "carta"] and _memo_types(kn) == snap.types and _memo_depths(kn) == [0, 1, 2])
+	await _save_shot(dir + "/t19_memoria_tira.png")
+
+	# Tocar la tira abre la ventana con todo lo conocido
+	await _tap_control(strip)
+	await _wait(0.5)
+	var title: String = _game.debug_modal_title()
+	await _save_shot(dir + "/t20_memoria_ventana.png")
+	_memo_line(report, "ventana del recordatorio", "ventana «%s»" % title, title == "Lo que sabes del mazo")
+	await _cripta_close_windows()
+
+	# UX-15 / D-20: una pantalla nueva sobre una partida avanzada no repite efectos antiguos
+	var old_events: int = (_session.view().events as Array).size()
+	# Sin la corrección (simulada marcando la primera vista como ya hecha) la pantalla nueva SÍ repite los efectos antiguos
+	var g3 := PlusGameScreen.new().setup(_session, _world)
+	g3._first_view = false
+	add_child(g3)
+	await _wait(0.3)
+	var fx3: Dictionary = g3.debug_effects()
+	_memo_line(report, "D-20 sin corrección (simulado)", "pantalla nueva repite: ventana «%s», %d popups, %d avisos" % [str(fx3.modal), int(fx3.popups), int(fx3.toasts)], str(fx3.modal) != "" or int(fx3.popups) > 0 or int(fx3.toasts) > 0)
+	g3.queue_free()
+	await _wait(0.3)
+	await _cripta_close_windows()
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await _wait(0.3)
+	var fx: Dictionary = g2.debug_effects()
+	var kn2: Array = g2.debug_memory().known(_session.view())
+	_memo_line(report, "pantalla nueva (D-20)", "%d eventos antiguos en la vista, %d registrados sin efectos | ventana «%s», %d popups, %d avisos | recuerda lo mismo=%s | historial %d" % [old_events, g2.replay_skipped, str(fx.modal), int(fx.popups), int(fx.toasts), str(_memo_types(kn2) == _memo_types(kn)), g2.debug_history_size()], old_events > 5 and g2.replay_skipped == old_events and str(fx.modal) == "" and int(fx.popups) == 0 and int(fx.toasts) == 0 and _memo_types(kn2) == _memo_types(kn) and g2.debug_history_size() > 0)
+	_memo_line(report, "partida recién empezada", "solo inicio=%s | con un robo=%s" % [str(g2.debug_fresh([{"type": "start"}, {"type": "turn"}])), str(g2.debug_fresh([{"type": "start"}, {"type": "draw"}]))], g2.debug_fresh([{"type": "start"}, {"type": "turn"}]) and not g2.debug_fresh([{"type": "start"}, {"type": "draw"}]))
+	# Los eventos posteriores a la primera vista sí hacen efecto: un `future` nuevo abre la ventana
+	g.emit("future", {"cards": _memo_top_types(g, 3), "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "p0")
+	_session.updated.emit()
+	await _wait(0.4)
+	var fx2: Dictionary = g2.debug_effects()
+	_memo_line(report, "evento posterior", "ventana «%s»" % str(fx2.modal), str(fx2.modal).begins_with("El futuro"))
+	g2.queue_free()
+	await _wait(0.3)
+	await _cripta_close_windows()
+
+	# 2. Un rival roba -> se desplaza (quedan 2)
+	var c1: ZKGame.Card = g.draw.pop_back()
+	g.tops += 1
+	g.P("p1").hand.append(c1)
+	_session.updated.emit()
+	await _wait(0.3)
+	kn = _memo_known()
+	_memo_line(report, "un rival roba", "tira %s | recuerda %s (esperado %s) a profundidades %s" % [str(strip.debug_items()), str(_memo_types(kn)), str(snap.types.slice(1)), str(_memo_depths(kn))], strip.debug_items() == ["carta", "carta"] and _memo_types(kn) == snap.types.slice(1) and _memo_depths(kn) == [0, 1])
+	await _save_shot(dir + "/t21_memoria_tira_dos.png")
+
+	# 2b. Robo propio de verdad -> queda 1
+	var err := g.act("p0", {"a": "draw"}, lm.now())
+	_session.updated.emit()
+	kn = _memo_known()
+	_memo_line(report, "robo propio", "error «%s» | tira %s | recuerda %s (esperado %s)" % [err, str(strip.debug_items()), str(_memo_types(kn)), str(snap.types.slice(2))], err == "" and strip.debug_items() == ["carta"] and _memo_types(kn) == snap.types.slice(2) and _memo_depths(kn) == [0])
+	await _cripta_close_windows()
+
+	# 3. Robar del Fondo no desplaza
+	snap = await _memo_see_future(lm)
+	if snap.is_empty():
+		_memo_line(report, "robar del fondo", "no se pudo preparar Ver el Futuro", false)
+	else:
+		var n0: int = g.draw.size()
+		var ok_b := false
+		for attempt in 3:
+			await _cripta_my_turn(lm, true, attempt)
+			g.turns_left = 8
+			if g.shuf != snap.shuf:
+				break
+			if g.draw[0].type == "exploding":
+				for i in range(1, g.draw.size() - 3):
+					if g.draw[i].type != "exploding":
+						var tmp: ZKGame.Card = g.draw[0]
+						g.draw[0] = g.draw[i]
+						g.draw[i] = tmp
+						break
+			n0 = g.draw.size()
+			await _cripta_give(lm, "draw_bottom")
+			var seq0 := g.seq
+			await _cripta_play(lm, "draw_bottom")
+			var ev := _cripta_event(lm, "draw", seq0)
+			if not ev.is_empty() and ev.get("bottom", false):
+				await _wait(0.4)
+				kn = _memo_known()
+				_memo_line(report, "robar del fondo", "mazo %d -> %d, tops %d -> %d | recuerda %s (esperado %s) a profundidades %s | tira %s" % [n0, g.draw.size(), int(snap.tops), g.tops, str(_memo_types(kn)), str(snap.types), str(_memo_depths(kn)), str(strip.debug_items())], g.draw.size() < n0 and g.tops == snap.tops and _memo_types(kn) == snap.types and _memo_depths(kn) == [0, 1, 2])
+				ok_b = true
+				break
+			_cripta_drop(lm, "draw_bottom")
+		if not ok_b:
+			_memo_line(report, "robar del fondo", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 4. Barajar -> desaparece
+	snap = await _memo_see_future(lm)
+	var ok_s := false
+	if not snap.is_empty():
+		for attempt in 3:
+			await _cripta_my_turn(lm, true, attempt)
+			g.turns_left = 8
+			await _cripta_give(lm, "shuffle")
+			await _cripta_play(lm, "shuffle")
+			if g.shuf != snap.shuf:
+				await _wait(0.4)
+				kn = _memo_known()
+				_memo_line(report, "barajar", "shuf %d -> %d | recuerda %d cartas | tira visible=%s" % [int(snap.shuf), g.shuf, kn.size(), str(strip.visible)], kn.is_empty() and not strip.visible)
+				ok_s = true
+				break
+			_cripta_drop(lm, "shuffle")
+	if not ok_s:
+		_memo_line(report, "barajar", "no se pudo resolver", false)
+	await _cripta_close_windows()
+
+	# 5. Entierro en un mazo grande: selector visual (arrastre + ajuste fino) y la posición llega al motor
+	await _cripta_my_turn(lm)
+	g.turns_left = 8
+	for k in 22:
+		_cripta_n += 1
+		g.draw.insert(0, ZKGame.Card.new("z%d" % _cripta_n, "skip", false))
+	_session.updated.emit()
+	await _cripta_give(lm, "bury")
+	var seq1 := g.seq
+	await _cripta_play(lm, "bury")
+	var pk: DeckSlotPicker = _game.debug_slot_picker()
+	if pk == null or g.prompt == null or g.prompt.type != "bury":
+		_memo_line(report, "entierro", "no se abrió el selector", false)
+	else:
+		var bcard: String = g.prompt.card.type
+		var big: int = pk.max_pos
+		var prof: DeckProfile = pk.debug_profile()
+		var want := 17
+		await _save_shot(dir + "/t22_selector_mazo.png")
+		# Arrastre real del hueco hasta cerca de la posición 21 y ajuste fino con −1 hasta la 17
+		var vt := get_viewport().get_final_transform()
+		await _drag(vt * prof.debug_point(pk.value), vt * prof.debug_point(want + 4), true)
+		await _drag(vt * prof.debug_point(want + 4), vt * prof.debug_point(want + 4), false)
+		await _wait(0.2)
+		var after_drag: int = pk.value
+		var steps := 0
+		while pk.value != want and steps < 12:
+			var fine := _find_button(self, "−1" if pk.value > want else "+1")
+			if fine == null:
+				break
+			await _tap_control(fine)
+			await _wait(0.1)
+			steps += 1
+		var phrase := pk.debug_text()
+		var final_val: int = pk.value
+		await _save_shot(dir + "/t23_selector_mazo_17.png")
+		var conf := _find_button(self, "CONFIRMAR")
+		if conf:
+			await _tap_control(conf)
+			await _wait(0.6)
+		var bev := _cripta_event(lm, "buried", seq1)
+		kn = _memo_known()
+		_memo_line(report, "selector visual (mazo de %d)" % big, "arrastre -> %d, %d toques de ajuste fino -> %d | «%s» | acción enviada pos=%s (esperado %d)" % [after_drag, steps, final_val, phrase, str(bev.get("pos", -1)), want], absi(after_drag - (want + 4)) <= 2 and int(bev.get("pos", -1)) == want and phrase == DeckSlotPicker.label_for(want, big))
+		_memo_line(report, "entierro en posición conocida", "carta %s | recuerda %s a profundidades %s | tira %s" % [bcard, str(_memo_types(kn)), str(_memo_depths(kn)), str(strip.debug_items())], _memo_types(kn) == [bcard] and _memo_depths(kn) == [want] and strip.debug_items() == ["?", "carta"])
+		await _save_shot(dir + "/t24_memoria_entierro.png")
+	await _cripta_close_windows()
+
+	# 6. Esconder DOS explosivos (decisión forzada): dos selectores visuales, posiciones elegidas y memoria propia
+	await _cripta_my_turn(lm)
+	g.turns_left = 8
+	var eks: Array = []
+	for k in 2:
+		_cripta_n += 1
+		eks.append(ZKGame.Card.new("z%d" % _cripta_n, "exploding", false))
+	g.prompt = {"type": "zombie", "player": "p0", "eks": eks, "needRevive": false, "revived": null, "watchers": [], "pendingPos": null, "minUntil": lm.now(), "start": lm.now(), "deadline": lm.now() + 90000}
+	_session.updated.emit()
+	await _wait(0.6)
+	var pickers: Array = _game.debug_slot_pickers()
+	if pickers.size() != 2:
+		_memo_line(report, "dos explosivos", "selectores abiertos: %d (esperado 2)" % pickers.size(), false)
+		g.prompt = null
+	else:
+		await _save_shot(dir + "/t25_selector_dos.png")
+		pickers[0].debug_set(9)
+		pickers[1].debug_set(4)
+		await _wait(0.2)
+		var conf2 := _find_button(self, "CONFIRMAR")
+		if conf2:
+			await _tap_control(conf2)
+			await _wait(0.4)
+		var depth_now: Array = []
+		for c: ZKGame.Card in eks:
+			for i in g.draw.size():
+				if g.draw[i].id == c.id:
+					depth_now.append(g.draw.size() - 1 - i)
+		depth_now.sort()
+		kn = _memo_known()
+		_memo_line(report, "dos explosivos", "posiciones 9 y 4 | en el mazo a profundidades %s | recuerda %s | tira %s | marca bomba=%d" % [str(depth_now), str(_memo_depths(kn)), str(strip.debug_items()), strip.debug_bomb()], depth_now.size() == 2 and _memo_depths(kn) == depth_now and _memo_types(kn) == ["exploding", "exploding"])
+		await _save_shot(dir + "/t26_memoria_explosivos.png")
+	await _cripta_close_windows()
+
+	# 7. Marca «💣 en N»: se conocen 3 cartas de arriba y un explosivo más abajo
+	if pickers.size() == 2:
+		var snap2 := await _memo_see_future(lm)
+		var near := 999
+		for c: ZKGame.Card in eks:
+			for i in g.draw.size():
+				if g.draw[i].id == c.id:
+					near = mini(near, g.draw.size() - 1 - i)
+		kn = _memo_known()
+		_memo_line(report, "marca de explosivo", "conoce %d cartas | tira %s | «💣 en %d» (esperado en %d)" % [kn.size(), str(strip.debug_items()), strip.debug_bomb(), near + 1], not snap2.is_empty() and strip.debug_items() == ["carta", "carta", "carta"] and strip.debug_bomb() == near + 1)
+		await _save_shot(dir + "/t27_memoria_bomba.png")
+		await _cripta_close_windows()
+	for pl in g.players:
+		pl.alive = true
+	_session.updated.emit()

@@ -107,10 +107,17 @@ var _alter_order: Array = []     # orden elegido en la ventana de Alterar el Fut
 var _alter_live := false         # tengo una decisión «alter» abierta (para no abrir «El futuro» al confirmarla)
 var _arranger: FutureArranger    # ventana de Alterar el Futuro abierta
 var _slot_picker: DeckSlotPicker # selector de posición abierto (esconder el explosivo / Entierro)
+var _picker_sig := ""            # huella de la decisión con selectores de mazo abierta (no se reconstruye mientras no cambie)
+var _picker_bar: ProgressBar     # barra de tiempo de esa ventana
+var _slot_pickers: Array[DeckSlotPicker] = []   # todos los selectores abiertos (con 2 explosivos hay dos)
 var _peek_grid: CardPickGrid     # ventana de Ojo de Cuervo abierta
 var _bottom_draw := false        # el próximo robo sale de DEBAJO del mazo
 var _dir_ring: DirIndicator      # flecha de sentido de juego sobre el tapete (V-06)
-var _dir_label: Label            # rótulo «sentido» bajo las fichas de los rivales
+var _dir_label: Label            # «↺ INVERTIDO» junto al distintivo PLUS (solo con el sentido invertido)
+var _memory := DeckMemory.new()  # lo que sé de posiciones concretas del mazo (UX-02)
+var _mem_strip: DeckMemoryStrip  # tira con las próximas cartas conocidas, junto al mazo
+var _first_view := true          # la próxima vista es la primera de esta pantalla (UX-15)
+var replay_skipped := 0          # solo prueba: eventos antiguos registrados sin efectos al abrir la pantalla (UX-15)
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -182,6 +189,7 @@ func _process(delta: float) -> void:
 		var av: Sprite3D = _seats[id].avatar
 		var is_cur: bool = not _v.is_empty() and _v.cur == id
 		av.scale = Vector3.ONE * (1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0))
+	_place_strip()
 	var now := session.now()
 	for t: Array in _timers:
 		if is_instance_valid(t[0]):
@@ -256,7 +264,7 @@ func _refresh() -> void:
 		_modal = {}
 	if _aim_kind != "" and not _aim_still_valid():
 		_exit_aim(false)
-	if _modal.get("type", "") == "discard" and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
+	if _modal.get("type", "") in ["discard", "memory"] and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
 		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
 	_sync_seats()
 	_process_events()
@@ -322,6 +330,26 @@ func _sync_deck() -> void:
 	_deck_label.visible = _v.draw > 0
 
 
+## Pone la tira del recordatorio justo debajo del mazo (sigue su proyección en pantalla).
+func _place_strip() -> void:
+	if _mem_strip == null or not _mem_strip.visible or world == null:
+		return
+	var screen := get_viewport().get_visible_rect().size
+	var p := world.camera.unproject_position(DECK_POS + Vector3(0, 0.03, 0.4))
+	var sz := _mem_strip.get_combined_minimum_size()
+	_mem_strip.size = sz
+	_mem_strip.position = Vector2(clampf(p.x - sz.x * 0.5, 12.0, maxf(12.0, screen.x - sz.x - 12.0)), p.y + 6.0)
+
+
+## Abre la ventana con todo lo que sé del mazo (tocar la tira).
+func _open_memory() -> void:
+	if _v.is_empty() or _v.over != null or (_v.prompt != null and _v.prompt.mine):
+		return
+	_exit_aim(false)
+	_modal = {"type": "memory"}
+	_update_hud()
+
+
 ## Flecha de sentido (V-06): solo con un pack activo. Refleja `view.dir`.
 func _sync_dir() -> void:
 	var on: bool = not (_v.get("packs", []) as Array).is_empty() and _v.over == null
@@ -330,11 +358,7 @@ func _sync_dir() -> void:
 	if on:
 		_dir_ring.set_dir(int(_v.get("dir", 1)), not first)
 	if _dir_label != null:
-		_dir_label.visible = on
-		if on:
-			var fwd: bool = int(_v.get("dir", 1)) >= 0
-			_dir_label.text = "Sentido de los turnos →" if fwd else "← Sentido invertido: los turnos van a la izquierda"
-			_dir_label.add_theme_color_override("font_color", UIKit.C.dim if fwd else UIKit.C.gold)
+		_dir_label.visible = on and int(_v.get("dir", 1)) < 0
 
 
 func _sorted_hand() -> Array:
@@ -632,8 +656,23 @@ func _confetti() -> void:
 	t.tween_callback(p.queue_free)
 
 
+## ¿La partida acaba de empezar? (solo hay eventos de inicio: la primera vista debe mostrarlo normal.)
+func _is_fresh_start(events: Array) -> bool:
+	for e: Dictionary in events:
+		if not (e.type in ["start", "turn"]):
+			return false
+	return true
+
+
 func _process_events() -> void:
 	var me: String = _v.you
+	_memory.feed(_v)
+	# UX-15: al abrir la pantalla en una partida ya empezada, los eventos antiguos van al historial
+	# (y al recordatorio del futuro) pero no disparan sonidos, avisos ni ventanas.
+	var quiet := false
+	if _first_view:
+		_first_view = false
+		quiet = not _is_fresh_start(_v.events)
 	for e: Dictionary in _v.events:
 		if e.seq <= _seq:
 			continue
@@ -641,6 +680,9 @@ func _process_events() -> void:
 		if e.has("text") and not e.has("to"):
 			_log_last = e.text
 		_record(e)
+		if quiet:
+			replay_skipped += 1
+			continue
 		match e.type:
 			"start":
 				Sfx.play("shuffle")
@@ -1201,6 +1243,12 @@ func _build_hud() -> void:
 	badge_label.add_theme_constant_override("outline_size", 0)
 	badge.add_child(badge_label)
 	bar.add_child(badge)
+	# Sentido invertido: rótulo corto en la misma fila (sin añadir altura); con sentido normal no se ve
+	_dir_label = UIKit.label("↺ INVERTIDO", 30, UIKit.C.gold, true)
+	_dir_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dir_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_dir_label.visible = false
+	bar.add_child(_dir_label)
 	_turn_panel = UIKit.panel(UIKit.C.panel, UIKit.C.line, Vector2(20, 8))
 	_turn_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_turn_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1214,11 +1262,6 @@ func _build_hud() -> void:
 	bar.add_child(hist)
 	_opps = RivalChips.new()
 	tv.add_child(_opps)
-	_dir_label = UIKit.label("", 28, UIKit.C.dim)
-	_dir_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_dir_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_dir_label.visible = false
-	tv.add_child(_dir_label)
 	_risk = RiskMeter.new()
 	tv.add_child(_risk)
 	_toasts = UIKit.vbox(8)
@@ -1251,6 +1294,11 @@ func _build_hud() -> void:
 	_buttons = UIKit.hbox(16)
 	_buttons.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bv.add_child(_buttons)
+
+	# Recordatorio del futuro (UX-02): tira junto al mazo; solo su rectángulo recibe toques
+	_mem_strip = DeckMemoryStrip.new()
+	_mem_strip.tapped.connect(_open_memory)
+	root.add_child(_mem_strip)
 
 	# Carta seleccionada en grande. No intercepta toques: se puede seguir tocando la mano debajo.
 	_zoom = Control.new()
@@ -1317,6 +1365,7 @@ func _update_hud() -> void:
 	_opps.set_pickable(_aim_kind != "")
 	_opps.update(v, session.level_of)
 	_risk.update(v)
+	_mem_strip.update(_memory.strip(v))
 
 	# Barra del jugador: solo donde sobra espacio bajo la mesa
 	_clear(_me_bar)
@@ -1585,7 +1634,21 @@ func _player_buttons(box: Node, players: Array, fn: Callable) -> void:
 		_add_btn(box, "%s  ·  %d cartas" % ["Yo mismo" if id == _v.you else p.name, p.count], "normal", func() -> void: fn.call(id))
 
 
+## Huella de una decisión propia con selector de mazo («zombie» / «bury»); "" si no es de ese tipo.
+func _picker_signature(pr: Variant) -> String:
+	if pr == null or not pr.mine or not (pr.type in ["zombie", "bury"]):
+		return ""
+	return "%s|%d|%s|%s|%s|%s" % [pr.type, int(_v.draw), str(pr.get("eks")), str(pr.get("revived")), str(pr.get("waiting")), str(pr.get("card"))]
+
+
 func _build_modal() -> void:
+	# Un selector de mazo no se reconstruye por avisos ajenos a la decisión: así no se pierde un arrastre en curso
+	var sig := _picker_signature(_v.prompt)
+	if sig != "" and sig == _picker_sig and is_instance_valid(_slot_picker) and _slot_picker.is_inside_tree() and _modal_root.get_child_count() > 0 and not _fx_running:
+		if is_instance_valid(_picker_bar):
+			_track(_picker_bar, _v.prompt)
+		return
+	_picker_sig = ""
 	var keep_scroll := _discard_list.scroll_value() if is_instance_valid(_discard_list) else 0   # la lista conserva su posición al reconstruirse
 	_clear(_modal_root)
 	_discard_list = null
@@ -1593,6 +1656,7 @@ func _build_modal() -> void:
 	_peek_grid = null
 	_arranger = null
 	_slot_picker = null
+	_slot_pickers = []
 	_modal_title = ""
 	var v := _v
 	if _fx_running and (v.over != null or (v.prompt != null and v.prompt.mine and v.prompt.type == "explode")):
@@ -1618,6 +1682,7 @@ func _build_modal() -> void:
 		_ins = [0, 0]
 	if pr != null and pr.mine:
 		_build_prompt_modal(pr)
+		_picker_sig = _picker_signature(pr)
 		return
 	if _modal.is_empty():
 		return
@@ -1675,6 +1740,10 @@ func _build_modal() -> void:
 				var p := int(_modal.positions[i])
 				_text(box, "Explosivo %s: %s" % [str(i + 1) if _modal.positions.size() > 1 else "", "arriba del todo" if p == 0 else "debajo de %d carta%s" % [p, "s" if p > 1 else ""]], 38, UIKit.C.gold)
 			_add_btn(box, "Entendido", "primary", _close_modal)
+		"memory":
+			var box := _open_modal("Lo que sabes del mazo", UIKit.C.gold)
+			DeckMemoryStrip.fill_window(box, _memory.known(v), int(v.draw))
+			_add_btn(box, "Cerrar", "primary", _close_modal)
 		"history":
 			_build_history(_open_modal("Historial"))
 		"discard":
@@ -1792,6 +1861,7 @@ func _confirm_insert() -> void:
 	for i in int(_v.prompt.eks):
 		pos.append(mini(_ins[i], int(_v.draw) + i))
 	_ins = [0, 0]
+	_memory.note_insert(pos)
 	_act({"a": "insert", "positions": pos})
 
 
@@ -2058,6 +2128,33 @@ func debug_arranger() -> FutureArranger:
 	return _arranger if is_instance_valid(_arranger) else null
 
 
+func debug_memory() -> DeckMemory:
+	return _memory
+
+
+func debug_strip() -> DeckMemoryStrip:
+	return _mem_strip
+
+
+## Prueba: abre la ventana del recordatorio como al tocar la tira.
+func debug_open_memory() -> void:
+	_open_memory()
+
+
+func debug_slot_pickers() -> Array[DeckSlotPicker]:
+	return _slot_pickers
+
+
+## Prueba: ¿se consideraría «partida recién empezada» una vista con estos eventos?
+func debug_fresh(events: Array) -> bool:
+	return _is_fresh_start(events)
+
+
+## Prueba: avisos y efectos en pantalla (popups, toasts) y ventana abierta.
+func debug_effects() -> Dictionary:
+	return {"popups": _fx_root.get_child_count(), "toasts": _toasts.get_child_count(), "modal": _modal_title}
+
+
 func debug_slot_picker() -> DeckSlotPicker:
 	return _slot_picker if is_instance_valid(_slot_picker) else null
 
@@ -2137,13 +2234,16 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 				var max_pos: int = int(v.draw) + i
 				_ins[i] = mini(_ins[i], max_pos)
 				var title := "Explosivo" if pr.eks == 1 else ("Tu explosivo" if i == 0 else "El del jugador revivido")
-				var picker := DeckSlotPicker.new().setup(max_pos, _ins[i], title)
+				# Lo conocido se marca solo en el primer selector (el segundo cuenta con el primer explosivo ya dentro)
+				var picker := DeckSlotPicker.new().setup(max_pos, _ins[i], title, _memory.known(v) if i == 0 else [], 470 if pr.eks == 1 else 330)
 				picker.changed.connect(func(pos: int) -> void: _ins[idx] = pos)
 				box.add_child(picker)
 				_slot_picker = picker
+				_slot_pickers.append(picker)
 			var bar := UIKit.timer_bar()
 			box.add_child(bar)
 			_track(bar, pr)
+			_picker_bar = bar
 			_add_btn(box, "CONFIRMAR", "primary", _confirm_insert, 54)
 		"give":
 			var title := "Ladrón de Tumbas"
@@ -2195,13 +2295,14 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 			_centered(box, UIKit.card_image(pr.card, 380))
 			var max_pos: int = int(v.draw)
 			_ins[0] = mini(_ins[0], max_pos)
-			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0])
+			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0], "", _memory.known(v))
 			picker.changed.connect(func(pos: int) -> void: _ins[0] = pos)
 			box.add_child(picker)
 			_slot_picker = picker
 			var bar := UIKit.timer_bar()
 			box.add_child(bar)
 			_track(bar, pr)
+			_picker_bar = bar
 			_add_btn(box, "CONFIRMAR", "primary", _confirm_bury, 54)
 		"dig":
 			var box := _open_modal("Cava Más Hondo")
