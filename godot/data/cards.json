@@ -169,5 +169,115 @@
     "color": "#e2331f",
     "now": false,
     "cat": false
+  },
+  "targeted_attack": {
+    "name": "Ataque Dirigido",
+    "kind": "Acción",
+    "short": "Termina tu turno sin robar. Elige quién juega 2 turnos seguidos.",
+    "long": "Termina tu turno sin robar y eliges a qué jugador vivo (distinto de ti) obligas a jugar 2 turnos seguidos; después de él, el orden sigue desde su asiento. Se apila como Ataque (2x): si la víctima juega otro ataque, los turnos que le quedaban pasan al objetivo más 2 turnos extra. Si el objetivo muere antes de resolverse, el ataque pasa al siguiente jugador vivo en el sentido de juego. No se puede jugar en partidas de 2 jugadores.",
+    "color": "#c93a1a",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "🎯"
+  },
+  "reverse": {
+    "name": "Marcha Atrás",
+    "kind": "Acción",
+    "short": "Invierte el sentido de juego y termina tu turno sin robar.",
+    "long": "Invierte el sentido de juego, de modo que los turnos pasan a ir en dirección contraria, y termina tu turno sin robar carta. Si te habían atacado, solo cancela 1 de tus turnos pendientes, como Saltar. Con solo 2 jugadores vivos equivale a Saltar.",
+    "color": "#1aa3a3",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "🔄"
+  },
+  "draw_bottom": {
+    "name": "Robar del Fondo",
+    "kind": "Acción",
+    "short": "Termina tu turno robando la carta de ABAJO del mazo.",
+    "long": "Sustituye al robo normal de tu turno: en lugar de la carta de arriba, robas la carta del fondo del mazo y tu turno termina. Si esa carta es un Gatito Explosivo, explotas igual que con cualquier robo. Es útil cuando sabes que arriba hay un explosivo.",
+    "color": "#7a5a2e",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "⚰️"
+  },
+  "crow_eye": {
+    "name": "Ojo de Cuervo",
+    "kind": "Acción",
+    "short": "Mira en secreto la mano completa de otro jugador.",
+    "long": "Elige a otro jugador que tenga cartas (vivo o muerto) y mira en secreto todas las cartas de su mano. Él sabe que lo han mirado, pero no qué has visto ni qué vas a hacer con ello. Puede anularse con Nop.",
+    "color": "#3a3f5c",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "🐦‍⬛"
+  },
+  "apocalypse": {
+    "name": "Apocalipsis Zombi",
+    "kind": "Acción",
+    "short": "Baraja el mazo y pon TODOS los explosivos arriba. Tu turno termina sin robar.",
+    "long": "Se apartan todos los Gatitos Explosivos del mazo, se baraja el resto y los explosivos se colocan arriba en orden aleatorio, a la vista de todos. Terminas tu turno sin robar, y también todos los turnos que te quedaban pendientes. Como todos saben que los próximos robos explotan, suele desatar una ronda de Saltar, Ataque, Barajar y Nop; solo hay una copia y solo aparece con 3 o más jugadores.",
+    "color": "#b01030",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "☄️"
+  },
+  "alter_future": {
+    "name": "Alterar el Futuro (3x)",
+    "kind": "Acción",
+    "short": "Mira en secreto las 3 cartas de arriba y reordénalas como quieras.",
+    "long": "Mira en secreto las 3 cartas superiores del mazo y colócalas en el orden que quieras, sin sacarlas del mazo. Tienes tiempo limitado para decidir; si se acaba, quedan como estaban. Al jugarla, los demás olvidan lo que sabían sobre el orden del mazo.",
+    "color": "#b04ad6",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "🔮"
+  },
+  "bury": {
+    "name": "Entierro",
+    "kind": "Acción",
+    "short": "Roba la carta de arriba, mírala y entiérrala en secreto donde quieras. Tu turno termina.",
+    "long": "Roba la carta de arriba y mírala sin enseñarla. Después la escondes en secreto en la posición del mazo que quieras y tu turno termina, sin que la carta llegue a tu mano. Si era un Gatito Explosivo, no explotas: lo entierras igual. Si no decides a tiempo, se coloca en una posición al azar.",
+    "color": "#5c4a36",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "🪦"
+  },
+  "soul_swap": {
+    "name": "Trueque de Almas",
+    "kind": "Acción",
+    "short": "Intercambia tu mano completa con la de un jugador muerto.",
+    "long": "Eliges a un jugador muerto que tenga al menos 1 carta y vuestras manos se intercambian enteras. Si ese jugador ha sido revivido antes de que la carta se resuelva, no tiene efecto. Puede anularse con Nop.",
+    "color": "#3f8f8a",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "👻"
+  },
+  "haunt": {
+    "name": "Espanto",
+    "kind": "Solo estando muerto",
+    "short": "Solo si estás MUERTO: elige a un vivo. Descarta una carta al azar de su mano.",
+    "long": "Solo puede jugarla un jugador muerto. Tiene ⚡: puede jugarse en cualquier momento, aunque no sea tu turno. Eliges a un jugador vivo que tenga cartas, y una carta al azar de su mano va boca arriba al descarte, para que todos la vean. Los vivos no pueden copiarla con Clon.",
+    "color": "#7f8fd0",
+    "now": true,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "😱"
+  },
+  "rotten": {
+    "name": "Gatito Putrefacto",
+    "kind": "Peligro",
+    "short": "Boca abajo: no pasa nada, devuélvelo boca ARRIBA donde quieras. Boca arriba: mueres. Ni el Zombi te salva.",
+    "long": "Es un peligro que sustituye a uno de los Gatitos Explosivos (solo aparece con 3 o más jugadores). La primera vez que lo robas, boca abajo, no mueres: lo vuelves a colocar boca arriba en la posición que quieras y tu turno termina. Desde entonces, todos ven a cuántas cartas está del robo; si vuelve a salir boca arriba, mueres sin poder salvarte con Gatito Zombi ni con Clon.",
+    "color": "#6f8f1a",
+    "now": false,
+    "cat": false,
+    "pack": "crypt",
+    "icon": "☣️"
   }
 }

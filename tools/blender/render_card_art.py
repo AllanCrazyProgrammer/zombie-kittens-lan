@@ -632,11 +632,207 @@ def s_cat_d():
     tombstone((-1.0, 1.0, 0), 1.15, 0.3, "#3a3a4a"); tombstone((1.05, 1.3, 0), 1.0, -0.25, "#3a3a4a")
 
 
+# ---------------------------------------------------------------- 10 cartas del pack "crypt"
+def arrow(points, color="#ffe14a", r=0.035, emit=6.0, head=0.13):
+    """Flecha brillante: tubo por los puntos + punta cónica en el último tramo."""
+    m = mat(color, 0.3, emit=emit)
+    tube(points, r, m)
+    d = (Vector(points[-1]) - Vector(points[-2])).normalized()
+    cone(Vector(points[-1]) + d * head * 0.5, head * 0.8, 0.0, head * 1.6, m, direction=d)
+
+
+def arc_pts(cx, cz, rad, a0, a1, y=-0.2, n=7):
+    return [(cx + rad * math.cos(math.radians(a0 + (a1 - a0) * i / (n - 1))), y,
+             cz + rad * math.sin(math.radians(a0 + (a1 - a0) * i / (n - 1)))) for i in range(n)]
+
+
+def ghost_mat():
+    return mat("#bfeaff", 0.15, emit=1.4, emit_color="#8fd8ff", trans=0.7)
+
+
+def sparkles(n, seed, color, area=(-1.3, 1.3, 0.2, 2.0), y=(0.3, 1.5), size=(0.012, 0.03), emit=10):
+    rnd = random.Random(seed)
+    G = mat(color, 0.4, emit=emit)
+    for _ in range(n):
+        sphere((rnd.uniform(area[0], area[1]), rnd.uniform(*y), rnd.uniform(area[2], area[3])), rnd.uniform(*size), G)
+
+
+def s_targeted_attack():
+    stage("#ff7a2e", "#b8200f", "#4a0e0a", key="#fff0d8", rim="#ffd23a", hills="#6a1410", rim_power=520)
+    cat(loc=(-0.62, -0.05, 0), rot=(0, 0, math.radians(-12)), fur="#2b2342", eyes="angry", mouth="fangs", arm_r=(0.5, -0.4, 0.95))
+    r = empty((0.62, 0.35, 0), scale=1.0)
+    tube([(0, 0.0, 0.0), (0, 0.0, 0.62)], 0.03, mat("#b9854a", 0.6), r)
+    box((0, 0.0, 0.02), (0.3, 0.12, 0.02), mat("#b9854a", 0.6), r)
+    for rad, c, y in ((0.52, "#ffffff", 0.0), (0.44, "#e11d2e", -0.012), (0.34, "#ffffff", -0.024), (0.24, "#e11d2e", -0.036), (0.12, "#ffffff", -0.048)):
+        bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=rad, depth=0.03, location=(0, y, 1.05), rotation=(math.pi / 2, 0, 0))
+        _fin(bpy.context.object, mat(c, 0.4, emit=0.3), r)
+    sphere((0, -0.06, 1.05), 0.05, mat("#e11d2e", 0.3, emit=3), r)
+    # dardo clavado en el centro
+    G = mat("#fff6c0", 0.3, emit=14, emit_color="#ffe27a")
+    tube([(0, -0.06, 1.05), (-0.45, -0.7, 1.28)], 0.02, mat("#e8e0d0", 0.4), r)
+    for sx in (-1, 1):
+        sphere((-0.42 + 0.0 * sx, -0.66, 1.3 + 0.07 * sx), (0.09, 0.02, 0.05), mat("#ffd23a", 0.4), r)
+    arrow([(0.0, -0.5, 1.5), (0.3, -0.5, 1.68), (0.62, -0.5, 1.6), (0.72, -0.5, 1.5)], "#ffe27a", 0.03, 12, 0.1)
+    sparkles(14, 3, "#ffd23a")
+
+
+def s_reverse():
+    stage("#0e7c8a", "#3de0d0", "#0d5058", key="#f2fffb", rim="#c8fff0", hills="#0a4048", rim_power=480)
+    cat(loc=(-0.7, 0.1, 0), rot=(0, 0, math.radians(55)), scale=0.85, fur="#ff9a2e", belly="#ffd9a0", ear="#ff6f91", eyes="happy", arm_l=(-0.4, -0.3, 0.55), arm_r=(0.4, -0.3, 0.7))
+    cat(loc=(0.7, 0.1, 0), rot=(0, 0, math.radians(-55)), scale=0.85, fur="#2b2342", eyes="normal", mouth="fangs", arm_l=(-0.4, -0.3, 0.7), arm_r=(0.4, -0.3, 0.55))
+    # flechas de sentido contrario bajo cada gato y circular grande arriba
+    arrow([(-1.2, -0.5, 0.12), (-0.5, -0.55, 0.14), (0.1, -0.55, 0.14)], "#ffe14a", 0.045, 8, 0.18)
+    arrow([(0.95, -0.5, 0.42), (0.5, -0.55, 0.44), (-0.1, -0.55, 0.44)], "#ff7fb0", 0.045, 8, 0.18)
+    arrow(arc_pts(0, 1.4, 0.42, 20, 200, -0.3), "#ffffff", 0.05, 10, 0.18)
+    arrow(arc_pts(0, 1.4, 0.42, 200, 380, -0.3), "#ffe14a", 0.05, 10, 0.18)
+    sparkles(16, 11, "#c8fff0")
+
+
+def s_draw_bottom():
+    stage("#3a2410", "#9a6a30", "#2a1a0c", key="#ffe9c8", rim="#ffc070", fill="#c08a50", hills="#20120a", key_power=260)
+    moon((-1.4, 6, 2.35), 0.5)
+    r = empty((0.35, 0.05, 0))
+    # mazo vertical: tapa arriba, laterales de cartas
+    for i in range(18):
+        z = 0.62 + i * 0.045
+        box((0, 0, z), (0.34, 0.24, 0.018), mat("#6a3a9a" if i % 2 else "#fbf5e6", 0.5), r, bevel=0.004)
+    box((0, 0, 0.58), (0.34, 0.24, 0.02), mat("#3a1a5a", 0.5), r, bevel=0.004)
+    # mesa sostiene el mazo
+    box((0, 0, 0.28), (0.4, 0.3, 0.28), mat("#4a2f1a", 0.8), r, bevel=0.02)
+    # carta del fondo asomando por delante
+    box((0, -0.3, 0.42), (0.3, 0.012, 0.19), mat("#ffe14a", 0.35, emit=1.5), r, rot=(math.radians(-14), 0, 0), bevel=0.004)
+    text("?", (0.0, -0.325, 0.42), 0.22, mat("#6b3a10", 0.5), parent=r, rot=(math.radians(76), 0, 0), extrude=0.004)
+    arrow([(0.35, -0.7, 1.05), (0.35, -0.7, 0.62)], "#ffe14a", 0.04, 10, 0.16)
+    c = cat(loc=(-0.75, 0.05, 0), rot=(0, 0, math.radians(15)), fur="#2b2342", eyes="normal", arm_r=(0.45, -0.3, 0.45))
+
+
+def s_crow_eye():
+    stage("#0c0e26", "#3a4388", "#1c1a2a", key="#e8eeff", rim="#9fb2ff", fill="#6a70c0", hills="#101226", key_power=240)
+    moon((-1.5, 6, 2.5), 0.6); stars(30, 21)
+    tombstone((0.0, 0.6, 0), 1.5, 0.0, "#6a6a8a")
+    r = empty((0.0, 0.55, 1.0), scale=1.3)
+    Bk = mat("#17131f", 0.25, coat=0.6)
+    sphere((0, 0, 0.0), (0.34, 0.3, 0.4), Bk, r)
+    sphere((0, -0.12, 0.45), (0.25, 0.23, 0.24), Bk, r)
+    cone((0, -0.5, 0.38), 0.1, 0.0, 0.5, mat("#ff9a2e", 0.35, coat=0.6), r, direction=(0, -1, -0.55))
+    cone((0, -0.42, 0.4), 0.09, 0.0, 0.4, mat("#d97a1a", 0.35, coat=0.6), r, direction=(0, -1, -0.25))
+    for sx in (-1, 1):
+        tube([(0.12 * sx, 0, -0.38), (0.12 * sx, -0.05, -0.62)], 0.03, mat("#ff9a2e", 0.5), r)
+    for sx in (-1, 1):
+        sphere((0.145 * sx, -0.3, 0.52), (0.075, 0.04, 0.085), mat("#ffe14a", 0.2, emit=4), r)
+        sphere((0.145 * sx, -0.335, 0.52), (0.028, 0.015, 0.05), mat(BLACK, 0.2), r)
+        sphere((0.33 * sx, 0.1, 0.0), (0.08, 0.2, 0.36), Bk, r, rot=(0, math.radians(8) * sx, 0))
+    cone((0, 0.2, -0.45), 0.14, 0.0, 0.5, Bk, r, rot=(math.radians(-160), 0, 0), verts=8)
+    # abanico de cartas que el cuervo mira
+    cols = ["#ffe14a", "#7ee06a", "#ff7fb0", "#8ff2ff", "#ffffff"]
+    for i in range(5):
+        a = math.radians(-34 + i * 17)
+        mini_card((0.0 + math.sin(a) * 0.42, -0.25, 0.4 + math.cos(a) * 0.1), (math.radians(-12), 0, -a), cols[i], 2.0, 1.2)
+    sparkles(12, 7, "#9fb2ff", emit=12)
+
+
+def s_apocalypse():
+    stage("#2a0610", "#e0401a", "#240808", key="#ffd8b0", rim="#ff9a2e", fill="#ff6a3a", hills="#160406", key_power=260, rim_power=700)
+    # cometa
+    M = mat("#ffb020", 0.3, emit=28, emit_color="#ff7a10")
+    sphere((0.8, 0.9, 1.75), 0.3, M)
+    sphere((0.8, 0.86, 1.75), 0.2, mat("#fff0a0", 0.3, emit=40, emit_color="#fff0a0"))
+    for i in range(7):
+        t = i / 6
+        sphere((0.8 + 0.7 * t, 0.95, 1.75 + 0.35 * t), 0.26 * (1 - 0.6 * t), mat("#ff6a1a", 0.4, emit=10 * (1 - t) + 2, emit_color="#ff5a10"))
+    sparkles(30, 5, "#ffb020", area=(-1.4, 1.4, 0.3, 2.4), y=(0.2, 1.6), size=(0.012, 0.03), emit=25)
+    c = cat(loc=(-0.45, -0.05, 0), rot=(math.radians(-6), 0, math.radians(-8)), arm_l=(-0.4, -0.45, 1.0), arm_r=(0.4, -0.45, 1.0), tail=False, **dict(ZOMBIE, eye_l="wide", eye_r="wide", mouth="open"))
+    stitches(c)
+    for x, s in ((0.3, 0.6), (0.82, 0.5)):
+        bomb((x, -0.1 + s * -0.1, 0), s)
+
+
+def s_alter_future():
+    stage("#220a52", "#a24ae0", "#2a1060", rim="#ff9fff", fill="#9fd8ff", hills="#1a0838", rim_power=520)
+    stars(45, 14, "#ffd6ff")
+    cat(loc=(0, 0.95, 0), scale=0.85, fur="#3a2a6a", eyes="glow", eye="#8ff2ff", glow_eyes=9, mouth="smile", arm_l=(-0.5, -0.5, 0.95), arm_r=(0.5, -0.5, 0.95), tail=False)
+    for x, z, col, n, ang in ((-0.6, 1.42, "#ffe14a", "1", 10), (0.0, 1.5, "#ffffff", "2", 0), (0.6, 1.42, "#7ee06a", "3", -10)):
+        mini_card((x, -0.2, z), (0, 0, math.radians(ang)), col, 1.7, 2.0)
+        text(n, (x, -0.225, z), 0.2, mat("#3c1273", 0.4), rot=(math.pi / 2, 0, math.radians(ang)), extrude=0.004)
+    arrow(arc_pts(-0.3, 1.12, 0.26, 160, 20, -0.4, 6), "#8ff2ff", 0.03, 10, 0.1)
+    arrow(list(reversed(arc_pts(0.3, 1.1, 0.26, 200, 340, -0.4, 6))), "#ff9fff", 0.03, 10, 0.1)
+    sparkles(18, 2, "#ffd6ff", area=(-1.3, 1.3, 0.4, 2.3), y=(0.2, 1.2))
+
+
+def s_bury():
+    stage("#3a2616", "#c08a52", "#4a2f1a", key="#ffe9c8", rim="#ffc070", fill="#c08a50", hills="#2e1c10", key_power=300)
+    D = mat("#5a3a20", 0.95)
+    sphere((0.25, -0.2, 0.0), (0.85, 0.5, 0.32), D)
+    sphere((-0.3, -0.35, 0.0), (0.3, 0.25, 0.14), D); sphere((0.95, -0.42, 0.0), (0.25, 0.22, 0.13), D)
+    box((0.25, -0.45, 0.31), (0.12, 0.012, 0.17), mat("#ffe14a", 0.35, emit=1.0), rot=(math.radians(-8), 0, math.radians(10)), bevel=0.004)
+    text("?", (0.25, -0.465, 0.32), 0.18, mat("#6b3a10", 0.5), rot=(math.radians(82), 0, math.radians(10)), extrude=0.004)
+    # pala clavada en el montón
+    tube([(0.82, -0.25, 1.35), (0.62, -0.3, 0.45)], 0.026, mat("#b9854a", 0.6))
+    box((0.58, -0.32, 0.3), (0.13, 0.012, 0.17), mat("#cfd4e6", 0.25, 1.0), rot=(math.radians(8), math.radians(-10), math.radians(-14)), bevel=0.012)
+    box((0.84, -0.25, 1.38), (0.07, 0.02, 0.03), mat("#b9854a", 0.6))
+    cat(loc=(-0.85, 0.1, 0), rot=(0, 0, math.radians(14)), fur="#2b2342", eyes="closed", mouth="smile", arm_r=(0.45, -0.4, 0.4))
+    tombstone((1.2, 1.2, 0), 1.2, -0.3, "#6a5a7a")
+    sparkles(10, 6, "#ffc070", area=(-1, 1.2, 0.1, 0.9), y=(-0.5, 0.2), size=(0.01, 0.025), emit=3)
+
+
+def s_soul_swap():
+    stage("#0a4a54", "#38c8b8", "#0c3a42", key="#f0fffb", rim="#c8fff0", fill="#8ff2ff", hills="#08323a", rim_power=500)
+    stars(25, 17, "#c8fff0")
+    cat(loc=(-0.62, 0.05, 0), rot=(0, 0, math.radians(18)), scale=0.95, fur="#ff9a2e", belly="#ffd9a0", ear="#ff6f91", eyes="big", mouth="smile", arm_r=(0.4, -0.4, 0.8))
+    cat(loc=(0.62, 0.05, 0.12), rot=(0, 0, math.radians(-18)), scale=0.95, eye="#ffffff", eyes="normal", fur_mat=ghost_mat(), ear="#bafff2", whiskers="#bafff2", glow_eyes=6, arm_l=(-0.4, -0.4, 0.8), tail=False)
+    arrow(arc_pts(0, 1.0, 0.45, 160, 20, -0.5, 7), "#ffe14a", 0.04, 10, 0.14)
+    arrow(arc_pts(0, 0.9, 0.45, 200, 340, -0.5, 7), "#ff7fb0", 0.04, 10, 0.14)
+    for i in range(2):
+        mini_card((-0.62 + 1.24 * (i % 2), -0.3, 1.4 + 0.1 * (i % 2)), (0, 0, math.radians(14 * (1 - 2 * (i % 2)))), ["#ffe14a", "#7ee06a"][i % 2], 1.5, 1.5)
+    sparkles(14, 8, "#c8fff0")
+
+
+def s_haunt():
+    stage("#14123a", "#4a54b0", "#1c1c46", key="#dfe6ff", rim="#9fb2ff", fill="#7a8ad8", hills="#0e0e2c", key_power=230, rim_power=520)
+    moon((1.3, 6, 2.5), 0.65); stars(25, 19)
+    G = ghost_mat()
+    c = cat(loc=(0.15, 0.7, 0.1), scale=1.2, eye="#ffffff", eyes="normal", mouth="open", fur_mat=G, ear="#d8e4ff", whiskers="#d8e4ff", glow_eyes=8, arm_l=(-0.55, -0.4, 1.0), arm_r=(0.55, -0.4, 1.0), tail=False)
+    # cola de fantasma ondulada
+    cat(loc=(-0.65, -0.35, 0), rot=(0, 0, math.radians(10)), scale=0.75, fur="#ff9a2e", belly="#ffd9a0", ear="#ff6f91", eyes="wide", mouth="open", arm_l=(-0.35, -0.3, 0.85), arm_r=(0.35, -0.3, 0.85))
+    for x, z, a, col in ((0.95, 1.25, 25, "#ffe14a"), (1.0, 0.7, 50, "#7ee06a")):
+        mini_card((x, -0.35, z), (math.radians(10), 0, math.radians(a)), col, 1.4, 1.5)
+    sparkles(18, 9, "#c8d4ff")
+
+
+def s_rotten():
+    stage("#1c2a08", "#7fa81a", "#1c2a0c", key="#f2ffd0", rim="#c8ff5a", fill="#8ab040", hills="#142008", key_power=240, rim_power=620)
+    rotten = dict(fur="#6f8f1a", belly="#a8b83a", ear="#8a4a2a", eye="#e8ff6b", eye_l="x", mouth="open", whiskers=None, fur_rough=0.7)
+    c = cat(loc=(-0.3, 0.05, 0), rot=(0, 0, math.radians(-6)), **rotten)
+    Sp = mat("#4a6012", 0.8)
+    rnd = random.Random(7)
+    for i in range(14):
+        a = math.radians(-20 + i * 15)
+        d = Vector((math.cos(a), rnd.uniform(-0.2, 0.2), math.sin(a)))
+        cone(Vector((0, 0, 0.84)) + d * 0.33, 0.07, 0.0, 0.2, Sp, c, direction=d)
+    stitches(c, mat("#1a2606", 0.6))
+    # bomba podrida
+    r = empty((0.62, -0.3, 0), scale=1.0)
+    sphere((0, 0, 0.3), 0.3, mat("#5a7a10", 0.6, coat=0.4), r)
+    sphere((0.1, -0.2, 0.42), (0.1, 0.06, 0.08), mat("#2a3a08", 0.9), r)
+    cone((0, 0, 0.62), 0.07, 0.07, 0.08, mat("#4a4458", 0.4, 0.8), r)
+    tube([(0, 0, 0.64), (0.05, 0, 0.74), (0.12, -0.02, 0.72), (0.14, -0.03, 0.64)], 0.014, mat("#8a7a4a", 0.8), r)
+    sphere((0.14, -0.03, 0.6), 0.04, mat("#c8ff5a", 0.3, emit=20, emit_color="#a0ff30"), r)
+    tube([(-0.2, -0.22, 0.45), (-0.22, -0.26, 0.2), (-0.2, -0.28, 0.02)], 0.03, mat("#8aff2a", 0.2, emit=2), r)
+    B = mat("#b6ff3a", 0.15, emit=3, trans=0.5)
+    for i in range(14):
+        sphere((rnd.uniform(-1.3, 1.3), rnd.uniform(-0.3, 1.2), rnd.uniform(0.2, 2.0)), rnd.uniform(0.02, 0.07), B)
+    sphere((-1.0, -0.2, 1.5), 0.03, mat("#0a0a0a", 0.4)); sphere((0.9, 0.2, 1.8), 0.03, mat("#0a0a0a", 0.4))
+
+
+
 SCENES = {
     "zombie": s_zombie, "exploding": s_exploding, "attack": s_attack, "attack_dead": s_attack_dead, "nope": s_nope,
     "skip": s_skip, "super_skip": s_super_skip, "see_future": s_see_future, "shuffle": s_shuffle, "feed_dead": s_feed_dead,
     "clone": s_clone, "grave_robber": s_grave_robber, "favor": s_favor, "dig_deeper": s_dig_deeper,
     "clairvoyance": s_clairvoyance, "cat_a": s_cat_a, "cat_b": s_cat_b, "cat_c": s_cat_c, "cat_d": s_cat_d,
+    "targeted_attack": s_targeted_attack, "reverse": s_reverse, "draw_bottom": s_draw_bottom, "crow_eye": s_crow_eye,
+    "apocalypse": s_apocalypse, "alter_future": s_alter_future, "bury": s_bury, "soul_swap": s_soul_swap,
+    "haunt": s_haunt, "rotten": s_rotten,
 }
 # Avatares de los jugadores: busto de gato sobre fondo transparente (godot/assets/avatars/cat_N.png)
 AVATARS = [

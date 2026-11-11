@@ -14,6 +14,12 @@ clientes 2.x. El diseño está en [CONTRATO-PLUS.md](CONTRATO-PLUS.md) y manda s
 - T04 parte la pantalla **de Plus**, no la clásica. Todas las tareas de MESA trabajan sobre la de Plus.
 - T05 (nueva, Sonnet): selector CLÁSICO / PLUS en el menú, `plus` de extremo a extremo, pantalla Plus
   como copia, y grabación de la «guardia del clásico». Va antes de T04.
+- T04 queda descartada como refactor previo: las tareas de MESA ya van en serie, así que no evita
+  conflictos, y partir 1 700 líneas con estado compartido es un riesgo sin compensación. En su lugar,
+  cada tarea pone lo nuevo en componentes propios dentro de `godot/scripts/plus/`.
+- T10 (versión de protocolo) se hizo dentro de T05 porque toca los mismos archivos de red.
+- Las cartas nuevas no se añaden a `web/www/cards.js` (cambiaría la guía de la versión web):
+  el generador de texturas leerá las de `godot/data/cards.json`.
 - T03 (README) se mueve al cierre para describir ya los dos modos.
 - Las mejoras de IA, las opciones de sala y las reacciones solo existen en Plus.
 
