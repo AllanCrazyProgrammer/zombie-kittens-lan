@@ -19,7 +19,7 @@ var profile := {"name": "", "avatar": 0}
 var plus := false               # modo elegido en la pantalla de inicio (user://settings.cfg, [game] plus)
 var _plus_ephemeral := false    # el modo viene de una prueba automática: no se guarda en el archivo
 var _title: Label
-var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official"}
+var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official", "packs": ["crypt"]}
 var _box: VBoxContainer
 var _rooms_box: VBoxContainer
 var _rooms_sig := ""
@@ -300,6 +300,7 @@ func _on_solo_play() -> void:
 	o["name"] = profile.name
 	o["avatar"] = profile.avatar
 	o["plus"] = plus
+	o["packs"] = (_opts.packs as Array).duplicate() if plus else []
 	save_profile()
 	solo_requested.emit(o)
 
@@ -345,6 +346,10 @@ func _build_solo() -> void:
 	var full: bool = _opts.deck_mode == "full"
 	_add("Mazo: completo" if full else "Mazo: oficial", "normal", _choose.bind("deck_mode", "official" if full else "full"), 38)
 	_note(_deck_info(int(_opts.rivals) + 1, full), 28)
+	if plus:
+		var crypt: bool = "crypt" in _opts.packs
+		_add("La Cripta: sí" if crypt else "La Cripta: no", "normal", _choose.bind("packs", [] if crypt else ["crypt"]), 38)
+		_note("Añade 9 cartas nuevas: Ataque Dirigido, Marcha Atrás, Robar del Fondo, Ojo de Cuervo y más." if crypt else "Solo las cartas originales, con las mejoras de Plus.", 28)
 	_add("¡JUGAR!", "primary", _on_solo_play, 68)
 	_add("Volver", "ghost", _go.bind("home"), 38)
 
@@ -460,7 +465,12 @@ func _build_lobby() -> void:
 		var ab := _add("Añadir IA", "normal", func() -> void: session.send({"t": "addBot"}), 38, tools)
 		ab.disabled = n >= 5
 		_add("Mazo: completo" if full else "Mazo: oficial", "normal", func() -> void: session.send({"t": "settings", "deck_mode": "official" if full else "full"}), 38, tools)
+		if session.is_plus():
+			var crypt_on: bool = "crypt" in lobby.settings.get("packs", [])
+			_add("La Cripta: sí" if crypt_on else "La Cripta: no", "normal", func() -> void: session.send({"t": "settings", "packs": [] if crypt_on else ["crypt"]}), 38, tools)
 	_note(_deck_info(maxi(2, n), full), 28)
+	if session.is_plus() and not is_host:
+		_note("La Cripta: activada" if "crypt" in lobby.settings.get("packs", []) else "La Cripta: desactivada", 28)
 	if status != "":
 		_note(status, 32, UIKit.C.gold)
 	if is_host:
