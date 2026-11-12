@@ -38,6 +38,7 @@ func _initialize() -> void:
 	_test_difficulty()
 	_test_plus_bots()
 	_test_rotten()
+	await _test_sfx_plus()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
 	quit(1 if _fails > 0 else 0)
 
@@ -3827,3 +3828,57 @@ func _rot_duration() -> void:
 			_rot_game(n, 63000 + s * 17 + n, "official", mix, {}, false, off)
 			_rot_game(n, 63000 + s * 17 + n, "official", mix, {}, true, on)
 		print("    %d jugadores - acciones/partida: sin rotten %.0f, con rotten %.0f   turnos/partida: sin %.0f, con %.0f" % [n, float(off.actions) / off.games, float(on.actions) / on.games, float(off.turns) / off.games, float(on.turns) / on.games])
+
+
+## T44: sonidos nuevos y música por capas (solo recursos y API; en headless no se oye nada).
+func _test_sfx_plus() -> void:
+	print("\nSonido PLUS")
+	var sfx := root.get_node_or_null("Sfx")
+	if sfx != null and sfx._music == null:
+		await process_frame   # el _ready de los autoloads aún no ha corrido dentro de _initialize
+	var names: Array = []
+	var layers: Array = ["music_base", "music_drums", "music_tension"]
+	if sfx != null:
+		names = sfx.NAMES + sfx.NAMES_PLUS
+		layers = sfx.LAYER_FILES
+	else:
+		names = ["tap", "card", "draw", "shuffle", "turn", "nope", "yup", "fuse", "explosion", "zombie", "attack", "alarm", "steal", "revive", "win", "lose",
+				"targeted", "reverse", "bottom", "crow", "apocalypse", "alter", "bury", "swap", "haunt", "rotten", "emote", "tick", "tomb", "aim", "sudden"]
+	var all_ok := true
+	for n: String in names:
+		var st := load("res://assets/audio/%s.wav" % n) as AudioStreamWAV
+		if not _check(st != null and st.get_length() > 0.0, "sonido '%s' carga" % n):
+			all_ok = false
+		if sfx != null and not _check(sfx._streams.get(n) != null, "Sfx tiene cargado '%s'" % n):
+			all_ok = false
+	if all_ok:
+		_ok("los %d sonidos (antiguos y nuevos) cargan" % names.size())
+	var ref := load("res://assets/audio/music.wav") as AudioStreamWAV
+	var rate := float(ref.mix_rate)
+	for n: String in layers:
+		var st := load("res://assets/audio/%s.wav" % n) as AudioStreamWAV
+		if _check(st != null, "capa %s carga"  % n):
+			_check(absf(st.get_length() - ref.get_length()) * rate <= 1.0, "capa %s dura lo mismo que music.wav (%.4f s vs %.4f s)" % [n, st.get_length(), ref.get_length()])
+	_ok("las 3 capas miden lo mismo que music.wav")
+	if sfx == null:
+		print("    (autoload Sfx no disponible: API sin probar)")
+		return
+	var s0: Array = [sfx.sfx_on, sfx.music_on, sfx.sfx_volume, sfx.music_volume]
+	sfx.set_layers(true)
+	_check(sfx.layers_on, "set_layers(true) activa las capas")
+	sfx.set_intensity(0.7, 1.0)
+	sfx.set_intensity(-1.0, 3.0)
+	_check(sfx._drums == 0.0 and sfx._tension == 1.0, "set_intensity limita a 0-1")
+	sfx.set_music_volume(0.5)
+	sfx.set_sfx_volume(0.5)
+	sfx.play("crow")
+	sfx.set_music(false)
+	sfx.set_music(true)
+	sfx.set_layers(false)
+	_check(not sfx.layers_on, "set_layers(false) vuelve a music.wav")
+	sfx.set_music_volume(s0[3])
+	sfx.set_sfx_volume(s0[2])
+	sfx.set_music(s0[1])
+	sfx.set_sfx(s0[0])
+	_check(sfx._music.volume_db == -15.0 or s0[3] < 1.0, "volumen por defecto = -15 dB como antes")
+	_ok("set_layers / set_intensity / volúmenes sin errores")
