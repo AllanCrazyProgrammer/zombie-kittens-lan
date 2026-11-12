@@ -12,6 +12,17 @@ const EASY_PLAYS := ["attack", "skip", "super_skip", "see_future", "shuffle", "d
 ## Cartas de La Cripta que el bot fácil añade a su lista (solo Plus)
 const EASY_PLAYS_PLUS := ["targeted_attack", "reverse", "draw_bottom", "crow_eye", "apocalypse", "alter_future", "bury", "soul_swap"]
 
+## Rasgos de personalidad (IA-03, solo Plus; el bot fácil los ignora)
+const TRAIT_AGGRESSIVE := "aggressive"
+const TRAIT_CAUTIOUS := "cautious"
+const TRAIT_VENGEFUL := "vengeful"
+## Nombres visibles para la interfaz
+const TRAIT_LABELS := {"aggressive": "Agresivo", "cautious": "Prudente", "vengeful": "Vengativo"}
+## Rasgo fijo de cada bot según su nombre
+const TRAIT_BY_NAME := {"Bigotes": "aggressive", "Garritas": "cautious", "Pelusa": "vengeful", "Don Miau": "aggressive", "Ronroneo": "cautious", "Michi": "vengeful"}
+## Cartas que perjudican a un jugador concreto (el objetivo es el perjudicado)
+const HARM_EFFS := ["favor", "combo2", "combo3", "targeted_attack", "haunt", "soul_swap"]
+
 var game: ZKGame
 var levels: Dictionary          # id del jugador -> "easy" | "normal" | "hard"
 var rnd: Callable
@@ -24,6 +35,9 @@ var _peek := {}                 # id del bot -> {id del rival: {cards: [tipos qu
 var _rival_peek := {}           # un rival acaba de mirar el futuro: {by, draws}
 var _hid_bottom := {}           # id -> valor de `shuf` en que escondió un explosivo al fondo del mazo
 var _bury_card := {}            # id -> tipo de la carta que ve en su decisión de Entierro
+var traits := {}                # id del bot -> rasgo ("aggressive" | "cautious" | "vengeful" | ""), solo Plus
+var _grudge := {}               # id del bot vengativo -> id del último jugador que le perjudicó
+var _grudge_seen := {}          # claves de jugadas de la pila ya anotadas
 
 
 func _init(p_game: ZKGame, p_levels: Dictionary, p_rnd: Callable, p_plus: bool = false) -> void:
@@ -31,6 +45,42 @@ func _init(p_game: ZKGame, p_levels: Dictionary, p_rnd: Callable, p_plus: bool =
 	levels = p_levels
 	rnd = p_rnd
 	plus = p_plus
+
+
+## Rasgo fijo para el nombre de un bot ("" si no tiene).
+static func trait_for_name(bot_name: String) -> String:
+	return TRAIT_BY_NAME.get(bot_name, "")
+
+
+## Asigna los rasgos (id -> rasgo). Solo tienen efecto con plus = true y en normal o difícil.
+func set_traits(t: Dictionary) -> void:
+	traits = t.duplicate()
+
+
+## Rasgo efectivo del bot: "" si no es Plus, si es fácil o si no tiene.
+func _tr(id: String) -> String:
+	if not plus or levels.get(id, "normal") == "easy":
+		return ""
+	return traits.get(id, "")
+
+
+## Factor de los umbrales de riesgo: agresivo +20 %, prudente -20 %.
+func _risk_f(id: String) -> float:
+	var t := _tr(id)
+	return 1.2 if t == TRAIT_AGGRESSIVE else (0.8 if t == TRAIT_CAUTIOUS else 1.0)
+
+
+## Vengativo: si el último que le perjudicó es un objetivo válido (está en `cands`), va contra él; si no, `default`.
+func _vt(id: String, cands: Array, default: String) -> String:
+	if _tr(id) != TRAIT_VENGEFUL:
+		return default
+	var gr: String = _grudge.get(id, "")
+	if gr == "":
+		return default
+	for o: ZKGame.Player in cands:
+		if o.id == gr:
+			return gr
+	return default
 
 
 static func val(t: String) -> int:
@@ -80,6 +130,7 @@ func learn() -> void:
 			_learn_event_plus(e)
 	if plus:
 		_scan_peeks()
+		_scan_grudges()
 	_seq = game.seq
 
 
@@ -93,6 +144,11 @@ func _learn_prompt_plus() -> void:
 ## Plus: eventos públicos y privados dirigidos al bot que cambian lo que sabe.
 func _learn_event_plus(e: Dictionary) -> void:
 	var to: String = e.get("to", "")
+	# Vengativo: eventos públicos en que otro jugador me quita una carta, me deja turnos o me espanta
+	if e.type in ["steal", "attack", "haunt", "swap"] and e.get("player", "") != "":
+		var victim: String = e.get("target", "")
+		if _tr(victim) == TRAIT_VENGEFUL and e.player != victim:
+			_grudge[victim] = e.player
 	match e.type:
 		"apocalypse":
 			# Público: los N explosivos están arriba del mazo
@@ -141,6 +197,25 @@ func _learn_event_plus(e: Dictionary) -> void:
 			for id: String in _peek:
 				_peek[id].erase(e.player)
 				_peek[id].erase(e.target)
+
+
+## Plus vengativo: jugadas públicas de la pila dirigidas a mí (Favor, pareja, trío, Ataque Dirigido, Espanto, Trueque)
+## y quién anuló con Nop una jugada mía.
+func _scan_grudges() -> void:
+	for id: String in traits:
+		if _tr(id) != TRAIT_VENGEFUL:
+			continue
+		for s: Dictionary in game.stack:
+			if s.target == id and s.by != id and HARM_EFFS.has(s.eff):
+				var k := "%d:%s" % [s.id, id]
+				if not _grudge_seen.has(k):
+					_grudge_seen[k] = 1
+					_grudge[id] = s.by
+			if s.by == id and s.nopes % 2 == 1 and s.last != id:
+				var k2 := "%d:%d:%s" % [s.id, s.nopes, id]
+				if not _grudge_seen.has(k2):
+					_grudge_seen[k2] = 1
+					_grudge[id] = s.last
 
 
 ## Plus: quita de lo que se sabe de una mano las cartas que su dueño ha descartado desde la última vez.
@@ -277,7 +352,13 @@ func decide(id: String) -> Dictionary:
 		if plus and not hurts:
 			hurts = _hurts_plus(id, s, next_id)
 		var want: bool = (live and hurts) or (not live and s.by == id)
-		return _play(nope) if want and rnd.call() < (0.15 if easy else (0.95 if hard else 0.75)) else {"a": "pass"}
+		var tn := _tr(id)
+		if tn == TRAIT_CAUTIOUS:
+			want = live and hurts      # prudente: el Nop se guarda para lo que le perjudica directamente
+		var pn := 0.15 if easy else (0.95 if hard else 0.75)
+		if tn == TRAIT_AGGRESSIVE:
+			pn = minf(1.0, pn + 0.1)
+		return _play(nope) if want and rnd.call() < pn else {"a": "pass"}
 	if plus and pr == null:
 		var fr := _free_play_plus(id, me, level)
 		if not fr.is_empty():
@@ -529,6 +610,8 @@ func _hurts_plus(id: String, s: Dictionary, next_id: String) -> bool:
 				return false
 			if t.id == id:
 				return by.hand.size() + 3 <= t.hand.size()    # me quitarían una mano mucho mejor que la suya
+			if _tr(id) == TRAIT_CAUTIOUS:
+				return false    # prudente: solo lo que le perjudica directamente
 			return t.hand.size() >= by.hand.size() + 3          # se llevaría una mano mucho mejor
 	return false
 
@@ -540,7 +623,7 @@ func _attack_target(id: String, hard: bool, top: String) -> String:
 	if rivals.is_empty():
 		return ""
 	if not hard:
-		return _pick(rivals).id
+		return _vt(id, rivals, _pick(rivals).id)
 	if top == "exploding":
 		var pool: Array = rivals.filter(func(o: ZKGame.Player) -> bool: return not _peek_cards(id, o.id).has("zombie"))
 		if pool.is_empty():
@@ -549,12 +632,18 @@ func _attack_target(id: String, hard: bool, top: String) -> String:
 		for o: ZKGame.Player in pool:
 			if o.hand.size() < best.hand.size():
 				best = o
-		return best.id
-	return _richest(rivals).id
+		return _vt(id, rivals, best.id)
+	return _vt(id, rivals, _richest(rivals).id)
 
 
 ## Objetivo de un trío: quien se sabe que tiene un Zombi u otra carta valiosa; si no, el que más cartas tiene.
 func _trio_target(id: String, others: Array) -> ZKGame.Player:
+	var best: ZKGame.Player = _trio_target_base(id, others)
+	var v := _vt(id, others, best.id)
+	return best if v == best.id else game.P(v)
+
+
+func _trio_target_base(id: String, others: Array) -> ZKGame.Player:
 	var best: ZKGame.Player = others[0]
 	var best_score := -1
 	for o: ZKGame.Player in others:
@@ -643,7 +732,7 @@ func _free_play_plus(id: String, me: ZKGame.Player, level: String) -> Dictionary
 		if h != null:
 			var cands: Array = _targets(id, "living")
 			if not cands.is_empty() and (level != "easy" or rnd.call() < 0.2):
-				var r := _try(id, h, _richest(cands).id)
+				var r := _try(id, h, _vt(id, cands, _richest(cands).id))
 				if not r.is_empty():
 					return r
 		var f := me.find_type("feed_dead")
@@ -723,7 +812,8 @@ func _dodge_plus(id: String, me: ZKGame.Player, hard: bool, top: String, danger:
 		r = _try(id, me.find_type("bury"))
 		if not r.is_empty():
 			return r
-	if g.draw.size() > 1 and not _bottom_hidden(id) and (top == "exploding" or (hard and danger >= 0.34)):
+	var tcau := _tr(id) == TRAIT_CAUTIOUS
+	if g.draw.size() > 1 and not _bottom_hidden(id) and (top == "exploding" or (hard and danger >= 0.34 * _risk_f(id)) or (tcau and danger >= 0.2)):
 		r = _try(id, me.find_type("draw_bottom"))
 		if not r.is_empty():
 			return r
@@ -762,11 +852,12 @@ func _soul_swap_plus(id: String, me: ZKGame.Player, hard: bool, zs: int) -> Dict
 		return {}
 	var best := _richest(cands)
 	var mine := me.hand.size() - 1
+	var aggr := _tr(id) == TRAIT_AGGRESSIVE
 	if hard:
-		if best.hand.size() > mine and zs == 0:
-			return _try(id, sw, best.id)
-	elif best.hand.size() >= mine + 3 and rnd.call() < 0.5:
-		return _try(id, sw, best.id)
+		if best.hand.size() > mine and (zs == 0 or (aggr and best.hand.size() >= mine + 2)):
+			return _try(id, sw, _vt(id, cands, best.id))
+	elif best.hand.size() >= mine + (1 if aggr else 3) and rnd.call() < (0.8 if aggr else 0.5):
+		return _try(id, sw, _vt(id, cands, best.id))
 	return {}
 
 
@@ -820,33 +911,44 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 	var danger := _danger_plus(id, top)
 	var zs := _count_of(me, "zombie")
 	var r: Dictionary
+	var tr := _tr(id)
+	var rf := _risk_f(id)                              # umbrales de riesgo: agresivo +20 %, prudente -20 %
+	var inf := rf * (0.6 if tr == TRAIT_CAUTIOUS else 1.0)   # el prudente se informa aún antes
+	var aggr := tr == TRAIT_AGGRESSIVE
 
 	if not hard:
 		# Informarse
-		if top == "" and danger > 0.18:
+		if top == "" and danger > 0.18 * inf:
 			for t: String in ["see_future", "alter_future"]:
 				r = _try(id, me.find_type(t))
 				if not r.is_empty():
 					return r
 		# Esquivar
-		if danger > (0.5 if zs > 0 else 0.28):
+		if danger > (0.5 if zs > 0 else 0.28) * rf:
 			r = _dodge_plus(id, me, false, top, danger, dead_n)
 			if not r.is_empty():
 				return r
 		if others.size() > 0:
-			# IA-02d: tríos de cartas baratas pidiendo Gatito Zombi
-			var trio := _best_group(me, 3, 4)
-			if trio.size() >= 3 and rnd.call() < 0.5:
-				r = _try_group(id, trio, 3, _pick(others).id, "zombie")
-				if not r.is_empty():
-					return r
-			if rnd.call() < 0.3:
-				var pair := _best_group(me, 2, 4)
-				if pair.size() >= 2:
-					r = _try_group(id, pair, 2, _pick(others).id)
+			# IA-03: el agresivo ataca de forma dirigida sin esperar a tener riesgo
+			if aggr and rnd.call() < 0.3:
+				var tgt := _attack_target(id, false, top)
+				if tgt != "":
+					r = _try(id, me.find_type("targeted_attack"), tgt)
 					if not r.is_empty():
 						return r
-				r = _try(id, me.find_type("favor"), _pick(others).id)
+			# IA-02d: tríos de cartas baratas pidiendo Gatito Zombi
+			var trio := _best_group(me, 3, 4)
+			if trio.size() >= 3 and rnd.call() < (0.8 if aggr else 0.5):
+				r = _try_group(id, trio, 3, _vt(id, others, _pick(others).id), "zombie")
+				if not r.is_empty():
+					return r
+			if rnd.call() < (0.55 if aggr else 0.3):
+				var pair := _best_group(me, 2, 4)
+				if pair.size() >= 2:
+					r = _try_group(id, pair, 2, _vt(id, others, _pick(others).id))
+					if not r.is_empty():
+						return r
+				r = _try(id, me.find_type("favor"), _vt(id, others, _pick(others).id))
 				if not r.is_empty():
 					return r
 		if dead_n > 0 and me.find_type("grave_robber") != null and danger > 0.3 and rnd.call() < 0.5:
@@ -863,7 +965,7 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 		if not r.is_empty():
 			return r
 		if others.size() > 0 and me.find_type("crow_eye") != null and rnd.call() < 0.1:
-			return _try(id, me.find_type("crow_eye"), _pick(others).id)
+			return _try(id, me.find_type("crow_eye"), _vt(id, others, _pick(others).id))
 		return {"a": "draw"}
 
 	# ----- DIFÍCIL -----
@@ -872,8 +974,8 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 	if not r.is_empty():
 		return r
 	if others.size() > 0:
-		var richest := _richest(others)
-		var grp := _best_group(me, 2, 3)
+		var richest := game.P(_vt(id, others, _richest(others).id))
+		var grp := _best_group(me, 2, 4 if aggr else 3)
 		if grp.size() >= 3 and zs < 2:
 			var tt := _trio_target(id, others)
 			var ce := me.find_type("crow_eye")
@@ -891,18 +993,25 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 		r = _try(id, me.find_type("favor"), richest.id)
 		if not r.is_empty():
 			return r
+	# IA-03: el agresivo ataca de forma dirigida sin esperar a tener riesgo
+	if aggr and others.size() > 0 and rnd.call() < 0.3:
+		var tgt := _attack_target(id, true, top)
+		if tgt != "":
+			r = _try(id, me.find_type("targeted_attack"), tgt)
+			if not r.is_empty():
+				return r
 	# 2) Apocalipsis, si hay reserva
 	r = _apocalypse_plus(id, me, true, zs)
 	if not r.is_empty():
 		return r
 	# 3) Informarse antes de arriesgar
-	if top == "" and danger >= 0.14:
+	if top == "" and danger >= 0.14 * inf:
 		for t: String in ["alter_future", "see_future"]:
 			r = _try(id, me.find_type(t))
 			if not r.is_empty():
 				return r
 	# 4) Esquivar: con Zombi en mano tolera más riesgo
-	if danger >= (0.34 if zs > 0 else 0.2):
+	if danger >= (0.34 if zs > 0 else 0.2) * rf:
 		r = _dodge_plus(id, me, true, top, danger, dead_n)
 		if not r.is_empty():
 			return r
@@ -911,7 +1020,7 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 	if not r.is_empty():
 		return r
 	if others.size() > 0 and me.find_type("crow_eye") != null and rnd.call() < 0.3:
-		var rc := _richest(others)
+		var rc := game.P(_vt(id, others, _richest(others).id))
 		if _peek_cards(id, rc.id).is_empty():
 			r = _try(id, me.find_type("crow_eye"), rc.id)
 			if not r.is_empty():

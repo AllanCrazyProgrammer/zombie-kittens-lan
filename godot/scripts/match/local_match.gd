@@ -10,6 +10,7 @@ const MIX := ["easy", "normal", "hard", "normal"]
 var game: ZKGame
 var bots: ZKBots
 var levels := {}
+var traits := {}        # id del bot -> rasgo de personalidad (solo Plus, IA-03)
 var _due := {}          # id del bot -> instante (ms) en que hará su jugada
 var _sig := ""
 var _rng: ZKRng
@@ -40,6 +41,14 @@ func start(opts: Dictionary) -> void:
 		game_opts["names"] = CardDB.names_for(opts.get("packs", []))
 	game = ZKGame.new(game_opts)
 	bots = ZKBots.new(game, levels, _rng.next, _plus)
+	traits = {}
+	if _plus:
+		for p: Dictionary in players:
+			if p.bot:
+				var tr := ZKBots.trait_for_name(p.name)
+				if tr != "":
+					traits[p.id] = tr
+		bots.set_traits(traits)
 	_due = {}
 	_sig = ""
 
@@ -61,6 +70,11 @@ func is_plus() -> bool:
 
 func scores() -> Dictionary:
 	return {}
+
+
+## Rasgo de personalidad del bot ("" en clásico o si no tiene). Ver ZKBots.TRAIT_LABELS.
+func trait_of(id: String) -> String:
+	return traits.get(id, "")
 
 
 func level_of(id: String) -> String:

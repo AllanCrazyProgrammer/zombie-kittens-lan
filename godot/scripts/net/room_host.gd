@@ -269,8 +269,14 @@ func _lobby_msg() -> Dictionary:
 		"players": players.map(func(p: Dictionary) -> Dictionary: return {"id": p.id, "name": p.name, "avatar": p.avatar, "bot": p.bot, "host": p.peer == LOCAL, "level": p.level}),
 	}
 	if settings.plus:
+		for i in players.size():
+			m.players[i]["trait"] = _trait_of(players[i])   # IA-03: solo en salas Plus
 		m["scores"] = scores.duplicate()   # M-06: solo en salas Plus
 	return m
+
+
+func _trait_of(p: Dictionary) -> String:
+	return ZKBots.trait_for_name(p.name) if p.bot else ""
 
 
 func _send_lobby() -> void:
@@ -296,6 +302,12 @@ func _start() -> void:
 		game_opts["names"] = CardDB.names_for(settings.packs)
 	game = ZKGame.new(game_opts)
 	bots = ZKBots.new(game, levels, _rng.next, bool(settings.plus))
+	if settings.plus:
+		var traits := {}
+		for p in players:
+			if p.bot and _trait_of(p) != "":
+				traits[p.id] = _trait_of(p)
+		bots.set_traits(traits)
 	for p in players:
 		if not p.bot and p.peer == 0:
 			game.set_connected(p.id, false, now())

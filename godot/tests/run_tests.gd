@@ -2234,13 +2234,17 @@ func _lv(g: Game, level: String) -> Dictionary:
 
 ## Partida solo con bots (sin «jugador de pruebas»). `cheat`: en algunas decisiones comprueba que la jugada no cambia
 ## al permutar lo que el bot no puede ver (manos ajenas y mazo). stats acumula jugadas, turnos y plazos vencidos.
-func _bot_game(n: int, seed_value: int, mode: String, levels: Array, plus: bool, packs: Array, stats: Dictionary, cheat: bool = false) -> String:
+func _bot_game(n: int, seed_value: int, mode: String, levels: Array, plus: bool, packs: Array, stats: Dictionary, cheat: bool = false, traits: Dictionary = {}) -> String:
 	var rng := Rng.new(seed_value)
 	var g := _mk(n, 0, mode, rng, plus, packs)
 	var lv := {}
 	for i in n:
 		lv["b%d" % i] = levels[i % levels.size()]
 	var bots := Bots.new(g, lv, rng.next, plus)
+	bots.set_traits(traits)
+	for id: String in traits:
+		if traits[id] != "":
+			stats["g:" + traits[id]] = int(stats.get("g:" + traits[id], 0)) + 1
 	var total := _count(g)
 	var now := 0
 	var steps := 0
@@ -2278,6 +2282,16 @@ func _bot_game(n: int, seed_value: int, mode: String, levels: Array, plus: bool,
 			var pl := {}
 			if a.a == "play":
 				pl = g.plan(id, a.cards, a.get("target"), a.get("named"))
+			var tt: String = traits.get(id, "")
+			if tt != "" and lv[id] != "easy":
+				if a.a == "draw":
+					stats["r:" + tt] = float(stats.get("r:" + tt, 0.0)) + bots._danger_plus(id, bots.known(id, 0))
+					stats["d:" + tt] = int(stats.get("d:" + tt, 0)) + 1
+				elif a.a == "play" and pl.has("eff"):
+					if ["targeted_attack", "favor", "combo2", "combo3", "haunt", "soul_swap"].has(pl.eff):
+						stats["t:" + tt] = int(stats.get("t:" + tt, 0)) + 1
+					if ["see_future", "alter_future", "bury", "draw_bottom"].has(pl.eff):
+						stats["i:" + tt] = int(stats.get("i:" + tt, 0)) + 1
 			var err := g.act(id, a, now)
 			bots.note(id, a, err)
 			bots.learn()
@@ -2374,11 +2388,12 @@ func _plus_bot_sim() -> void:
 		_ok("sin trampas: %d decisiones idénticas al permutar manos ajenas y mazo" % int(cs.get("cheat_checks", 0)))
 
 
-func _duel_plus(a: String, b: String, n: int) -> int:
+func _duel_plus(a: String, b: String, n: int, with_traits: bool = false) -> int:
 	var w := 0
 	for i in n:
 		var levels := [a, b] if i % 2 == 1 else [b, a]
-		if _bot_game(2, 9000 + i, "official", levels, true, ["crypt"], {}) == ("b0" if i % 2 == 1 else "b1"):
+		var tr := {"b0": TRAITS[i % 4], "b1": TRAITS[(i / 4 + 1) % 4]} if with_traits else {}
+		if _bot_game(2, 9000 + i, "official", levels, true, ["crypt"], {}, false, tr) == ("b0" if i % 2 == 1 else "b1"):
 			w += 1
 	return int(round(100.0 * w / n))
 
@@ -2410,6 +2425,7 @@ func _test_plus_bots() -> void:
 	_bot_cases()
 	_plus_difficulty()
 	_plus_duration()
+	_test_bot_traits()
 	if _fails == f0:
 		_ok("IA de La Cripta: simulaciones, casos dirigidos, dificultad y duración")
 
@@ -2881,3 +2897,251 @@ func _balance(args: PackedStringArray) -> void:
 			print("%s (%s): difícil vs normal %d%%   normal vs fácil %d%%   difícil vs fácil %d%%" % [vid, v.d, _bal_duel(v, "hard", "normal", 400), _bal_duel(v, "normal", "easy", 400), _bal_duel(v, "hard", "easy", 400)])
 	print("\nLeyenda: " + "; ".join(PackedStringArray(BAL_VARIANTS.keys().map(func(k: String) -> String: return "%s = %s" % [k, BAL_VARIANTS[k].d]))))
 	print("(%d ms)" % (Time.get_ticks_msec() - t0))
+
+
+
+# ================================================================ Personalidad de los bots (T55, IA-03)
+
+const TRAITS := ["aggressive", "cautious", "vengeful", ""]
+
+
+## Rasgos rotados por partida para los jugadores b0..b(n-1).
+func _trait_map(n: int, i: int) -> Dictionary:
+	var d := {}
+	for k in n:
+		d["b%d" % k] = TRAITS[(i + k) % 4]
+	return d
+
+
+## Con plus = false los rasgos no cambian ni las decisiones ni los números aleatorios consumidos.
+func _traits_classic_same() -> void:
+	var same := true
+	var decisions := 0
+	for i in 12:
+		var n := 2 + i % 4
+		var lv := {}
+		for k in n:
+			lv["b%d" % k] = ["easy", "normal", "hard"][(i + k) % 3]
+		var r1 := Rng.new(500 + i)
+		var r2 := Rng.new(500 + i)
+		var g1 := _mk(n, 0, "official", r1, false)
+		var g2 := _mk(n, 0, "official", r2, false)
+		var b1 := Bots.new(g1, lv, r1.next, false)
+		var b2 := Bots.new(g2, lv, r2.next, false)
+		b1.set_traits(_trait_map(n, i))
+		var now := 0
+		var steps := 0
+		while g1.over == null and steps < 5000 and same:
+			steps += 1
+			g1.tick(now)
+			g2.tick(now)
+			b1.learn()
+			b2.learn()
+			var acted := false
+			for k in n:
+				var id := "b%d" % k
+				var a1 := b1.decide(id)
+				var a2 := b2.decide(id)
+				decisions += 1
+				if JSON.stringify(a1) != JSON.stringify(a2):
+					same = false
+					break
+				if a1.is_empty():
+					continue
+				var e1 := g1.act(id, a1, now)
+				g2.act(id, a2, now)
+				b1.note(id, a1, e1)
+				b2.note(id, a2, e1)
+				acted = true
+				break
+			if acted:
+				now += 400
+			else:
+				var d := g1.next_deadline()
+				if d < 0:
+					break
+				now = maxi(now + 1, d)
+		same = same and r1.next() == r2.next()
+	_check(same, "plus = false: con rasgos las decisiones y el generador son idénticos")
+	if same:
+		_ok("con plus = false los rasgos no cambian nada (%d decisiones comparadas)" % decisions)
+
+
+func _vengeful_cases() -> void:
+	var f0 := _fails
+	# Bot vengativo b0 con un par barato; b2 es el más rico, b1 el primero de la lista y b3 quien le perjudica
+	for level: String in ["hard", "normal"]:
+		var def_target := "b2" if level == "hard" else "b1"
+		for variant: String in ["favor", "combo2", "attack", "nope"]:
+			var g := _cg(4)
+			var lv := _lv(g, level)
+			var b := _bots(g, lv)
+			var ctrl := _bots(g, lv)
+			b.set_traits({"b0": "vengeful"})
+			var safe: Array = []
+			for i in 30:
+				safe.append("cat_%s" % "abcd"[i % 4])
+			_setdraw(g, safe)
+			for t: String in ["cat_a", "cat_a", "cat_a", "cat_a", "cat_b"]:
+				_give(g, 0, t)
+			for t: String in ["cat_c", "cat_d", "cat_b", "cat_c", "cat_d", "cat_b"]:
+				_give(g, 2, t)
+			_give(g, 1, "cat_c")
+			_give(g, 1, "cat_d")
+			for t: String in ["cat_c", "cat_d", "cat_b"]:
+				_give(g, 3, t)
+			b.learn()
+			var want := "b3"
+			match variant:
+				"favor":
+					g.cur = 3
+					var fv := _give(g, 3, "favor")
+					_play(g, "b3", fv, "b0")
+					b.learn()
+					_resolve(g)
+					b.learn()
+					var gv: Dictionary = b.decide("b0")
+					_check(gv.get("a") == "give", "vengativo (%s): Favor de un rival: le toca dar" % level)
+					g.act("b0", gv, _clk)
+					b.learn()
+				"combo2":
+					g.cur = 3
+					var h3: Array = []
+					h3.append(_give(g, 3, "cat_e"))
+					h3.append(_give(g, 3, "cat_e"))
+					_play(g, "b3", h3, "b0")
+					b.learn()
+					_resolve(g)
+					b.learn()
+				"attack":
+					g.cur = 3
+					var at := _give(g, 3, "attack")
+					_play(g, "b3", at)
+					_resolve(g)
+					b.learn()
+				"nope":
+					want = "b2"
+					var f2 := _give(g, 0, "favor")
+					_give(g, 2, "nope")
+					_play(g, "b0", f2, "b1")
+					g.act("b2", {"a": "play", "cards": [g.P("b2").find_type("nope").id]}, _clk)
+					b.learn()
+					_resolve(g)
+					b.learn()
+					g.P("b0").hand.erase(f2)
+			g.cur = 0
+			g.turns_left = 1
+			g.attacked = false
+			var a: Dictionary = b.decide("b0")
+			var tg := str(a.get("target", ""))
+			_check(a.get("a") == "play" and tg == want, "vengativo (%s, %s): su jugada con objetivo va contra %s (fue %s)" % [level, variant, want, JSON.stringify(a)])
+			var c: Dictionary = ctrl.decide("b0")
+			_check(c.get("a") == "play" and str(c.get("target", "")) == def_target, "sin rasgo (%s, %s): objetivo por defecto %s (fue %s)" % [level, variant, def_target, JSON.stringify(c)])
+			if variant != "nope":
+				g.P("b3").alive = false
+				var a2: Dictionary = b.decide("b0")
+				_check(a2.get("a") == "play" and str(a2.get("target", "")) == def_target, "vengativo (%s, %s): rival muerto -> como sin rasgo (%s)" % [level, variant, JSON.stringify(a2)])
+				g.P("b3").alive = true
+				var keep_hand: Array = g.P("b3").hand.duplicate()
+				g.P("b3").hand.clear()
+				var a3: Dictionary = b.decide("b0")
+				_check(a3.get("a") == "play" and str(a3.get("target", "")) == def_target, "vengativo (%s, %s): rival sin cartas -> como sin rasgo (%s)" % [level, variant, JSON.stringify(a3)])
+				g.P("b3").hand.append_array(keep_hand)
+	# Sin agravio, el vengativo se comporta como sin rasgo
+	var g2 := _cg(4)
+	var b2 := _bots(g2, _lv(g2, "hard"))
+	b2.set_traits({"b0": "vengeful"})
+	for t: String in ["cat_a", "cat_a"]:
+		_give(g2, 0, t)
+	for i in 3:
+		for t: String in ["cat_c", "cat_d", "cat_b"]:
+			_give(g2, 1 + i, t)
+	_give(g2, 2, "cat_b")
+	var safe2: Array = []
+	for i in 30:
+		safe2.append("cat_%s" % "abcd"[i % 4])
+	_setdraw(g2, safe2)
+	var ctrl2 := _bots(g2, _lv(g2, "hard"))
+	_check(JSON.stringify(b2.decide("b0")) == JSON.stringify(ctrl2.decide("b0")), "vengativo sin agravio: decide como sin rasgo")
+	if _fails == f0:
+		_ok("vengativo: tras Favor, pareja, Ataque y Nop va contra quien le perjudicó; si no es válido, como sin rasgo")
+
+
+func _test_bot_traits() -> void:
+	var f0 := _fails
+	_traits_classic_same()
+	_check(Bots.TRAIT_LABELS == {"aggressive": "Agresivo", "cautious": "Prudente", "vengeful": "Vengativo"}, "nombres visibles de los rasgos")
+	var by_name := {"Bigotes": "aggressive", "Garritas": "cautious", "Pelusa": "vengeful", "Don Miau": "aggressive", "Ronroneo": "cautious", "Michi": "vengeful"}
+	var okn := true
+	for nm: String in by_name:
+		okn = okn and Bots.trait_for_name(nm) == by_name[nm]
+	_check(okn and Bots.trait_for_name("Otro") == "", "asignación fija por nombre")
+	# Diferencia medible entre rasgos
+	var stats := {}
+	var games := 0
+	for i in 420:
+		var lv: String = ["normal", "hard"][i % 2]
+		if _bot_game(4, 70000 + i * 17, "official", [lv], true, ["crypt"], stats, false, _trait_map(4, i)) == "":
+			return
+		games += 1
+	var line := []
+	var m := {}
+	for t: String in ["aggressive", "cautious", "vengeful"]:
+		var draws := maxi(1, int(stats.get("d:" + t, 0)))
+		var gm := maxi(1, int(stats.get("g:" + t, 0)))
+		m[t] = {"risk": float(stats.get("r:" + t, 0.0)) / draws, "tgt": float(stats.get("t:" + t, 0)) / gm, "info": float(stats.get("i:" + t, 0)) / gm}
+		line.append("%s: riesgo medio al robar %.3f, dirigidas/partida %.2f, info-esquiva/partida %.2f" % [t, m[t].risk, m[t].tgt, m[t].info])
+	print("    %d partidas Plus, 4 jugadores (normal y difícil) -> %s" % [games, " | ".join(PackedStringArray(line))])
+	_check(m.aggressive.risk > m.cautious.risk, "el agresivo roba con más riesgo medio que el prudente (%.3f vs %.3f)" % [m.aggressive.risk, m.cautious.risk])
+	_check(m.aggressive.tgt > m.cautious.tgt, "el agresivo juega más cartas dirigidas (%.2f vs %.2f)" % [m.aggressive.tgt, m.cautious.tgt])
+	_check(m.cautious.info > m.aggressive.info, "el prudente juega más cartas de información/esquiva (%.2f vs %.2f)" % [m.cautious.info, m.aggressive.info])
+	_vengeful_cases()
+	# Simulación con rasgos mezclados: sin atascos ni cartas perdidas
+	var ss := {}
+	var sims := 0
+	var mixes := [["easy", "normal", "hard"], ["hard", "normal"], ["normal", "easy", "hard", "normal"], ["hard"], ["normal"]]
+	for i in 100:
+		for n in [2, 3, 4, 5]:
+			if _bot_game(n, 41000 + i * 29 + n, "official" if i % 4 != 3 else "full", mixes[i % mixes.size()], true, ["crypt"], ss, false, _trait_map(n, i + n)) == "":
+				return
+			sims += 1
+	_ok("%d partidas Plus con rasgos mezclados: sin atascos ni cartas perdidas" % sims)
+	var hn := _duel_plus("hard", "normal", 400, true)
+	var ne := _duel_plus("normal", "easy", 400, true)
+	var he := _duel_plus("hard", "easy", 400, true)
+	print("    Plus con rasgos mezclados (2 jugadores) - difícil vs normal: %d%%   normal vs fácil: %d%%   difícil vs fácil: %d%%" % [hn, ne, he])
+	_check(hn >= 55 and ne > 55 and he > 60, "con rasgos la dificultad deja de estar ordenada")
+	# LocalMatch y sala
+	var lm: Node = load("res://scripts/match/local_match.gd").new()
+	lm.start({"rivals": 4, "plus": true, "seed": 3})
+	_check(lm.trait_of("p1") == "aggressive" and lm.trait_of("p2") == "cautious" and lm.trait_of("p3") == "vengeful" and lm.trait_of("p4") == "aggressive" and lm.trait_of("p0") == "" and lm.bots.traits == lm.traits, "LocalMatch Plus: rasgos por nombre y pasados a los bots")
+	lm.start({"rivals": 4, "seed": 3})
+	_check(lm.trait_of("p1") == "" and lm.bots.traits.is_empty(), "LocalMatch clásico: sin rasgos")
+	lm.free()
+	var room = _test_room()
+	room.configure(true)
+	room.on_msg(1, {"t": "hello", "name": "Host", "token": "h", "proto": 3})
+	for i in 4:
+		room.on_msg(1, {"t": "addBot"})
+	var lob: Dictionary = _lobbies(room).back()[1]
+	var tr_ok := true
+	var want_tr := ["", "aggressive", "cautious", "vengeful", "aggressive"]
+	for i in lob.players.size():
+		tr_ok = tr_ok and lob.players[i].get("trait", "?") == want_tr[i]
+	_check(tr_ok and lob.players.size() == 5, "lobby de sala Plus: clave trait en los jugadores (bots con rasgo)")
+	room.on_msg(1, {"t": "start"})
+	_check(room.bots.plus and room.bots.traits == {"p2": "aggressive", "p3": "cautious", "p4": "vengeful", "p5": "aggressive"}, "la sala Plus pasa los rasgos a los bots")
+	room.free()
+	var croom = _test_room()
+	croom.on_msg(1, {"t": "hello", "name": "Host", "token": "h"})
+	croom.on_msg(1, {"t": "addBot"})
+	var cl: Dictionary = _lobbies(croom).back()[1]
+	var keys_ok := true
+	for p: Dictionary in cl.players:
+		keys_ok = keys_ok and p.keys().size() == 6 and not p.has("trait")
+	_check(keys_ok and not cl.has("scores"), "lobby de sala clásica: sin clave trait, jugadores intactos")
+	croom.on_msg(1, {"t": "start"})
+	_check(not croom.bots.plus and croom.bots.traits.is_empty(), "sala clásica: bots sin rasgos")
+	croom.free()
+	if _fails == f0:
+		_ok("personalidad de los bots (IA-03): diferencia medible, vengativo, simulación, dificultad y sala")
