@@ -163,6 +163,53 @@ Eventos: en Plus, `future`, `clair` e `inserted` añaden `tops`. Eventos nuevos:
 `rules = {turn_ms: 0, nope_fixed: false, hand: 7, sudden_death: false}`. Se traducen a `cfg` en
 `_init` solo si `plus`. Detalle en §4 de la especificación.
 
+### 2.8 Gatito Putrefacto (`rotten`) — T60
+
+**Activación.** Regla `rules.rotten` (bool, por defecto `false`). Solo tiene efecto con `plus`, el pack
+`crypt` activo y 3 o más jugadores; en cualquier otro caso se ignora. Al repartir, uno de los `n − 1`
+explosivos se sustituye por una carta de tipo `rotten`. `deck_types` no lo incluye (como `exploding`).
+
+**Estado.** `Card.up: bool` (por defecto `false`). Solo el Putrefacto llega a tener `up = true`.
+
+**Al recibirlo** (`_receive`, se comprueba antes que `exploding`; vale para cualquier forma de robar:
+robo normal, Robar del Fondo, Cava Más Hondo):
+
+| Estado | Efecto |
+| --- | --- |
+| Boca abajo (`up = false`) | No muere. Evento público `rot_found {player}`. Se abre la decisión `rot` |
+| Boca arriba (`up = true`) | Muere al instante: no se abre `explode`, no valen Zombi ni Clon. Evento `boom {player, rotten: true}` y `_die`. La carta queda como su `ek` |
+
+**Decisión `rot`.** `prompt = {type: "rot", player, card, start, deadline}`; acción
+`{a: "rot", pos: int}` con la convención de `bury` (0 = arriba). Efecto: `card.up = true`; se inserta;
+`mut += 1; shuf += 1; tops = 0`; evento público `rot_placed {player, depth, len}` (la posición es
+pública); `_end_turn`. Plazo vencido: posición al azar. Cubierta en `view`, `_auto_prompt`,
+`signature`, `set_connected`.
+
+**Vista.** `rotDepth`: número de cartas por encima del Putrefacto si está en el mazo boca arriba; `-1`
+en cualquier otro caso (boca abajo, en una decisión, frente a un muerto). Solo en Plus.
+
+**Interacciones**
+
+| Con | Regla |
+| --- | --- |
+| Barajar, Ladrón de Tumbas | Cambia de posición como cualquier carta; si está boca arriba sigue boca arriba y `rotDepth` refleja la nueva posición |
+| Apocalipsis Zombi | Boca abajo: sube arriba junto con los explosivos. Boca arriba: se queda en el resto barajado, visible. El evento cuenta en `n` solo lo que subió |
+| Ver / Alterar el Futuro | Aparece como `rotten` en la lista (tipo visible para quien mira, esté como esté). Alterar puede moverlo; conserva `up` |
+| Cava Más Hondo | Si la primera carta es el Putrefacto: «me la quedo» aplica la tabla de arriba; «robar la siguiente» lo devuelve arriba sin cambiar `up` y roba la siguiente |
+| Entierro | Lo entierra tal cual, sin voltearlo y sin efecto (igual que un explosivo). Boca arriba su posición sigue siendo pública |
+| Robar del Fondo | Aplica la tabla de arriba |
+| Clon, Gatito Zombi | No intervienen: boca abajo no hay muerte que evitar; boca arriba no se permite jugar nada |
+| Revivir | El `ek` del revivido vuelve al mazo como hoy (lo esconde quien revive, en secreto) y se pone `up = false` |
+| Trío | No se puede nombrar |
+| Muerte súbita | Nunca se retira (cuenta como explosivo) |
+| Fin de partida y riesgo | Cuenta como un explosivo más: sigue habiendo `vivos − 1` cartas de peligro en juego |
+
+**IA.** `rotDepth` es información pública. Con `rotDepth = 0` robar es muerte segura: todos los
+niveles salvo fácil usan cualquier salida disponible (saltar, atacar, Robar del Fondo, Barajar,
+Entierro, Alterar el Futuro) antes de robar. Con `rotDepth > 0` se trata como un explosivo de posición
+conocida. Al colocarlo: fácil al azar; normal y difícil arriba si el siguiente en robar es un rival, al
+fondo si vuelve a robar el propio bot.
+
 ## 3. IA (`ZKBots`)
 
 `ZKBots.new(game, levels, rnd, plus := false)`. Toda heurística nueva (cartas de packs e IA-02) va
