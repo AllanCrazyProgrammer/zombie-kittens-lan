@@ -76,6 +76,12 @@ func level_of(id: String) -> String:
 	return ""
 
 
+## Marcador de victorias de la sala {id: victorias}. Vacío en salas clásicas y antes del primer `lobby`.
+func scores() -> Dictionary:
+	var sc: Variant = lobby.get("scores", {})
+	return (sc as Dictionary).duplicate() if sc is Dictionary else {}
+
+
 func is_plus() -> bool:
 	return bool(lobby.get("settings", {}).get("plus", false))
 

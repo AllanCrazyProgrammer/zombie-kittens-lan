@@ -24,6 +24,9 @@ var _rng: ZKRng
 var _due := {}
 var _sig := ""
 var _next_id := 1
+## Plus (M-06): victorias por id de jugador mientras la sala exista. Solo se llena en salas Plus.
+var scores := {}
+var _scored := false   # la partida en curso ya se ha contado
 
 
 func _ready() -> void:
@@ -81,8 +84,14 @@ func _on_peer_left(peer: int) -> void:
 		game.set_connected(p.id, false, now())
 		_broadcast_state()
 	else:
-		players.erase(p)
+		_drop(p)
 		_send_lobby()
+
+
+## Saca a un jugador de la sala y borra su marcador.
+func _drop(p: Dictionary) -> void:
+	players.erase(p)
+	scores.erase(p.id)
 
 
 func on_msg(peer: int, m: Dictionary) -> void:
@@ -136,7 +145,7 @@ func on_msg(peer: int, m: Dictionary) -> void:
 			var k := _by_id(m.get("id"))
 			if k.is_empty() or k.peer == LOCAL:
 				return
-			players.erase(k)
+			_drop(k)
 			if k.peer > LOCAL:
 				send(k.peer, {"t": "kicked", "msg": "El anfitrión te sacó de la sala."})
 			_send_lobby()
@@ -165,7 +174,7 @@ func on_msg(peer: int, m: Dictionary) -> void:
 			bots = null
 			for q: Dictionary in players.duplicate():
 				if not q.bot and q.peer == 0:
-					players.erase(q)
+					_drop(q)
 			_send_lobby()
 		"act":
 			if game == null:
@@ -190,17 +199,26 @@ func _clean_name(raw: String, me: Dictionary) -> String:
 	return n
 
 
-## Solo deja pasar las reglas opcionales conocidas y con valores razonables.
+## Solo deja pasar las reglas opcionales conocidas, con los mismos límites que `ZKGame._sanitize_rules`.
+## `hand` null o 0 significa «normal» y se quita de las reglas (el motor decide: 7, u 8 con La Cripta).
 func _clean_rules(raw: Dictionary) -> Dictionary:
 	var out: Dictionary = settings.rules.duplicate()
-	if raw.get("turn_ms") is int or raw.get("turn_ms") is float:
-		out["turn_ms"] = clampi(int(raw.turn_ms), 0, 120000)
-	if raw.get("hand") is int or raw.get("hand") is float:
-		out["hand"] = clampi(int(raw.hand), 5, 10)
+	if _is_num(raw.get("turn_ms")):
+		var t := int(raw.turn_ms)
+		out["turn_ms"] = 0 if t <= 0 else clampi(t, 5000, 600000)
+	if raw.has("hand"):
+		if raw.hand == null or (_is_num(raw.hand) and int(raw.hand) <= 0):
+			out.erase("hand")
+		elif _is_num(raw.hand):
+			out["hand"] = clampi(int(raw.hand), 4, 8)
 	for k: String in ["nope_fixed", "sudden_death"]:
 		if raw.get(k) is bool:
 			out[k] = raw[k]
 	return out
+
+
+static func _is_num(v: Variant) -> bool:
+	return v is int or (v is float and is_finite(v))
 
 
 func _hello(peer: int, m: Dictionary) -> void:
@@ -246,10 +264,13 @@ func _hello(peer: int, m: Dictionary) -> void:
 
 
 func _lobby_msg() -> Dictionary:
-	return {
+	var m := {
 		"t": "lobby", "settings": settings.duplicate(true), "started": game != null,
 		"players": players.map(func(p: Dictionary) -> Dictionary: return {"id": p.id, "name": p.name, "avatar": p.avatar, "bot": p.bot, "host": p.peer == LOCAL, "level": p.level}),
 	}
+	if settings.plus:
+		m["scores"] = scores.duplicate()   # M-06: solo en salas Plus
+	return m
 
 
 func _send_lobby() -> void:
@@ -280,6 +301,7 @@ func _start() -> void:
 			game.set_connected(p.id, false, now())
 	_due = {}
 	_sig = ""
+	_scored = false
 	_send_lobby()
 	_check_changed()
 
@@ -304,7 +326,19 @@ func _process(_delta: float) -> void:
 	_check_changed()
 
 
+## Plus: suma una victoria al ganador (una sola vez por partida) y reenvía el lobby con el marcador nuevo.
+func _score_if_over() -> void:
+	if not settings.plus or _scored or game == null or game.over == null:
+		return
+	_scored = true
+	var w: Variant = game.over.get("winner")
+	if w is String and not _by_id(w).is_empty():
+		scores[w] = int(scores.get(w, 0)) + 1
+	_send_lobby()
+
+
 func _check_changed() -> void:
+	_score_if_over()
 	var s := game.signature()
 	if s != _sig:
 		_sig = s

@@ -59,6 +59,10 @@ func is_plus() -> bool:
 	return _plus
 
 
+func scores() -> Dictionary:
+	return {}
+
+
 func level_of(id: String) -> String:
 	return levels.get(id, "")
 

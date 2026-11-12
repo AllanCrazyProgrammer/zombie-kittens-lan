@@ -34,6 +34,7 @@ func _initialize() -> void:
 	_test_crypt_cards_1()
 	_test_crypt_cards_2()
 	_test_plus_network()
+	_test_plus_room_options()
 	_test_difficulty()
 	_test_plus_bots()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
@@ -914,6 +915,135 @@ func _test_plus_network() -> void:
 	_check(not lm.is_plus() and not lm.game.plus and not lm.view().has("plus"), "LocalMatch clásico por defecto")
 	lm.free()
 	_ok("PROTO, hello/proto, salas Plus y clásica, baliza y sesiones")
+
+
+## Juega la partida de una sala de pruebas hasta el final con las decisiones de los bots (también por los humanos).
+func _room_play_out(room: Node) -> bool:
+	var t := Time.get_ticks_msec()
+	var steps := 0
+	while room.game.over == null and steps < 20000:
+		steps += 1
+		t += 3000
+		room.game.tick(t)
+		room.bots.learn()
+		for p: Dictionary in room.players:
+			var a: Dictionary = room.bots.decide(p.id)
+			if not a.is_empty():
+				room.game.act(p.id, a, t)
+	return room.game.over != null
+
+
+func _lobbies(room: Node) -> Array:
+	return room.out.filter(func(x: Array) -> bool: return x[1].t == "lobby")
+
+
+## M-02 a M-06: reglas de sala alineadas con el motor y marcador de victorias (solo salas Plus).
+func _test_plus_room_options() -> void:
+	print("Plus: reglas de sala y marcador")
+	var f0 := _fails
+	# _clean_rules acepta y rechaza lo mismo que el motor
+	var room = _test_room()
+	room.configure(true)
+	var same := true
+	for v: Variant in [0, -5, 1, 4999, 5000, 30000, 60000, 600000, 999999, 30000.0, "x", null, true]:
+		var got: Dictionary = room._clean_rules({"turn_ms": v})
+		var want: Dictionary = Game._sanitize_rules({"turn_ms": v})
+		same = same and got.get("turn_ms", "-") == want.get("turn_ms", "-")
+	_check(same, "_clean_rules(turn_ms) coincide con el motor (0 o 5000-600000)")
+	same = true
+	for v: Variant in [1, 3, 4, 5, 7, 8, 9, 10, 5.0, "x", true]:
+		var got: Dictionary = room._clean_rules({"hand": v})
+		var want: Dictionary = Game._sanitize_rules({"hand": v})
+		same = same and got.get("hand", "-") == want.get("hand", "-")
+	_check(same, "_clean_rules(hand) coincide con el motor (4-8)")
+	same = true
+	for v: Variant in [true, false, 1, "si", null]:
+		same = same and room._clean_rules({"nope_fixed": v, "sudden_death": v}) == Game._sanitize_rules({"nope_fixed": v, "sudden_death": v})
+	_check(same, "_clean_rules acepta solo booleanos en nope_fixed y sudden_death")
+	_check(room._clean_rules({"turbo": 1, "plus": true}) == {}, "_clean_rules ignora claves desconocidas")
+	room.on_msg(1, {"t": "hello", "name": "Host", "token": "h", "proto": 3})
+	room.on_msg(1, {"t": "settings", "rules": {"hand": 5, "turn_ms": 30000}})
+	_check(room.settings.rules == {"hand": 5, "turn_ms": 30000}, "el anfitrión fija reglas")
+	room.on_msg(1, {"t": "settings", "rules": {"sudden_death": true}})
+	_check(room.settings.rules == {"hand": 5, "turn_ms": 30000, "sudden_death": true}, "un cambio suelto conserva las demás reglas")
+	room.on_msg(1, {"t": "settings", "rules": {"hand": 0}})
+	_check(not room.settings.rules.has("hand") and room.settings.rules.turn_ms == 30000, "hand 0 quita la regla (mano normal)")
+	room.on_msg(1, {"t": "settings", "rules": {"hand": 6}})
+	room.on_msg(1, {"t": "settings", "rules": {"hand": null}})
+	_check(not room.settings.rules.has("hand"), "hand null quita la regla")
+	# Marcador: dos partidas, una sola vez cada una
+	room.on_msg(1, {"t": "addBot"})
+	room.on_msg(1, {"t": "addBot"})
+	var bot_ids: Array = room.players.filter(func(p: Dictionary) -> bool: return p.bot).map(func(p: Dictionary) -> String: return p.id)
+	_check(_lobbies(room).all(func(x: Array) -> bool: return x[1].has("scores") and x[1].scores == {}), "lobby Plus lleva scores (vacío al principio)")
+	room.on_msg(1, {"t": "start"})
+	room.out.clear()
+	_check(_room_play_out(room), "la partida 1 de la sala termina")
+	room._check_changed()
+	var w1: String = room.game.over.winner
+	_check(room.scores == {w1: 1}, "la partida 1 suma una victoria al ganador")
+	var ls := _lobbies(room)
+	_check(ls.size() == 1 and ls[0][1].started == true and ls[0][1].scores == {w1: 1} and ls[0][0] == 1, "al terminar se reenvía un lobby con el marcador")
+	room._check_changed()
+	room._score_if_over()
+	_check(room.scores == {w1: 1} and _lobbies(room).size() == 1, "la misma partida no se cuenta dos veces")
+	room.on_msg(1, {"t": "toLobby"})
+	room.on_msg(1, {"t": "start"})
+	_check(_room_play_out(room), "la partida 2 de la sala termina")
+	room._check_changed()
+	var w2: String = room.game.over.winner
+	var want := {}
+	want[w1] = want.get(w1, 0) + 1
+	want[w2] = want.get(w2, 0) + 1
+	_check(room.scores == want, "la partida 2 acumula (%s)" % JSON.stringify(room.scores))
+	room.on_msg(1, {"t": "toLobby"})
+	var kicked: String = bot_ids[0]
+	room.scores[kicked] = 3
+	room.out.clear()
+	room.on_msg(1, {"t": "kick", "id": kicked})
+	var last: Dictionary = _lobbies(room).back()[1]
+	_check(not room.scores.has(kicked) and not last.scores.has(kicked) and not last.players.any(func(p: Dictionary) -> bool: return p.id == kicked), "expulsar borra su marcador")
+	# Un humano que se va de la sala de espera también pierde el suyo
+	room.on_msg(9, {"t": "hello", "name": "Ana", "token": "a", "proto": 3})
+	var ana: String = room._by_peer(9).id
+	room.scores[ana] = 1
+	room._on_peer_left(9)
+	_check(not room.scores.has(ana), "salir de la sala borra su marcador")
+	room.free()
+	# Sala clásica: sin marcador ni claves nuevas, y no manda lobby extra al terminar
+	var cr = _test_room()
+	cr.on_msg(1, {"t": "hello", "name": "Host", "token": "h"})
+	cr.on_msg(1, {"t": "settings", "rules": {"hand": 5, "turn_ms": 30000}})
+	_check(cr.settings.rules == {}, "sala clásica ignora rules")
+	cr.on_msg(1, {"t": "addBot"})
+	cr.on_msg(1, {"t": "start"})
+	cr.out.clear()
+	_check(_room_play_out(cr), "la partida clásica de la sala termina")
+	cr._check_changed()
+	_check(cr.scores.is_empty() and _lobbies(cr).is_empty(), "sala clásica: sin victorias y sin lobby extra al terminar")
+	var cl: Dictionary = cr._lobby_msg()
+	var ck: Array = cl.keys()
+	ck.sort()
+	_check(ck == ["players", "settings", "started", "t"] and cl.settings.keys().size() == 4, "lobby clásico: mismas claves que antes, sin scores")
+	cr.free()
+	# Sesiones
+	var cs: Node = load("res://scripts/net/client_session.gd").new()
+	_check(cs.scores() == {}, "ClientSession.scores() vacío antes del primer lobby")
+	cs.receive({"t": "lobby", "settings": {"plus": false}, "started": false, "players": []})
+	_check(cs.scores() == {}, "ClientSession.scores() vacío en sala clásica")
+	cs.receive({"t": "lobby", "settings": {"plus": true}, "started": false, "players": [], "scores": {"p1": 2}})
+	_check(cs.scores() == {"p1": 2}, "ClientSession.scores() lee lobby.scores")
+	cs.free()
+	var lm: Node = load("res://scripts/match/local_match.gd").new()
+	lm.start({"rivals": 1, "plus": true, "seed": 3, "packs": ["crypt"], "rules": {"hand": 5, "turn_ms": 30000, "sudden_death": true}})
+	_check(lm.game.rules.get("hand") == 5 and lm.game.rules.get("turn_ms") == 30000 and lm.game.rules.get("sudden_death") == true, "LocalMatch pasa opts.rules al motor en Plus")
+	lm.start({"rivals": 1, "plus": true, "seed": 3, "packs": ["crypt"], "rules": {}})
+	_check(not lm.game.rules.has("hand") and int(lm.game.cfg["HAND"]) == 8, "sin hand, con La Cripta la mano por defecto es 8")
+	lm.start({"rivals": 1, "seed": 3, "rules": {"hand": 5}})
+	_check(lm.game.rules.is_empty() and lm.scores() == {}, "LocalMatch clásico ignora reglas; scores() = {}")
+	lm.free()
+	if _fails == f0:
+		_ok("reglas de sala = motor, hand quitable, marcador por partida, expulsión, clásico intacto, scores()")
 
 
 # ---------------------------------------------------------------- Plus (T23): La Cripta, cartas 1-5

@@ -39,3 +39,8 @@ func is_network() -> bool:
 
 func is_host() -> bool:
 	return true
+
+
+## Victorias por jugador en la sala ({id: n}); vacío fuera de salas Plus.
+func scores() -> Dictionary:
+	return {}
