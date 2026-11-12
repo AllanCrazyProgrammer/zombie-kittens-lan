@@ -37,6 +37,7 @@ func _initialize() -> void:
 	_test_plus_room_options()
 	_test_difficulty()
 	_test_plus_bots()
+	_test_rotten()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
 	quit(1 if _fails > 0 else 0)
 
@@ -3145,3 +3146,684 @@ func _test_bot_traits() -> void:
 	croom.free()
 	if _fails == f0:
 		_ok("personalidad de los bots (IA-03): diferencia medible, vengativo, simulación, dificultad y sala")
+
+
+# ================================================================ Gatito Putrefacto (rotten, T61)
+
+## Firmas (digest + firma + eventos) de partidas Plus con La Cripta y SIN `rotten`, grabadas ANTES de tocar el motor.
+## Clave "s:n" -> los 16 primeros caracteres del sha256. La semilla es 500 + s * 7 + n; sudden_death si s es par.
+const ROT_BASE_HASHES := {
+	"1:3": "7f50de2ed55f14df", "1:4": "a9450cae36bcfe2c", "1:5": "092e8506a1c3cb45",
+	"2:3": "986a139e8eebbb09", "2:4": "5e52d2901d366ebe", "2:5": "3ad0084ee3965bcd",
+	"3:3": "f4e7888ff276c5f7", "3:4": "2da104a68723fdf0", "3:5": "7b778fca3f9d01fe",
+	"4:3": "7b08bccc90437bc3", "4:4": "68906105e8cc5960", "4:5": "a2a5ded65b0d6c14",
+	"5:3": "3fa27ec2d673651f", "5:4": "6b28ac5045e2b6d1", "5:5": "09e864e7d1af8007",
+	"6:3": "302f4f2e47f2c51a", "6:4": "3f6bde253ca47d28", "6:5": "4518cbdd6e7f88ec",
+}
+
+
+## Partida Plus con La Cripta y las reglas dadas (reparto real).
+func _rgame(n: int, seed_value: int, rules: Dictionary, packs: Array = ["crypt"], plus: bool = true) -> Game:
+	var ps: Array = []
+	for i in n:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+	return Game.new({"players": ps, "deck_mode": "full", "rng": Rng.new(seed_value), "now": 0, "plus": plus, "packs": packs, "rules": rules})
+
+
+## Como _rgame pero con las manos vacías y turno de b0 (montaje a mano). Reglas: rotten (y las que se añadan).
+func _rg(n: int, extra: Dictionary = {}, seed_value: int = 1) -> Game:
+	var r := {"rotten": true}
+	r.merge(extra)
+	var g := _rgame(n, seed_value, r)
+	for p in g.players:
+		p.hand.clear()
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.events.clear()
+	_clk = 0
+	return g
+
+
+## Mazo montado a mano (último = arriba). `ups`: índices de cartas `rotten` que quedan boca arriba.
+func _rdraw(g: Game, types: Array, ups: Array = []) -> Array[Game.Card]:
+	var cs := _setdraw(g, types)
+	for i: int in ups:
+		cs[i].up = true
+	return cs
+
+
+func _rot_kind_count(g: Game, type: String) -> int:
+	var n := _count_type(g, type)
+	for p in g.players:
+		if p.ek != null and p.ek.type == type:
+			n += 1
+	if g.prompt != null:
+		if g.prompt.has("card") and g.prompt.card.type == type:
+			n += 1
+		if g.prompt.has("eks"):
+			for c: Game.Card in g.prompt.eks:
+				n += 1 if c.type == type else 0
+	return n
+
+
+func _rot_scan_depth(g: Game) -> int:
+	for i in range(g.draw.size() - 1, -1, -1):
+		if g.draw[i].type == "rotten" and g.draw[i].up:
+			return g.draw.size() - 1 - i
+	return -1
+
+
+func _test_rotten() -> void:
+	print("Plus: Gatito Putrefacto (rotten)")
+	var f0 := _fails
+	_rot_guard()
+	_rot_deal()
+	_rot_receive()
+	_rot_prompt_deadline()
+	_rot_revive_and_end()
+	_rot_interactions()
+	_rot_depth_and_info()
+	_rot_simulation()
+	_rot_difficulty()
+	_rot_duration()
+	if _fails == f0:
+		_ok("Gatito Putrefacto: reparto, tabla al recibirlo, decisión rot, interacciones, vista, información, IA y simulación")
+
+
+## La regla apagada (o inaplicable) no cambia nada: mismas firmas que antes del cambio.
+func _rot_guard() -> void:
+	var f0 := _fails
+	var same := 0
+	for s in [1, 2, 3, 4, 5, 6]:
+		for n in [3, 4, 5]:
+			var seed_value: int = 500 + int(s) * 7 + int(n)
+			var base := {"plus": true, "packs": ["crypt"], "rules": {"sudden_death": s % 2 == 0}}
+			var h0 := _hash_game(seed_value, n, base).substr(0, 16)
+			_check(h0 == ROT_BASE_HASHES["%d:%d" % [s, n]], "firma Plus + Cripta sin rotten distinta de la grabada antes del cambio (semilla %d, %d jugadores)" % [s, n])
+			var off := {"plus": true, "packs": ["crypt"], "rules": {"sudden_death": s % 2 == 0, "rotten": false}}
+			if _hash_game(seed_value, n, off).substr(0, 16) == h0:
+				same += 1
+			else:
+				_check(false, "rotten: false cambia la partida (semilla %d, %d jugadores)" % [s, n])
+	for n in [2, 3]:
+		# Regla inaplicable: 2 jugadores, sin pack, sin Plus -> igual que sin la regla
+		var cases := [
+			[{"plus": true, "packs": ["crypt"], "rules": {"rotten": true}}, {"plus": true, "packs": ["crypt"], "rules": {}}, n == 2],
+			[{"plus": true, "packs": [], "rules": {"rotten": true}}, {"plus": true, "packs": [], "rules": {}}, true],
+			[{"plus": false, "packs": ["crypt"], "rules": {"rotten": true}}, {"plus": false, "packs": ["crypt"], "rules": {}}, true],
+		]
+		for c: Array in cases:
+			if c[2]:
+				_check(_hash_game(77 + n, n, c[0]) == _hash_game(77 + n, n, c[1]), "regla rotten inaplicable cambia la partida (%d jug., %s)" % [n, JSON.stringify(c[0])])
+	if _fails == f0:
+		_ok("regla apagada o inaplicable: %d firmas Plus + Cripta idénticas a las grabadas antes del cambio, y con rotten: false" % same)
+
+
+func _rot_deal() -> void:
+	var f0 := _fails
+	for n in [3, 4, 5]:
+		for s in [1, 2, 3, 4]:
+			var g := _rgame(n, 90 + s, {"rotten": true})
+			var base := _rgame(n, 90 + s, {})
+			var eks := _count_type(g, "exploding")
+			var rot := _count_type(g, "rotten")
+			_check(rot == 1 and eks == n - 2, "reparto con %d jugadores: 1 rotten y %d explosivos (hay %d y %d)" % [n, n - 2, rot, eks])
+			var in_draw := g.draw.filter(func(c: Game.Card) -> bool: return c.type == "rotten").size()
+			_check(in_draw == 1 and not g.draw.any(func(c: Game.Card) -> bool: return c.up), "el Putrefacto empieza en el mazo y boca abajo (%d jug.)" % n)
+			_check(not g.deck_types.has("rotten") and not g.deck_types.has("exploding"), "deck_types no incluye rotten")
+			# Mismo azar que sin la regla: mismas posiciones y manos, solo cambia el tipo de una carta
+			var diff := 0
+			for i in g.draw.size():
+				if g.draw[i].id != base.draw[i].id:
+					diff += 100
+				elif g.draw[i].type != base.draw[i].type:
+					diff += 1 if (base.draw[i].type == "exploding" and g.draw[i].type == "rotten") else 100
+			var hands_same := true
+			for i in n:
+				hands_same = hands_same and _ids(g.players[i].hand) == _ids(base.players[i].hand)
+			_check(diff == 1 and hands_same and g.draw.size() == base.draw.size() and g.cur == base.cur, "reparto %d jug.: el Putrefacto sustituye a un explosivo sin alterar el resto del azar" % n)
+	for cfg: Array in [[2, ["crypt"], true, "2 jugadores"], [4, [], true, "sin pack"], [4, ["crypt"], false, "sin Plus"]]:
+		var g2 := _rgame(int(cfg[0]), 5, {"rotten": true}, cfg[1], bool(cfg[2]))
+		_check(_count_type(g2, "rotten") == 0 and _count_type(g2, "exploding") == int(cfg[0]) - 1, "rotten ignorado (%s): ningún rotten y n - 1 explosivos" % cfg[3])
+	if _fails == f0:
+		_ok("reparto con 3, 4 y 5 jugadores (1 rotten y n - 2 explosivos); ignorado con 2 jugadores, sin pack o sin Plus; mismo azar")
+
+
+## Tabla «Al recibirlo»: boca abajo / boca arriba, por robo normal, Robar del Fondo y Cava Más Hondo.
+func _rot_receive() -> void:
+	var f0 := _fails
+	# --- boca abajo, robo normal: no muere, evento público, decisión rot
+	var g := _rg(3)
+	var cs := _rdraw(g, ["cat_a", "cat_b", "cat_c", "rotten"])
+	var zb := _give(g, 0, "zombie")
+	var cl := _give(g, 0, "clone")
+	var total := _count(g)
+	var m0 := g.mut
+	var sh0 := g.shuf
+	_check(g.act("b0", {"a": "draw"}, _clk) == "", "rotten boca abajo: robar es válido")
+	var pr: Variant = g.prompt
+	_check(g.players[0].alive and pr != null and pr.type == "rot" and pr.player == "b0" and pr.card == cs[3], "boca abajo: no muere y se abre la decisión rot")
+	_check(_evs(g, "boom").is_empty() and _evs(g, "died").is_empty() and g.players[0].hand.size() == 2, "boca abajo: sin boom ni muerte, la carta no entra en la mano")
+	var rf := _evs(g, "rot_found")
+	_check(rf.size() == 1 and rf[0].player == "b0" and not rf[0].has("to") and rf[0].text == "B0 encontró al Gatito Putrefacto… ¡ahora decide dónde lo deja!", "boca abajo: evento público rot_found con el texto esperado")
+	_check(g.plan("b0", [zb.id]).has("err") and g.plan("b0", [cl.id]).has("err"), "boca abajo: el Zombi y el Clon no intervienen")
+	_check(g.act("b0", {"a": "die"}, _clk) != "" and g.act("b0", {"a": "draw"}, _clk) != "", "durante rot no se puede morir ni robar")
+	var v1 := g.view("b1", _clk)
+	var v0 := g.view("b0", _clk)
+	_check(v1.prompt.type == "rot" and v1.prompt.player == "b0" and not v1.prompt.mine and not v1.prompt.has("card") and v0.prompt.mine and v0.prompt.card == "rotten", "vista de rot: el tipo solo en la vista de quien decide")
+	_check(v0.rotDepth == -1 and v1.rotDepth == -1, "rotDepth = -1 mientras está en una decisión")
+	_check(g.act("b1", {"a": "rot", "pos": 0}, _clk) != "" and g.act("b0", {"a": "rot", "pos": 9}, _clk) != "" and g.act("b0", {"a": "rot", "pos": -1}, _clk) != "" and g.act("b0", {"a": "rot", "pos": 0.5}, _clk) != "", "rot: solo el jugador, posición válida")
+	_check(g.act("b0", {"a": "rot", "pos": 2}, _clk) == "", "rot: colocar a 2 cartas")
+	_check(g.prompt == null and cs[3].up and g.draw.size() == 4 and g.draw[1] == cs[3], "rot: queda boca arriba con 2 cartas por encima")
+	_check(g.rot_depth() == 2 and g.view("b2", _clk).rotDepth == 2 and g.view("b0", _clk).rotDepth == 2, "rotDepth = 2 para todos tras colocar")
+	var rp := _evs(g, "rot_placed")
+	_check(rp.size() == 1 and rp[0].depth == 2 and rp[0].len == 4 and rp[0].player == "b0" and not rp[0].has("to") and rp[0].text == "B0 lo deja boca arriba a 2 cartas.", "rot_placed público con profundidad y texto")
+	_check(g.mut == m0 + 2 and g.shuf == sh0 + 1 and g.tops == 0, "rot: mut + 1 por el robo y + 1 por colocar; shuf + 1; tops = 0")
+	_check(g.cur == 1 and g.turns_left == 1, "rot: termina el turno")
+	_check(_count(g) == total, "rot: conservación de cartas")
+	# Posiciones extremas: arriba (0) y fondo (draw.size())
+	for pos in [0, 3]:
+		var ge := _rg(3)
+		var ce := _rdraw(ge, ["cat_a", "cat_b", "cat_c", "rotten"])
+		ge.act("b0", {"a": "draw"}, _clk)
+		ge.act("b0", {"a": "rot", "pos": pos}, _clk)
+		_check(ge.rot_depth() == pos and ge.draw[ge.draw.size() - 1 - pos] == ce[3], "rot en la posición %d: rotDepth = %d" % [pos, pos])
+	var gt := _rg(3)
+	_rdraw(gt, ["cat_a", "rotten"])
+	gt.act("b0", {"a": "draw"}, _clk)
+	gt.act("b0", {"a": "rot", "pos": 0}, _clk)
+	_check(_evs(gt, "rot_placed")[0].text == "B0 lo deja boca arriba en la cima del mazo.", "rot en la cima: texto propio")
+
+	# --- boca arriba, robo normal: muerte al instante, sin explode, ni Zombi ni Clon
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "rotten"], [2])
+	_give(g, 0, "zombie")
+	_give(g, 0, "clone")
+	g.discard.append({"card": _card("zombie"), "by": "b1"})
+	total = _count(g)
+	_check(g.view("b1", _clk).rotDepth == 0, "boca arriba en la cima: rotDepth = 0")
+	_check(g.act("b0", {"a": "draw"}, _clk) == "", "rotten boca arriba: robar es válido")
+	_check(not g.players[0].alive and g.prompt == null and g.players[0].ek == cs[2], "boca arriba: muere al instante, sin decisión, y la carta queda como su ek")
+	var bo := _evs(g, "boom")
+	_check(bo.size() == 1 and bo[0].player == "b0" and bo[0].get("rotten", false) == true and bo[0].text == "☣ B0 robó el Gatito Putrefacto boca arriba y está MUERTO. Ni el Zombi lo salva.", "boom con rotten: true y el texto esperado")
+	_check(_evs(g, "died").size() == 1 and g.players[0].hand.size() == 2 and g.over == null and g.cur == 1, "boca arriba: muere, conserva su mano y pasa el turno")
+	_check(_count(g) == total, "boca arriba: conservación de cartas")
+	_check(g.view("b1", _clk).rotDepth == -1, "rotDepth = -1 frente a un muerto")
+	# último vivo
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten"], [1])
+	g.players[2].alive = false
+	g.players[2].ek = _card("exploding")
+	g.act("b0", {"a": "draw"}, _clk)
+	_check(g.over != null and g.over.winner == "b1" and not _evs(g, "over").is_empty() and g.prompt == null, "boca arriba: el último vivo gana la partida")
+
+	# --- Robar del Fondo
+	for up in [false, true]:
+		g = _rg(3)
+		cs = _rdraw(g, ["rotten", "cat_a", "cat_b"], [0] if up else [])
+		var db := _give(g, 0, "draw_bottom")
+		total = _count(g)
+		_play(g, "b0", db)
+		_resolve(g)
+		if up:
+			_check(not g.players[0].alive and g.prompt == null and not _evs(g, "boom").is_empty() and _evs(g, "boom")[0].get("rotten", false), "Robar del Fondo con el Putrefacto boca arriba: muere")
+		else:
+			_check(g.players[0].alive and g.prompt != null and g.prompt.type == "rot" and g.prompt.card == cs[0] and g.tops == 0, "Robar del Fondo con el Putrefacto boca abajo: abre rot (tops no sube)")
+		_check(_count(g) == total, "Robar del Fondo: conservación")
+
+	# --- Cava Más Hondo
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "rotten"])
+	var dd := _give(g, 0, "dig_deeper")
+	_play(g, "b0", dd)
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.type == "dig" and g.prompt.card == cs[2], "Cava Más Hondo: la primera carta es el Putrefacto")
+	g.act("b0", {"a": "dig", "keep": true}, _clk)
+	_check(g.prompt != null and g.prompt.type == "rot" and g.prompt.card == cs[2] and g.players[0].alive, "Cava Más Hondo, me la quedo (boca abajo): abre rot")
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "rotten"])
+	dd = _give(g, 0, "dig_deeper")
+	_play(g, "b0", dd)
+	_resolve(g)
+	total = _count(g)
+	g.act("b0", {"a": "dig", "keep": false}, _clk)
+	_check(g.prompt == null and g.draw[g.draw.size() - 1] == cs[2] and not cs[2].up and g.players[0].hand.has(cs[1]) and g.rot_depth() == -1, "Cava Más Hondo, la siguiente (boca abajo): el Putrefacto vuelve arriba sin cambiar y roba la siguiente")
+	_check(_count(g) == total, "Cava Más Hondo: conservación")
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "rotten"], [2])
+	dd = _give(g, 0, "dig_deeper")
+	_play(g, "b0", dd)
+	_resolve(g)
+	_check(g.prompt.type == "dig" and g.rot_depth() == -1, "Cava Más Hondo: con la carta en la decisión rotDepth = -1")
+	g.act("b0", {"a": "dig", "keep": true}, _clk)
+	_check(not g.players[0].alive and g.prompt == null, "Cava Más Hondo, me la quedo (boca arriba): muere")
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "rotten"], [2])
+	dd = _give(g, 0, "dig_deeper")
+	_play(g, "b0", dd)
+	_resolve(g)
+	g.act("b0", {"a": "dig", "keep": false}, _clk)
+	_check(g.players[0].alive and g.rot_depth() == 0 and cs[2].up and g.players[0].hand.has(cs[1]), "Cava Más Hondo, la siguiente (boca arriba): vuelve arriba, sigue boca arriba (rotDepth 0)")
+	# ... y la segunda carta es el Putrefacto boca arriba: al robarla muere
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b"], [1])
+	dd = _give(g, 0, "dig_deeper")
+	_play(g, "b0", dd)
+	_resolve(g)
+	g.act("b0", {"a": "dig", "keep": false}, _clk)
+	_check(not g.players[0].alive, "Cava Más Hondo: robar la siguiente aplica la tabla (Putrefacto boca arriba mata)")
+	if _fails == f0:
+		_ok("tabla «Al recibirlo»: boca abajo (rot_found, decisión, colocar) y boca arriba (muerte sin explode) por robo, Robar del Fondo y Cava Más Hondo")
+
+
+func _rot_prompt_deadline() -> void:
+	var f0 := _fails
+	var g := _rg(3)
+	var cs := _rdraw(g, ["cat_a", "cat_b", "cat_c", "rotten"])
+	g.act("b0", {"a": "draw"}, 1000)
+	var pr: Dictionary = g.prompt
+	_check(pr.deadline == 1000 + int(g.cfg["PROMPT_MS"]) and g.next_deadline() == pr.deadline, "rot: plazo = PROMPT_MS y next_deadline lo conoce")
+	g.tick(pr.deadline - 1)
+	_check(g.prompt != null, "rot: antes del plazo sigue abierta")
+	g.tick(pr.deadline)
+	_check(g.prompt == null and cs[3].up and g.rot_depth() >= 0 and g.rot_depth() <= 3 and g.cur == 1 and not _evs(g, "rot_placed").is_empty(), "rot: plazo vencido, posición al azar, boca arriba y el turno sigue")
+	# desconexión: el plazo se acorta
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "cat_c", "rotten"])
+	g.players[0].bot = false
+	g.act("b0", {"a": "draw"}, 2000)
+	g.set_connected("b0", false, 3000)
+	_check(g.prompt.deadline <= 3000 + int(g.cfg["GONE_MS"]) and g.next_deadline() == g.prompt.deadline, "rot: la desconexión acorta el plazo")
+	g.tick(3000 + int(g.cfg["GONE_MS"]))
+	_check(g.prompt == null and cs[3].up and g.cur == 1, "rot: desconectado, la partida sigue sola")
+	# humano desconectado antes de robar: el plazo ya nace corto
+	g = _rg(3)
+	_rdraw(g, ["cat_a", "rotten"])
+	g.players[0].bot = false
+	g.players[0].connected = false
+	g.act("b0", {"a": "draw"}, 5000)
+	_check(g.prompt.deadline == 5000 + int(g.cfg["GONE_MS"]), "rot: jugador desconectado, plazo GONE_MS")
+	_check(g.signature().contains("rot"), "la firma cubre la decisión rot")
+	# Un ciclo entero sin atascos con el reloj
+	var now := 6000
+	var guard := 0
+	while g.prompt != null and guard < 5:
+		guard += 1
+		now = maxi(now + 1, g.next_deadline())
+		g.tick(now)
+	_check(g.prompt == null, "rot: el reloj siempre la cierra")
+	if _fails == f0:
+		_ok("decisión rot: plazo vencido (posición al azar), desconexión y firma")
+
+
+func _rot_revive_and_end() -> void:
+	var f0 := _fails
+	# b1 muere por el Putrefacto boca arriba; luego b2 se salva con un Zombi y revive a b1: el ek vuelve BOCA ABAJO
+	var g := _rg(3)
+	var cs := _rdraw(g, ["cat_a", "exploding", "cat_b", "rotten"], [3])
+	g.cur = 1
+	g.act("b1", {"a": "draw"}, _clk)
+	_check(not g.players[1].alive and g.players[1].ek == cs[3] and g.cur == 2, "revivir: b1 muere por el Putrefacto boca arriba")
+	var zb := _give(g, 2, "zombie")
+	_setdraw(g, ["cat_a", "exploding"])
+	var ek: Game.Card = g.draw[g.draw.size() - 1]
+	var total := _count(g)
+	_check(g.act("b2", {"a": "draw"}, _clk) == "" and g.prompt != null and g.prompt.type == "explode", "revivir: b2 saca un explosivo y puede salvarse")
+	_check(g.act("b2", {"a": "play", "cards": [zb.id]}, _clk) == "", "revivir: b2 juega el Zombi")
+	_check(g.players[1].alive and g.players[1].ek == null and g.prompt != null and g.prompt.type == "zombie" and g.prompt.eks.size() == 2, "revivir: b1 vive y sus dos cartas peligrosas esperan al mazo")
+	_check(g.prompt.eks.has(cs[3]) and not cs[3].up, "revivir: el Putrefacto revivido vuelve con up = false")
+	g.act("b2", {"a": "insert", "positions": [0, 0]}, _clk)
+	_check(g.prompt == null and not cs[3].up and g.draw.has(cs[3]) and g.draw.has(ek) and g.rot_depth() == -1, "revivir: queda boca abajo en el mazo (rotDepth = -1)")
+	_check(_count(g) == total and _rot_kind_count(g, "rotten") == 1, "revivir: conservación (un solo Putrefacto)")
+	_check(not g.view("b0", _clk).has("ek") and not JSON.stringify(g.view("b0", _clk).prompt).contains("rotten"), "revivir: la vista no filtra el tipo")
+	# vivos - 1 cartas de peligro en juego (el Putrefacto cuenta como un explosivo)
+	var danger := 0
+	for c in g.draw:
+		danger += 1 if (c.type == "exploding" or c.type == "rotten") else 0
+	_check(danger == g.living().size() - 1, "fin de partida y riesgo: el Putrefacto cuenta como un explosivo (vivos - 1 cartas de peligro)")
+	# Al volver a robarlo ya boca abajo: se vuelve a poder colocar
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten"])
+	g.act("b0", {"a": "draw"}, _clk)
+	g.act("b0", {"a": "rot", "pos": 0}, _clk)
+	_check(cs[1].up and g.rot_depth() == 0, "colocado arriba: rotDepth 0")
+	g.act("b1", {"a": "draw"}, _clk)
+	_check(not g.players[1].alive, "el siguiente que lo roba (boca arriba) muere")
+	if _fails == f0:
+		_ok("revivir (vuelve boca abajo, en secreto), último vivo y conteo de peligro")
+
+
+func _rot_interactions() -> void:
+	var f0 := _fails
+	# --- Barajar: cambia de posición y sigue boca arriba; rotDepth refleja la nueva posición
+	var g := _rg(4)
+	var cs := _rdraw(g, ["cat_a", "cat_b", "rotten", "cat_c", "cat_d", "cat_a", "cat_b", "cat_c"], [2])
+	var sh := _give(g, 0, "shuffle")
+	_play(g, "b0", sh)
+	_resolve(g)
+	_check(cs[2].up and g.rot_depth() == _rot_scan_depth(g) and g.view("b1", _clk).rotDepth == g.rot_depth(), "Barajar: sigue boca arriba y rotDepth refleja la nueva posición")
+	var moved := false
+	var consistent := true
+	var d_prev := g.rot_depth()
+	for i in 8:
+		g.shuffle_draw()
+		consistent = consistent and cs[2].up and g.rot_depth() == _rot_scan_depth(g) and g.rot_depth() >= 0
+		moved = moved or g.rot_depth() != d_prev
+		d_prev = g.rot_depth()
+	_check(consistent and moved, "Barajar varias veces: boca arriba, rotDepth siempre coherente y la posición cambia")
+	# --- Ladrón de Tumbas
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b", "cat_c", "cat_d"], [1])
+	g.players[2].alive = false
+	g.players[2].ek = _card("exploding")
+	var ch := _give(g, 2, "cat_a")
+	var gr := _give(g, 0, "grave_robber")
+	_play(g, "b0", gr)
+	_resolve(g)
+	_check(g.prompt != null and g.prompt.type == "give" and g.act("b2", {"a": "give", "card": ch.id}, _clk) == "", "Ladrón de Tumbas: el muerto entrega una carta")
+	_check(g.draw.size() == 6 and cs[1].up and g.rot_depth() == _rot_scan_depth(g) and g.rot_depth() >= 0, "Ladrón de Tumbas: baraja, el Putrefacto sigue boca arriba y rotDepth refleja la nueva posición")
+	# --- Apocalipsis: boca abajo sube con los explosivos; boca arriba se queda en el resto
+	g = _rg(4)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b", "exploding", "cat_c", "rotten", "cat_d"], [1])
+	var ap := _give(g, 0, "apocalypse")
+	_play(g, "b0", ap)
+	_resolve(g)
+	var ev := _evs(g, "apocalypse")
+	var top2 := [g.draw[g.draw.size() - 1], g.draw[g.draw.size() - 2]]
+	_check(ev.size() == 1 and ev[0].n == 2 and top2.has(cs[3]) and top2.has(cs[5]), "Apocalipsis: el Putrefacto boca abajo sube con los explosivos (n = 2)")
+	_check(cs[1].up and g.rot_depth() >= 2 and g.draw.find(cs[1]) < g.draw.size() - 2, "Apocalipsis: el boca arriba se queda en el resto barajado, visible")
+	g = _rg(4)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b", "exploding", "cat_c"], [1])
+	ap = _give(g, 0, "apocalypse")
+	_play(g, "b0", ap)
+	_resolve(g)
+	_check(_evs(g, "apocalypse")[0].n == 1 and g.draw[g.draw.size() - 1] == cs[3] and cs[1].up, "Apocalipsis: n cuenta solo lo que subió (el boca arriba no)")
+	# --- Ver el Futuro
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b", "cat_c"])
+	var sf := _give(g, 0, "see_future")
+	_play(g, "b0", sf)
+	_resolve(g)
+	var fut := _evs(g, "future")
+	_check(fut.size() == 1 and fut[0].to == "b0" and fut[0].cards == ["cat_c", "cat_b", "rotten"], "Ver el Futuro: aparece como rotten (boca abajo)")
+	_check(g.view("b1", _clk).events.filter(func(e: Dictionary) -> bool: return e.type == "future").is_empty(), "Ver el Futuro: el evento es privado")
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "rotten", "cat_b", "cat_c"], [1])
+	sf = _give(g, 0, "see_future")
+	_play(g, "b0", sf)
+	_resolve(g)
+	_check(_evs(g, "future")[0].cards == ["cat_c", "cat_b", "rotten"], "Ver el Futuro: aparece como rotten (boca arriba)")
+	# --- Alterar el Futuro
+	for up in [false, true]:
+		g = _rg(3)
+		cs = _rdraw(g, ["cat_a", "cat_b", "rotten", "cat_c"], [2] if up else [])
+		var af := _give(g, 0, "alter_future")
+		_play(g, "b0", af)
+		_resolve(g)
+		_check(g.prompt != null and g.prompt.type == "alter" and g.view("b0", _clk).prompt.cards == ["cat_c", "rotten", "cat_b"] and not g.view("b1", _clk).prompt.has("cards"), "Alterar el Futuro: lista rotten solo a quien mira")
+		g.act("b0", {"a": "reorder", "order": [1, 0, 2]}, _clk)
+		_check(g.draw[g.draw.size() - 1] == cs[2] and cs[2].up == up and g.rot_depth() == (0 if up else -1), "Alterar el Futuro: lo mueve y conserva up (%s)" % ("arriba" if up else "abajo"))
+	# --- Entierro: lo entierra tal cual, sin voltearlo y sin efecto
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "cat_c", "rotten"])
+	var by := _give(g, 0, "bury")
+	_play(g, "b0", by)
+	_resolve(g)
+	_check(g.prompt.type == "bury" and g.prompt.card == cs[3] and g.view("b0", _clk).prompt.card == "rotten" and not g.view("b1", _clk).prompt.has("card"), "Entierro: el Putrefacto boca abajo en la decisión (solo lo ve quien entierra)")
+	g.act("b0", {"a": "bury", "pos": 1}, _clk)
+	_check(g.players[0].alive and not cs[3].up and g.draw.size() == 4 and g.draw[2] == cs[3] and g.rot_depth() == -1 and _evs(g, "rot_found").is_empty() and g.cur == 1, "Entierro: sin voltearlo y sin efecto (boca abajo)")
+	g = _rg(3)
+	cs = _rdraw(g, ["cat_a", "cat_b", "cat_c", "rotten"], [3])
+	by = _give(g, 0, "bury")
+	_play(g, "b0", by)
+	_resolve(g)
+	g.act("b0", {"a": "bury", "pos": 2}, _clk)
+	_check(g.players[0].alive and cs[3].up and g.rot_depth() == 2 and g.view("b2", _clk).rotDepth == 2, "Entierro: boca arriba su posición sigue siendo pública")
+	# --- Trío: no se puede nombrar
+	g = _rg(4)
+	var trio: Array = [_give(g, 0, "cat_a"), _give(g, 0, "cat_a"), _give(g, 0, "cat_a")]
+	_give(g, 1, "cat_b")
+	var ids: Array = trio.map(func(c: Game.Card) -> String: return c.id)
+	_check(g.plan("b0", ids, "b1", "rotten").has("err") and not g.plan("b0", ids, "b1", "zombie").has("err"), "Trío: no se puede nombrar el Putrefacto")
+	# --- Muerte súbita: nunca se retira
+	g = _rg(3, {"sudden_death": true})
+	cs = _rdraw(g, ["cat_a", "rotten", "exploding", "cat_b", "cat_c"])
+	g.players[2].alive = false
+	g.players[2].ek = _card("exploding")
+	for k in 4:
+		g._sd_handover(0)
+		g._sd_handover(1)
+	_check(g.removed.map(func(c: Game.Card) -> String: return c.type) == ["cat_a", "cat_b", "cat_c"] and g.draw.size() == 2 and g.draw.has(cs[1]) and g.draw.has(cs[2]), "Muerte súbita: nunca retira el Putrefacto (cuenta como explosivo)")
+	if _fails == f0:
+		_ok("interacciones: Barajar, Ladrón de Tumbas, Apocalipsis, Ver/Alterar el Futuro, Entierro, Trío y Muerte súbita")
+
+
+func _rot_depth_and_info() -> void:
+	var f0 := _fails
+	# --- rotDepth tras robar de arriba y del fondo, y siempre presente en Plus
+	var g := _rg(4)
+	_rdraw(g, ["cat_a", "rotten", "cat_b", "cat_c", "cat_d", "cat_a"], [1])
+	_check(g.view("b0", _clk).rotDepth == 4 and g.view("b3", _clk).rotDepth == 4, "rotDepth inicial = cartas por encima")
+	g.act("b0", {"a": "draw"}, _clk)
+	_check(g.view("b1", _clk).rotDepth == 3, "rotDepth baja al robar de arriba")
+	var db := _give(g, 1, "draw_bottom")
+	_play(g, "b1", db)
+	_resolve(g)
+	_check(g.view("b1", _clk).rotDepth == 3, "rotDepth no cambia al robar del fondo")
+	var h := _rg(3)
+	_check(h.view("b0", 0).has("rotDepth") and _rg(3, {"rotten": false}).view("b0", 0).rotDepth == -1, "rotDepth siempre presente en Plus (−1 si no aplica)")
+	_check(_rgame(4, 3, {}).view("b0", 0).rotDepth == -1 and _rgame(2, 3, {"rotten": true}).view("b0", 0).rotDepth == -1, "rotDepth = −1 en Plus sin la regla o con 2 jugadores")
+	_check(not _mk(3, 5).view("b0", 0).has("rotDepth"), "clásico: la vista no lleva rotDepth")
+	# --- información: el tipo no aparece en vistas ajenas mientras está boca abajo
+	g = _rgame(4, 11, {"rotten": true})
+	var leak := false
+	for id in ["b0", "b1", "b2", "b3"]:
+		var v := g.view(id, 0)
+		v.erase("rules")
+		leak = leak or JSON.stringify(v).contains("rotten") or JSON.stringify(v).contains("Putrefacto")
+	_check(not leak, "información: con el Putrefacto boca abajo en el mazo, ninguna vista lo menciona")
+	g = _rg(3)
+	var cs := _rdraw(g, ["cat_a", "cat_b", "rotten"])
+	g.act("b0", {"a": "draw"}, _clk)
+	var v1 := g.view("b1", _clk)
+	var pj := JSON.stringify([v1.prompt, v1.hand, v1.discard])
+	_check(not pj.contains("rotten") and v1.events.any(func(e: Dictionary) -> bool: return e.type == "rot_found"), "información: lo público es rot_found; la decisión ajena no lleva el tipo")
+	g.act("b0", {"a": "rot", "pos": 1}, _clk)
+	_check(cs[2].up and g.view("b2", _clk).rotDepth == 1 and g.view("b2", _clk).events.any(func(e: Dictionary) -> bool: return e.type == "rot_placed" and e.depth == 1), "información: boca arriba, posición pública")
+	if _fails == f0:
+		_ok("rotDepth (tras colocar, barajar y robar de arriba o del fondo) e información oculta")
+
+
+## Una partida de bots con La Cripta + rotten. stats acumula muertes, colocaciones, robos con rotDepth = 0 y duración.
+func _rot_game(n: int, seed_value: int, mode: String, levels: Array, rules: Dictionary, rot: bool, stats: Dictionary) -> String:
+	var rng := Rng.new(seed_value)
+	var ps: Array = []
+	var lv := {}
+	for i in n:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+		lv["b%d" % i] = levels[(i + seed_value) % levels.size()]
+	var r := {"rotten": rot}
+	r.merge(rules)
+	var g := Game.new({"players": ps, "deck_mode": mode, "rng": rng, "now": 0, "plus": true, "packs": ["crypt"], "rules": r})
+	var bots := Bots.new(g, lv, rng.next, true)
+	var total := _count(g)
+	var now := 0
+	var steps := 0
+	var first := 0
+	var seen := 0
+	var tag := "semilla %d, %d jug., %s" % [seed_value, n, JSON.stringify(rules)]
+	while g.over == null:
+		steps += 1
+		if not _check(steps < 20000, "rotten: partida interminable (%s)" % tag):
+			return ""
+		g.tick(now)
+		bots.learn()
+		for e: Dictionary in g.events:
+			if e.seq > seen:
+				seen = e.seq
+				match e.type:
+					"turn": stats["turns"] = int(stats.get("turns", 0)) + 1
+					"boom": stats["rot_kills"] = int(stats.get("rot_kills", 0)) + (1 if e.get("rotten", false) else 0)
+					"rot_found": stats["rot_found"] = int(stats.get("rot_found", 0)) + 1
+					"rot_placed": stats["rot_placed"] = int(stats.get("rot_placed", 0)) + 1
+		var acted := false
+		for k in n:
+			var id := "b%d" % ((first + k) % n)
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			if a.a == "draw" and g.cur_p().id == id and g.idle() and g.rot_depth() == 0 and lv[id] != "easy":
+				stats["rd0_draws"] = int(stats.get("rd0_draws", 0)) + 1
+				if _rot_has_exit(g, bots, g.P(id)):
+					stats["rd0_with_exit"] = int(stats.get("rd0_with_exit", 0)) + 1
+					if int(stats["rd0_with_exit"]) <= 3:
+						printerr("    [rd0 con salida] %s, %s: mano %s" % [tag, id, ",".join(PackedStringArray(g.P(id).hand.map(func(c: Game.Card) -> String: return c.type)))])
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			if not _check(err == "", "rotten: acción rechazada de %s: %s (%s) (%s)" % [id, err, JSON.stringify(a), tag]):
+				return ""
+			stats["actions"] = int(stats.get("actions", 0)) + 1
+			acted = true
+			first = (first + k + 1) % n
+			break
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if g.over != null:
+				break
+			if g.prompt != null and g.prompt.type == "rot":
+				stats["rot_expired"] = int(stats.get("rot_expired", 0)) + 1
+			if not _check(d >= 0, "rotten: partida atascada (%s)" % tag):
+				return ""
+			now = maxi(now + 1, d)
+		if not _check(_count(g) == total, "rotten: se perdieron o duplicaron cartas (%s)" % tag):
+			return ""
+		if rot and not _check(_rot_kind_count(g, "rotten") == 1, "rotten: no hay exactamente un Putrefacto (%s)" % tag):
+			return ""
+		if g.over == null:
+			var danger := 0
+			for c in g.draw:
+				danger += 1 if (c.type == "exploding" or c.type == "rotten") else 0
+			if g.prompt != null:
+				danger += (1 if g.prompt.has("card") and (g.prompt.card.type == "exploding" or g.prompt.card.type == "rotten") else 0) + (g.prompt.eks.size() if g.prompt.has("eks") else 0)
+			if not _check(danger == g.living().size() - 1, "rotten: cartas de peligro en juego != vivos - 1 (%s)" % tag):
+				return ""
+	stats["games"] = int(stats.get("games", 0)) + 1
+	return g.over.winner
+
+
+## ¿Tiene el jugador una salida jugable (no robar) con el Putrefacto boca arriba arriba del mazo?
+func _rot_has_exit(g: Game, bots: Bots, p: Game.Player) -> bool:
+	for c in p.hand:
+		var t := c.type
+		var ok := false
+		match t:
+			"skip", "super_skip", "attack", "reverse", "shuffle", "bury", "targeted_attack":
+				ok = true
+			"attack_dead":
+				ok = g.dead().size() > 0
+			"alter_future":
+				ok = g.draw.size() >= 2
+			"draw_bottom":
+				ok = g.draw.size() > 1 and g.rot_depth() != g.draw.size() - 1 and not bots._bottom_hidden(p.id)
+		if ok and not g.plan(p.id, [c.id]).has("err"):
+			return true
+	return false
+
+
+func _rot_simulation() -> void:
+	var stats := {}
+	var mixes := [["easy", "normal", "hard"], ["hard", "normal"], ["hard"], ["normal", "easy", "hard", "normal"], ["normal"]]
+	var rule_sets := [{}, {"sudden_death": true}, {"hand": 5}, {"nope_fixed": true}, {"sudden_death": true, "hand": 6}]
+	var games := 0
+	for s in 180:
+		for n in [3, 4, 5]:
+			if _rot_game(n, 41000 + s * 29 + n, "official" if s % 4 != 3 else "full", mixes[s % mixes.size()], rule_sets[(s + n) % rule_sets.size()], true, stats) == "":
+				return
+			games += 1
+	var ok := true
+	ok = _check(int(stats.get("rot_expired", 0)) == 0, "venció un plazo de rot con un bot (%d)" % int(stats.get("rot_expired", 0))) and ok
+	ok = _check(int(stats.get("rot_kills", 0)) > 0 and int(stats.get("rot_found", 0)) > 0 and int(stats.get("rot_placed", 0)) == int(stats.get("rot_found", 0)), "el Putrefacto no se ha jugado (matas %d, hallazgos %d, colocaciones %d)" % [int(stats.get("rot_kills", 0)), int(stats.get("rot_found", 0)), int(stats.get("rot_placed", 0))]) and ok
+	ok = _check(int(stats.get("rd0_with_exit", 0)) == 0, "un bot no fácil robó con rotDepth = 0 teniendo una salida (%d veces)" % int(stats.get("rd0_with_exit", 0))) and ok
+	print("    %d partidas Plus con Cripta + rotten (3-5 jugadores, niveles y reglas mezclados): el Putrefacto mató %d veces (%.2f/partida), se encontró boca abajo %d veces; bots no fáciles que robaron con rotDepth = 0: %d (de ellos, teniendo una salida en la mano: %d); plazos de rot vencidos: %d" % [games, int(stats.get("rot_kills", 0)), float(stats.get("rot_kills", 0)) / games, int(stats.get("rot_found", 0)), int(stats.get("rd0_draws", 0)), int(stats.get("rd0_with_exit", 0)), int(stats.get("rot_expired", 0))])
+	if ok:
+		_ok("%d partidas con Cripta + rotten: sin atascos ni cartas perdidas, ningún plazo de rot vence y ningún bot no fácil roba con rotDepth = 0 teniendo salida" % games)
+
+
+func _rot_difficulty() -> void:
+	var res := {}
+	var games := 300
+	for rot: bool in [false, true]:
+		var wins := {"easy": 0, "normal": 0, "hard": 0}
+		for i in games:
+			var levels := ["easy", "normal", "hard"]
+			var lv := {}
+			for k in 3:
+				lv["b%d" % k] = levels[(i + k) % 3]   # asientos rotados
+			var w := _rot_sim_levels(lv, 52000 + i, rot)
+			if w == "":
+				return
+			wins[lv[w]] += 1
+		res[rot] = [100.0 * float(wins["hard"]) / games, 100.0 * float(wins["normal"]) / games, 100.0 * float(wins["easy"]) / games]
+	print("    Cripta, 3 jugadores (un fácil, un normal y un difícil, asientos rotados; azar 33%%) - sin rotten: difícil %.0f%%, normal %.0f%%, fácil %.0f%%   con rotten: difícil %.0f%%, normal %.0f%%, fácil %.0f%%" % [res[false][0], res[false][1], res[false][2], res[true][0], res[true][1], res[true][2]])
+	var r: Array = res[true]
+	if _check(r[0] > r[1] and r[1] > r[2], "con rotten las dificultades no están ordenadas (difícil %.0f, normal %.0f, fácil %.0f)" % [r[0], r[1], r[2]]):
+		_ok("con rotten se mantiene difícil > normal > fácil")
+
+
+## Partida de 3 bots con niveles dados (id -> nivel) y la regla rotten. Devuelve el id del ganador.
+func _rot_sim_levels(lv: Dictionary, seed_value: int, rot: bool) -> String:
+	var rng := Rng.new(seed_value)
+	var ps: Array = []
+	for id: String in lv:
+		ps.append({"id": id, "name": id, "bot": true})
+	var g := Game.new({"players": ps, "deck_mode": "official", "rng": rng, "now": 0, "plus": true, "packs": ["crypt"], "rules": {"rotten": rot}})
+	var bots := Bots.new(g, lv, rng.next, true)
+	var now := 0
+	var steps := 0
+	var first := 0
+	while g.over == null:
+		steps += 1
+		if not _check(steps < 20000, "rotten (dificultad): partida interminable (semilla %d)" % seed_value):
+			return ""
+		g.tick(now)
+		bots.learn()
+		var acted := false
+		for k in 3:
+			var id: String = ps[(first + k) % 3].id
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			if not _check(err == "", "rotten (dificultad): acción rechazada %s" % err):
+				return ""
+			acted = true
+			first = (first + k + 1) % 3
+			break
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if g.over != null:
+				break
+			if not _check(d >= 0, "rotten (dificultad): partida atascada (semilla %d)" % seed_value):
+				return ""
+			now = maxi(now + 1, d)
+	return g.over.winner
+
+
+## Solo informe: duración media con y sin la regla.
+func _rot_duration() -> void:
+	var mix := ["easy", "normal", "hard"]
+	for n: int in [3, 4, 5]:
+		var off := {}
+		var on := {}
+		for s in 40:
+			_rot_game(n, 63000 + s * 17 + n, "official", mix, {}, false, off)
+			_rot_game(n, 63000 + s * 17 + n, "official", mix, {}, true, on)
+		print("    %d jugadores - acciones/partida: sin rotten %.0f, con rotten %.0f   turnos/partida: sin %.0f, con %.0f" % [n, float(off.actions) / off.games, float(on.actions) / on.games, float(off.turns) / off.games, float(on.turns) / on.games])

@@ -211,7 +211,7 @@ func _clean_rules(raw: Dictionary) -> Dictionary:
 			out.erase("hand")
 		elif _is_num(raw.hand):
 			out["hand"] = clampi(int(raw.hand), 4, 8)
-	for k: String in ["nope_fixed", "sudden_death"]:
+	for k: String in ["nope_fixed", "sudden_death", "rotten"]:
 		if raw.get(k) is bool:
 			out[k] = raw[k]
 	return out

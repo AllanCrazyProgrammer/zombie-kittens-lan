@@ -15,7 +15,7 @@ const DECK := [
 	["dig_deeper", 2, 2], ["clairvoyance", 1, 1],
 	["cat_a", 2, 2], ["cat_b", 2, 2], ["cat_c", 2, 2], ["cat_d", 2, 2],
 ]
-## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: falta la carta 10, `rotten` (otra tarea).
+## Cartas de packs (Plus). Mismo formato que DECK. «La Cripta»: el `rotten` no está aquí: sustituye a un explosivo en `_setup` (regla rotten).
 const DECK_CRYPT := [
 	["targeted_attack", 0, 1], ["reverse", 0, 1], ["draw_bottom", 0, 1], ["crow_eye", 1, 1], ["apocalypse", 0, 1],
 	["alter_future", 1, 1], ["bury", 0, 1], ["soul_swap", 0, 1], ["haunt", 0, 1],
@@ -46,6 +46,7 @@ class Card:
 	var id: String
 	var type: String
 	var paw: bool
+	var up: bool = false   # solo el Putrefacto llega a tener up = true (boca arriba en el mazo)
 
 	func _init(p_id: String, p_type: String, p_paw: bool) -> void:
 		id = p_id
@@ -179,9 +180,26 @@ static func _sanitize_rules(raw: Variant) -> Dictionary:
 		out["hand"] = clampi(int(r["hand"]), 4, 8)
 	if r.get("sudden_death") is bool:
 		out["sudden_death"] = r["sudden_death"]
+	if r.get("rotten") is bool:
+		out["rotten"] = r["rotten"]
 	if r.get("crypt_copies") is Dictionary:
 		out["crypt_copies"] = (r["crypt_copies"] as Dictionary).duplicate(true)
 	return out
+
+
+## Gatito Putrefacto activo: Plus + pack La Cripta + rules.rotten + 3 o más jugadores.
+func _rot_on() -> bool:
+	return plus and packs.has("crypt") and bool(rules.get("rotten", false)) and players.size() >= 3
+
+
+## Cartas por encima del Putrefacto si está en el mazo boca arriba; -1 en cualquier otro caso (información pública).
+func rot_depth() -> int:
+	if not plus:
+		return -1
+	for i in range(draw.size() - 1, -1, -1):
+		if draw[i].up:
+			return draw.size() - 1 - i
+	return -1
 
 
 func _turn_ms() -> int:
@@ -257,8 +275,12 @@ func _setup(mode: String) -> void:
 		for p in players:
 			if cards.size() > 0:
 				p.hand.append(cards.pop_back())
-	for _i in n - 1:
-		cards.append(eks.pop_back())
+	var rot_on := _rot_on()
+	for i in n - 1:
+		var ek: Card = eks.pop_back()
+		if rot_on and i == 0:
+			ek.type = "rotten"   # sustituye a uno de los explosivos (sin consumir azar)
+		cards.append(ek)
 	shuffle_arr(cards, rnd)
 	draw = cards
 	cur = int(floor(rnd.call() * n))
@@ -517,6 +539,7 @@ func act(player_id: String, a: Variant, now: int) -> String:
 		"insert": err = _do_insert(p, a.get("positions"), now)
 		"reorder": err = _do_reorder(p, a.get("order"), now)
 		"bury": err = _do_bury(p, a.get("pos"), now)
+		"rot": err = _do_rot(p, a.get("pos"), now)
 		"give": err = _do_give(p, a.get("card"), now)
 		"dig": err = _do_dig(p, bool(a.get("keep", false)), now)
 		_: err = "Acción desconocida."
@@ -784,7 +807,7 @@ func _apply(s: Dictionary, now: int) -> void:
 			var eks: Array[Card] = []
 			var rest: Array[Card] = []
 			for c in draw:
-				if c.type == "exploding":
+				if c.type == "exploding" or (c.type == "rotten" and not c.up):
 					eks.append(c)
 				else:
 					rest.append(c)
@@ -896,6 +919,15 @@ func _do_draw(p: Player, now: int) -> String:
 
 
 func _receive(p: Player, c: Card, now: int) -> void:
+	if c.type == "rotten":
+		if c.up:
+			# Boca arriba: muerte instantánea, sin `explode` (ni Zombi ni Clon)
+			emit("boom", {"player": p.id, "rotten": true, "text": "☣ " + p.name + " robó el Gatito Putrefacto boca arriba y está MUERTO. Ni el Zombi lo salva."})
+			_die(p, c, now)
+			return
+		emit("rot_found", {"player": p.id, "text": p.name + " encontró al Gatito Putrefacto… ¡ahora decide dónde lo deja!"})
+		prompt = {"type": "rot", "player": p.id, "card": c, "start": now, "deadline": _dl([p.id], now)}
+		return
 	if c.type == "exploding":
 		var td: Variant = top_discard()
 		var can_save: bool = p.find_type("zombie") != null or (p.find_type("clone") != null and td != null and td.card.type == "zombie")
@@ -922,7 +954,10 @@ func _die(p: Player, card: Card, now: int) -> void:
 	prompt = null
 	p.alive = false
 	p.ek = card
-	emit("died", {"player": p.id, "text": "💥 " + p.name + " explotó y está MUERTO (por ahora)."})
+	if card.type == "rotten":
+		emit("died", {"player": p.id, "text": "☣ " + p.name + " se pudrió y está MUERTO (por ahora)."})
+	else:
+		emit("died", {"player": p.id, "text": "💥 " + p.name + " explotó y está MUERTO (por ahora)."})
 	var alive := living()
 	if alive.size() <= 1:
 		over = {"winner": alive[0].id if alive.size() > 0 else null}
@@ -942,6 +977,7 @@ func _do_revive(p: Player, target: Variant, _now: int) -> String:
 	if t == null or t.alive:
 		return "Elige a un jugador muerto."
 	t.alive = true
+	t.ek.up = false   # el Putrefacto revivido vuelve al mazo boca abajo
 	pr.eks.append(t.ek)
 	t.ek = null
 	pr.revived = t.id
@@ -1033,6 +1069,28 @@ func _do_bury(p: Player, pos: Variant, now: int) -> String:
 	return ""
 
 
+## Gatito Putrefacto: `pos` 0 = arriba del mazo … draw.size() = fondo. La carta queda boca arriba.
+func _do_rot(p: Player, pos: Variant, now: int) -> String:
+	var pr: Variant = prompt
+	if pr == null or pr.type != "rot" or pr.player != p.id:
+		return "No puedes hacer eso ahora."
+	if not (pos is int or pos is float) or float(pos) != floor(float(pos)) or pos < 0 or pos > draw.size():
+		return "Posición fuera del mazo."
+	var at: int = int(pos)
+	var c: Card = pr.card
+	c.up = true
+	draw.insert(draw.size() - at, c)
+	mut += 1
+	shuf += 1
+	tops = 0
+	prompt = null
+	var where := "en la cima del mazo" if at == 0 else ("a 1 carta" if at == 1 else "a %d cartas" % at)
+	emit("rot_placed", {"player": p.id, "depth": at, "len": draw.size(), "text": p.name + " lo deja boca arriba " + where + "."})
+	_end_turn(now)
+	_settle(now)
+	return ""
+
+
 func _do_dig(p: Player, keep: bool, now: int) -> String:
 	var pr: Variant = prompt
 	if pr == null or pr.type != "dig" or pr.player != p.id:
@@ -1101,7 +1159,7 @@ func _sd_handover(prev: int) -> void:
 		return
 	_sd_done.clear()
 	for i in draw.size():   # índice 0 = fondo
-		if draw[i].type != "exploding":
+		if draw[i].type != "exploding" and draw[i].type != "rotten":
 			removed.append(draw.pop_at(i))
 			mut += 1
 			emit("sudden", {"left": draw.size(), "text": "Muerte súbita: se retira una carta del mazo."})
@@ -1214,6 +1272,8 @@ func _auto_prompt(now: int) -> void:
 			_do_reorder(P(pr.player), ident, now)
 		"bury":
 			_do_bury(P(pr.player), int(floor(rnd.call() * (draw.size() + 1))), now)
+		"rot":
+			_do_rot(P(pr.player), int(floor(rnd.call() * (draw.size() + 1))), now)
 
 
 ## Huella barata del estado: si cambia, hay algo nuevo que mostrar a los jugadores.
@@ -1262,6 +1322,7 @@ func view(player_id: String, now: int) -> Dictionary:
 		v["tops"] = tops
 		v["shuf"] = shuf
 		v["rules"] = rules.duplicate(true)
+		v["rotDepth"] = rot_depth()
 		if _turn_running():
 			v["turn"] = {"remain": maxi(0, turn_since + _turn_ms() - now), "total": _turn_ms()}
 		v["discard"] = discard.slice(maxi(0, discard.size() - 20)).map(func(d: Dictionary) -> Dictionary: return {"id": d.card.id, "type": d.card.type, "by": d.by})
@@ -1305,6 +1366,11 @@ func view(player_id: String, now: int) -> Dictionary:
 				if o.mine:
 					o.cards = pr.cards.map(func(c: Card) -> String: return c.type)
 			"bury":
+				o.player = pr.player
+				o.mine = pr.player == player_id
+				if o.mine:
+					o.card = pr.card.type
+			"rot":
 				o.player = pr.player
 				o.mine = pr.player == player_id
 				if o.mine:

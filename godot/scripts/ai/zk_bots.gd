@@ -7,7 +7,7 @@ extends RefCounted
 ## Port de la IA de web/www/room.js.
 
 const VALUE := {"zombie": 10, "nope": 7, "attack": 6, "attack_dead": 6, "super_skip": 6, "skip": 5, "see_future": 4, "shuffle": 4, "dig_deeper": 4, "clone": 4, "favor": 3, "clairvoyance": 2, "feed_dead": 2, "grave_robber": 2,
-	"apocalypse": 6, "targeted_attack": 6, "bury": 5, "alter_future": 5, "draw_bottom": 5, "soul_swap": 4, "reverse": 4, "crow_eye": 3, "haunt": 3}
+	"apocalypse": 6, "targeted_attack": 6, "bury": 5, "alter_future": 5, "draw_bottom": 5, "soul_swap": 4, "reverse": 4, "crow_eye": 3, "haunt": 3, "rotten": 6}
 const EASY_PLAYS := ["attack", "skip", "super_skip", "see_future", "shuffle", "dig_deeper", "favor", "attack_dead", "grave_robber"]
 ## Cartas de La Cripta que el bot fácil añade a su lista (solo Plus)
 const EASY_PLAYS_PLUS := ["targeted_attack", "reverse", "draw_bottom", "crow_eye", "apocalypse", "alter_future", "bury", "soul_swap"]
@@ -176,7 +176,7 @@ func _learn_event_plus(e: Dictionary) -> void:
 		"cancel":
 			if e.get("eff", "") == "see_future" or e.get("eff", "") == "alter_future":
 				_rival_peek = {}
-		"shuffle", "inserted":
+		"shuffle", "inserted", "rot_placed":
 			_rival_peek = {}
 		"draw":
 			if not _rival_peek.is_empty() and not e.get("bottom", false):
@@ -328,12 +328,14 @@ func decide(id: String) -> Dictionary:
 					worst = c
 			return {"a": "give", "card": worst.id}
 		if pr.type == "dig" and pr.player == id:
-			return {"a": "dig", "keep": pr.card.type != "exploding" or (easy and rnd.call() < 0.5)}
+			return {"a": "dig", "keep": not _lethal(pr.card) or (easy and rnd.call() < 0.5)}
 		if plus and pr.get("player") == id:
 			if pr.type == "alter":
 				return _alter_plus(id, level, pr)
 			if pr.type == "bury":
 				return _bury_plus(id, level, pr)
+			if pr.type == "rot":
+				return _rot_plus(id, level)
 		if pr.type != "zombie":
 			return {}
 		if hard and pr.player != id and g.stack.is_empty():
@@ -574,10 +576,39 @@ func _random_play_plus(id: String, c: ZKGame.Card) -> Dictionary:
 	return _play(c)
 
 
+## ¿La carta mata a quien la roba? Explosivo, o Putrefacto boca arriba (boca abajo no mata: abre la decisión `rot`).
+static func _lethal(c: ZKGame.Card) -> bool:
+	return c.type == "exploding" or (c.type == "rotten" and c.up)
+
+
+## Lo que el bot sabe de la próxima carta. Con el Putrefacto boca arriba arriba (rotDepth = 0, público) es muerte segura:
+## se trata como un explosivo conocido para que todas las salidas se activen.
+func _top(id: String) -> String:
+	if game.rot_depth() == 0:
+		return "exploding"
+	return known(id, 0)
+
+
+## ¿La carta a cierta profundidad es un peligro conocido? Explosivo recordado o Putrefacto boca arriba (rotDepth).
+func _bad_at(id: String, depth: int) -> bool:
+	return known(id, depth) == "exploding" or game.rot_depth() == depth
+
+
+## Decisión `rot`: fácil al azar; normal y difícil arriba si el siguiente en robar es un rival, al fondo si vuelvo a robar yo.
+func _rot_plus(_id: String, level: String) -> Dictionary:
+	var n := game.draw.size()
+	if level == "easy":
+		return {"a": "rot", "pos": int(floor(rnd.call() * (n + 1)))}
+	return {"a": "rot", "pos": n if game.turns_left > 1 else 0}
+
+
 ## Probabilidad de que la próxima carta sea un explosivo, usando lo que el bot sabe del mazo.
 func _danger_plus(id: String, top: String) -> float:
 	if top != "":
 		return 1.0 if top == "exploding" else 0.0
+	var rd := game.rot_depth()
+	if rd == 0:
+		return 1.0   # Putrefacto boca arriba arriba del mazo: robar es muerte segura
 	var m: Variant = _mem.get(id)
 	var kn := 0
 	var ke := 0
@@ -586,8 +617,13 @@ func _danger_plus(id: String, top: String) -> float:
 		for d: int in m.at:
 			var dd := d - off
 			if dd > 0 and dd < game.draw.size():
+				if rd >= 0 and m.at[d] == "rotten":
+					continue   # el Putrefacto boca arriba se cuenta con rotDepth, no dos veces
 				kn += 1
-				ke += 1 if m.at[d] == "exploding" else 0
+				ke += 1 if (m.at[d] == "exploding" or m.at[d] == "rotten") else 0
+	if rd > 0 and rd < game.draw.size():
+		kn += 1   # explosivo de posición conocida (el Putrefacto boca arriba)
+		ke += 1
 	var eks_in := game.living().size() - 1
 	return float(maxi(0, eks_in - ke)) / float(maxi(1, game.draw.size() - kn))
 
@@ -689,7 +725,7 @@ func _alter_plus(_id: String, level: String, pr: Dictionary) -> Dictionary:
 	var bombs: Array = []
 	var safe: Array = []
 	for i in m:
-		(bombs if cards[i].type == "exploding" else safe).append(i)
+		(bombs if _lethal(cards[i]) else safe).append(i)
 	if bombs.is_empty():
 		return {"a": "reorder", "order": ident}
 	if level == "hard":
@@ -715,7 +751,7 @@ func _bury_plus(id: String, level: String, pr: Dictionary) -> Dictionary:
 		return {"a": "bury", "pos": int(floor(rnd.call() * (n + 1)))}
 	var again := game.turns_left > 1
 	var pos := 0
-	if pr.card.type == "exploding":
+	if _lethal(pr.card):
 		pos = n if again else 0
 	else:
 		pos = 0 if again else n
@@ -745,7 +781,7 @@ func _free_play_plus(id: String, me: ZKGame.Player, level: String) -> Dictionary
 	var sh := me.find_type("shuffle")
 	if sh == null:
 		return {}
-	var top := known(id, 0)
+	var top := _top(id)
 	if top != "" and top != "exploding":
 		return {}
 	var danger := _danger_plus(id, top)
@@ -813,12 +849,16 @@ func _dodge_plus(id: String, me: ZKGame.Player, hard: bool, top: String, danger:
 		if not r.is_empty():
 			return r
 	var tcau := _tr(id) == TRAIT_CAUTIOUS
-	if g.draw.size() > 1 and not _bottom_hidden(id) and (top == "exploding" or (hard and danger >= 0.34 * _risk_f(id)) or (tcau and danger >= 0.2)):
+	if g.draw.size() > 1 and not _bottom_hidden(id) and g.rot_depth() != g.draw.size() - 1 and (top == "exploding" or (hard and danger >= 0.34 * _risk_f(id)) or (tcau and danger >= 0.2)):
 		r = _try(id, me.find_type("draw_bottom"))
 		if not r.is_empty():
 			return r
+	if g.rot_depth() == 0 and g.draw.size() >= 2:
+		r = _try(id, me.find_type("alter_future"))   # Putrefacto boca arriba arriba: lo aparta de mi robo
+		if not r.is_empty():
+			return r
 	if hard:
-		if g.draw.size() > 1 and known(id, 1) != "exploding":
+		if g.draw.size() > 1 and not _bad_at(id, 1):
 			r = _try(id, me.find_type("dig_deeper"))
 			if not r.is_empty():
 				return r
@@ -907,7 +947,7 @@ func _turn_plus(id: String, me: ZKGame.Player, hard: bool, others: Array, dead_n
 	var g := game
 	if g.draw.is_empty():
 		return {"a": "draw"}
-	var top := known(id, 0)
+	var top := _top(id)
 	var danger := _danger_plus(id, top)
 	var zs := _count_of(me, "zombie")
 	var r: Dictionary
