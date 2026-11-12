@@ -172,6 +172,8 @@ func _process(delta: float) -> void:
 		r.halo.modulate = Color(UIKit.C.toxic.r, UIKit.C.toxic.g, UIKit.C.toxic.b, 0.65 + 0.35 * pulse)
 		r.halo.scale = Vector3.ONE * (1.0 + 0.07 * pulse)
 		r.floor.scale = Vector3(1.5, 0.3, 1.0) * (1.0 + 0.12 * pulse)
+	if _floor_mat == null:
+		return      # ningún rival válido: aún no se creó ningún aro
 	_floor_mat.albedo_color = Color(UIKit.C.toxic.r, UIKit.C.toxic.g, UIKit.C.toxic.b, 0.55 + 0.4 * pulse)
 	# Atenuado de los asientos no válidos (la pantalla restablece los colores al salir)
 	for id: String in _valid:

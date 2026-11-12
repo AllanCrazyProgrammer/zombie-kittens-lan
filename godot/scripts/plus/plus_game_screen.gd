@@ -30,7 +30,7 @@ var _modal := {}           # ventana propia de la interfaz (elegir objetivo, ver
 var _ins: Array[int] = [0, 0]
 var _give_sel := ""
 var _log_last := ""
-## Historial de la partida: [{text, kind}] (kind: "turn" separador, "me" privado, "" normal). El más nuevo al final.
+## Historial de la partida: [{text, kind, player, target, mine, cards}] (kind: "turn" separador, "me" privado, "" normal). El más nuevo al final.
 var _history: Array[Dictionary] = []
 const HISTORY_MAX := 300
 var _time := 0.0
@@ -117,6 +117,12 @@ var _dir_label: Label            # «↺ INVERTIDO» junto al distintivo PLUS (s
 var _memory := DeckMemory.new()  # lo que sé de posiciones concretas del mazo (UX-02)
 var _mem_strip: DeckMemoryStrip  # tira con las próximas cartas conocidas, junto al mazo
 var _first_view := true          # la próxima vista es la primera de esta pantalla (UX-15)
+var _stats := MatchStats.new()   # contadores de la ventana final (UX-09), desde los eventos públicos
+var room_scores := {}            # {id: victorias} del marcador de sala (otra tarea); vacío = sin columna
+var _hist_mine := false          # filtro del historial: solo lo mío (UX-12)
+var _auto_pass := NopWindow.load_auto_pass()   # «Dejar pasar lo que no me afecta» (UX-05)
+var _auto_sig := ""              # jugada sobre la que ya se pasó sola
+var _nop_lit: Array[String] = [] # Nop de la mano resaltados mientras puedo responder
 var replay_skipped := 0          # solo prueba: eventos antiguos registrados sin efectos al abrir la pantalla (UX-15)
 
 
@@ -275,6 +281,7 @@ func _refresh() -> void:
 	var pr0: Variant = _v.prompt
 	_alter_live = pr0 != null and pr0.mine and pr0.type == "alter"
 	_update_hud()
+	_check_auto_pass()
 
 
 func _me() -> Dictionary:
@@ -373,6 +380,7 @@ func _sorted_hand() -> Array:
 
 func _sync_hand() -> void:
 	var hand := _sorted_hand()
+	_nop_lit = NopWindow.nop_ids(_v)
 	var ids := {}
 	var discard_ids := {}
 	for d: Dictionary in _v.discard:
@@ -423,7 +431,9 @@ func _sync_hand() -> void:
 			pos += Vector3(0, 0.1, -0.2)
 		elif hovered:
 			pos += Vector3(0, 0.07, -0.12)
-		n.set_glow(0.16 if selected else (0.1 if hovered else 0.0))
+		var lit := _nop_lit.has(hand[i].id)
+		# Los Nop brillan (sin moverse del abanico: así no tapan a sus vecinas ni cambian dónde se toca)
+		n.set_glow(0.16 if selected else (0.1 if hovered else (0.5 if lit else 0.0)))
 		var grow := 1.08 if selected else (1.05 if hovered else 1.0)
 		n.fly_to(pos, Vector3(0, -ang, 0), 0.12 if hovered else 0.3, hand_scale * grow)
 
@@ -680,6 +690,7 @@ func _process_events() -> void:
 		if e.has("text") and not e.has("to"):
 			_log_last = e.text
 		_record(e)
+		_stats.feed(e, _v.players)
 		if quiet:
 			replay_skipped += 1
 			continue
@@ -1403,8 +1414,8 @@ func _update_hud() -> void:
 		_status.text = "%s %s %s%s" % [_pname(t.by), verb, what, st]
 		_status_timer.visible = true
 		_track(_status_timer, v.win)
-		if v.win.canNope and not v.win.passed:
-			_add_btn(_buttons, "¡NOP!", "danger", _play_nope)
+		if NopWindow.can_respond(v):
+			_add_btn(_buttons, NopWindow.button_text(v), "danger", _play_nope)
 			_add_btn(_buttons, "Dejar pasar", "normal", func() -> void: _act({"a": "pass"}))
 	elif pr != null:
 		var who := _pname(pr.get("player"))
@@ -1665,6 +1676,7 @@ func _build_modal() -> void:
 		var won: bool = v.over.winner == v.you
 		var box := _open_modal("¡GANASTE!" if won else "Ganó " + _pname(v.over.winner), UIKit.C.toxic if won else UIKit.C.gold)
 		_text(box, "Eres el último gatito con vida." if won else "Fue el último gatito con vida.")
+		box.add_child(_stats.build_table(v, room_scores))
 		if not session.is_network():
 			_add_btn(box, "JUGAR OTRA VEZ", "primary", func() -> void: rematch_requested.emit(), 54)
 			_add_btn(box, "Volver al menú", "ghost", func() -> void: exit_requested.emit())
@@ -1745,7 +1757,16 @@ func _build_modal() -> void:
 			DeckMemoryStrip.fill_window(box, _memory.known(v), int(v.draw))
 			_add_btn(box, "Cerrar", "primary", _close_modal)
 		"history":
-			_build_history(_open_modal("Historial"))
+			var box := _open_modal("Historial")
+			var avatars := {}
+			for p: Dictionary in v.players:
+				avatars[p.id] = int(p.avatar)
+			var hl := HistoryList.new().setup(_history, _hist_mine, avatars, get_viewport().get_visible_rect().size.y * 0.5)
+			hl.filter_changed.connect(func(mine: bool) -> void:
+				_hist_mine = mine
+				_update_hud())
+			box.add_child(hl)
+			_add_btn(box, "Cerrar", "primary", _close_modal)
 		"discard":
 			var box := _open_modal("Descarte")
 			_text(box, "Las cartas jugadas, la más reciente arriba.", 28, UIKit.C.dim)
@@ -1763,6 +1784,8 @@ func _build_modal() -> void:
 			box.add_child(audio)
 			_add_btn(audio, "Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34)
 			_add_btn(audio, "Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34)
+			_add_btn(box, "Paso automático: sí" if _auto_pass else "Paso automático: no", "normal", _toggle_auto_pass, 34)
+			_text(box, "Dejar pasar lo que no me afecta: no se te pide Nop ante jugadas ajenas que no van contra ti.", 24, UIKit.C.dim)
 			_add_btn(box, "Salir de la partida", "danger", _ask_exit, 40)
 		"exit":
 			var box := _open_modal("¿Salir de la partida?")
@@ -1785,6 +1808,29 @@ func _ask_exit() -> void:
 func _toggle_sfx() -> void:
 	Sfx.set_sfx(not Sfx.sfx_on)
 	_update_hud()
+
+
+func _toggle_auto_pass() -> void:
+	_auto_pass = not _auto_pass
+	NopWindow.save_auto_pass(_auto_pass)
+	_update_hud()
+	_check_auto_pass()
+
+
+## Con «Paso automático» activo, envía «pasar» ante una jugada ajena que no me afecta (una vez por jugada).
+func _check_auto_pass() -> void:
+	if not _auto_pass or not NopWindow.should_auto_pass(_v):
+		return
+	var sig := NopWindow.signature(_v)
+	if sig == _auto_sig:
+		return
+	_auto_sig = sig
+	_auto_pass_send.call_deferred(sig)
+
+
+func _auto_pass_send(sig: String) -> void:
+	if _auto_pass and NopWindow.signature(_v) == sig and NopWindow.should_auto_pass(_v):
+		_act({"a": "pass"})
 
 
 func _toggle_music() -> void:
@@ -1920,7 +1966,13 @@ func _record(e: Dictionary) -> void:
 				kind = "me"
 	if text == "":
 		return
-	_history.append({"text": text, "kind": kind})
+	var me: String = _v.you
+	_history.append({
+		"text": text, "kind": kind,
+		"player": e.get("player"), "target": e.get("target"),
+		"mine": kind == "me" or e.get("player") == me or e.get("target") == me,
+		"cards": HistoryList.cards_of(e),
+	})
 	if _history.size() > HISTORY_MAX:
 		_history.pop_front()
 
@@ -1937,39 +1989,67 @@ func _open_history() -> void:
 	_update_hud()
 
 
-func _build_history(box: VBoxContainer) -> void:
-	_text(box, "Los turnos más recientes arriba. En verde, lo que solo tú viste.", 28, UIKit.C.dim)
-	var scroll := ScrollContainer.new()
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.custom_minimum_size = Vector2(0, get_viewport().get_visible_rect().size.y * 0.55)
-	box.add_child(scroll)
-	var list := UIKit.vbox(8)
-	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.add_child(list)
-	if _history.is_empty():
-		_text(list, "Aún no pasa nada.", 32, UIKit.C.dim)
-	# Se agrupa por turno: los turnos más recientes arriba y, dentro de cada turno, en el orden en que pasó
-	var blocks: Array = [{"title": "Inicio", "items": []}]
-	for h: Dictionary in _history:
-		if h.kind == "turn":
-			blocks.append({"title": h.text, "items": []})
-		else:
-			blocks[-1].items.append(h)
-	for bi in range(blocks.size() - 1, -1, -1):
-		var b: Dictionary = blocks[bi]
-		if b.items.is_empty() and bi != blocks.size() - 1:
-			continue
-		var t := UIKit.label("— %s —" % b.title, 36, UIKit.C.gold, true)
-		t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		list.add_child(t)
-		for h: Dictionary in b.items:
-			list.add_child(UIKit.label(h.text, 30, Color("c8ff8a") if h.kind == "me" else UIKit.C.ink, false, true))
-	_add_btn(box, "Cerrar", "primary", _close_modal)
-
-
 ## Para la prueba automática.
 func debug_history_size() -> int:
 	return _history.size()
+
+
+## Para la prueba (UX-12): entradas del historial con el filtro dado.
+func debug_history_count(mine_only: bool) -> int:
+	return HistoryList.count(_history, mine_only)
+
+
+## Para la prueba (UX-12): entradas dibujadas en la ventana «Historial» abierta (-1 si no está abierta).
+func debug_history_rows() -> int:
+	var hl := _find_history(_modal_root)
+	return hl.debug_rows() if hl != null else -1
+
+
+## Para la prueba (UX-12): {avatars, thumbs, blockers} de la ventana abierta.
+func debug_history_info() -> Dictionary:
+	var hl := _find_history(_modal_root)
+	return hl.debug_info() if hl != null else {}
+
+
+func _find_history(n: Node) -> HistoryList:
+	if n is HistoryList:
+		return n
+	for c in n.get_children():
+		var r := _find_history(c)
+		if r != null:
+			return r
+	return null
+
+
+## Para la prueba (UX-05): textos de los botones de la zona inferior.
+func debug_buttons() -> Array[String]:
+	var out: Array[String] = []
+	for b in _buttons.get_children():
+		if b is Button:
+			out.append(b.text)
+	return out
+
+
+## Para la prueba (UX-05): ids de los Nop resaltados en la mano.
+func debug_nop_lit() -> Array[String]:
+	return _nop_lit
+
+
+## Para la prueba (UX-05): activa o apaga el paso automático sin guardarlo en los ajustes.
+func debug_set_auto_pass(on: bool) -> void:
+	_auto_pass = on
+	_auto_sig = ""
+	_check_auto_pass()
+
+
+## Para la prueba (UX-05): texto de estado de la zona inferior.
+func debug_status() -> String:
+	return _status.text
+
+
+## Para la prueba (UX-09): contadores acumulados.
+func debug_stats() -> MatchStats:
+	return _stats
 
 
 ## Para la prueba automática: la carta de arriba de la pila de descarte (para tocarla).

@@ -725,6 +725,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_aim(dir, report)
 	await _ui_test_cripta(dir, report)
 	await _ui_test_memoria(dir, report)
+	await _ui_test_ux(dir, report)
 
 
 ## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
@@ -761,6 +762,12 @@ func _ui_test_aim(dir: String, report: Array) -> void:
 			await _wait(0.5)
 	else:
 		_say(report, "Plus/puntería: AVISO, la mano no tiene carta con objetivo ni pareja; se FUERZA el modo puntería con debug_force_aim('living')")
+		_game.debug_force_aim("living")
+		await _wait(0.5)
+	if not _game.debug_aim_active():
+		# La jugada natural no abrió el modo (otra ventana abierta, sin rivales con cartas...): se fuerza, como si no hubiera carta
+		_say(report, "Plus/puntería: AVISO, la jugada natural no abrió el modo puntería; se FUERZA con debug_force_aim('living')")
+		_game.debug_clear_selection()
 		_game.debug_force_aim("living")
 		await _wait(0.5)
 	_say(report, "Plus/puntería: modo activo=%s tipo=%s | válidos=%s no válidos=%s | panel: %s" % [str(_game.debug_aim_active()), _game.debug_aim_kind(), str(_game.debug_aim_ids(true)), str(_game.debug_aim_ids(false)), _game.debug_info_text().replace("\n", " / ")])
@@ -862,8 +869,8 @@ func _cripta_close_windows() -> bool:
 
 ## Espera a que la partida esté libre (sin pila ni decisión) y me devuelve el turno (vivo, un solo turno).
 func _cripta_my_turn(lm: LocalMatch, alive: bool = true, attempt: int = 0) -> bool:
-	if attempt >= 2:
-		# Tras dos jugadas anuladas por Nop seguidas, se quitan los Nop de las manos rivales para poder comprobar el efecto
+	if attempt >= 1:
+		# Tras una jugada anulada por Nop (los bots actuales usan más Nop), se quitan los Nop de las manos rivales para poder comprobar el efecto
 		for pl in lm.game.players:
 			if pl.id != "p0":
 				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
@@ -1629,3 +1636,258 @@ func _ui_test_memoria(dir: String, report: Array) -> void:
 	for pl in g.players:
 		pl.alive = true
 	_session.updated.emit()
+
+
+# ---------------------------------------------------------------- ventana de Nop, historial con iconos y resumen final (UX-05, UX-09, UX-12)
+
+func _ux_line(report: Array, what: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/%s: %s | %s" % [what, detail, "OK" if ok else "ERROR"])
+
+
+func _ux_give(g: ZKGame, pid: String, type: String) -> String:
+	_cripta_n += 1
+	var c := ZKGame.Card.new("z%d" % _cripta_n, type, false)
+	g.P(pid).hand.append(c)
+	return c.id
+
+
+## Todos vivos, sin pila ni decisión; el jugador con `nopes` Nop, p2 con uno (para que la jugada siga en la pila) y cartas de relleno.
+func _ux_reset(g: ZKGame, nopes: int) -> void:
+	g.stack.clear()
+	g.prompt = null
+	for pl in g.players:
+		pl.alive = true
+		pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
+	for _i in nopes:
+		_ux_give(g, "p0", "nope")
+	_ux_give(g, "p2", "nope")
+	_ux_give(g, "p0", "skip")
+	g.over = null
+
+
+## `by` juega una carta (con objetivo opcional) en su turno y espera a que la pantalla lo muestre.
+func _ux_play(lm: LocalMatch, by: String, type: String, target: String = "") -> String:
+	var g := lm.game
+	g.cur = g.players.find(g.P(by))
+	g.turns_left = 1
+	g.attacked = false
+	var id := _ux_give(g, by, type)
+	var a := {"a": "play", "cards": [id]}
+	if target != "":
+		a["target"] = target
+	var err := g.act(by, a, lm.now())
+	_session.updated.emit()
+	await _wait(0.7)
+	return err
+
+
+func _ui_test_ux(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/nop: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	var cfg0 := ConfigFile.new()
+	cfg0.load("user://settings.cfg")
+	var had_key := cfg0.has_section_key("plus", "auto_pass")
+	var old_val: Variant = cfg0.get_value("plus", "auto_pass", false)
+	_game.debug_set_auto_pass(false)
+	await _cripta_my_turn(lm)
+	lm.set_process(false)          # los bots no actúan: el estado queda tal como lo fuerzo
+	# --- UX-05: botón con el número de Nop y Nop de la mano levantados
+	_ux_reset(g, 2)
+	var err := await _ux_play(lm, "p1", "skip")
+	var btns: Array[String] = _game.debug_buttons()
+	var lit: Array[String] = _game.debug_nop_lit()
+	_ux_line(report, "nop", "2 Nop ante una jugada ajena (err «%s»): botones %s | Nop resaltados %d" % [err, str(btns), lit.size()], err == "" and btns.has("¡NOP! ×2") and btns.has("Dejar pasar") and lit.size() == 2)
+	await _save_shot(dir + "/t30_nop_x2.png")
+	_ux_reset(g, 1)
+	err = await _ux_play(lm, "p1", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "1 Nop: botones %s (sin «×»)" % str(btns), btns.has("¡NOP!") and not btns.has("¡NOP! ×2"))
+	_ux_reset(g, 2)
+	err = await _ux_play(lm, "p0", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "jugada mía (err «%s»): botones %s | resaltados %d | texto «%s»" % [err, str(btns), _game.debug_nop_lit().size(), _game.debug_status().replace("\n", " / ")], err == "" and btns.is_empty() and _game.debug_nop_lit().is_empty() and _game.debug_status().begins_with("Tú juegas"))
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "sin Nop (err «%s»): botones %s | texto «%s»" % [err, str(btns), _game.debug_status().replace("\n", " / ")], err == "" and btns.is_empty() and _game.debug_status().contains("juega"))
+	# --- Paso automático
+	_ux_reset(g, 2)
+	_game.debug_set_auto_pass(true)
+	err = await _ux_play(lm, "p1", "skip")
+	var t: Variant = g.top()
+	_ux_line(report, "nop", "paso automático ante Saltar ajeno (err «%s»): pasé=%s, botones %s" % [err, str(t != null and t.passed.has("p0")), str(_game.debug_buttons())], err == "" and t != null and t.passed.has("p0") and _game.debug_buttons().is_empty())
+	_ux_reset(g, 2)
+	err = await _ux_play(lm, "p1", "favor", "p0")
+	t = g.top()
+	_ux_line(report, "nop", "paso automático ante un Favor contra mí (err «%s»): pasé=%s, botones %s" % [err, str(t != null and t.passed.has("p0")), str(_game.debug_buttons())], err == "" and t != null and t.target == "p0" and not t.passed.has("p0") and _game.debug_buttons().has("¡NOP! ×2"))
+	_game.debug_set_auto_pass(false)
+	# Reglas de «me afecta» sobre vistas sintéticas
+	var v: Dictionary = _session.view()
+	var mk := func(eff: String, by: String, nopes: int, turns_left: int, dir: int) -> Dictionary:
+		var w: Dictionary = v.duplicate(true)
+		w["stack"] = [{"id": 9, "eff": eff, "of": null, "by": by, "target": null, "named": null, "nopes": nopes, "last": by}]
+		w["cur"] = by
+		w["turnsLeft"] = turns_left
+		w["dir"] = dir
+		for pl: Dictionary in w.players:
+			pl["alive"] = true
+		return w
+	var r1: bool = NopWindow.affects(mk.call("attack", "p4", 0, 1, 1))          # tras p4 viene p0
+	var r2: bool = NopWindow.affects(mk.call("attack", "p1", 0, 1, 1))          # tras p1 viene p2
+	var r3: bool = NopWindow.affects(mk.call("attack", "p1", 0, 1, -1))         # sentido inverso: tras p1 viene p0
+	var r4: bool = NopWindow.affects(mk.call("apocalypse", "p4", 0, 1, 1))
+	var r5: bool = NopWindow.affects(mk.call("apocalypse", "p4", 0, 2, 1))      # repite turno: roba p4
+	var r6: bool = NopWindow.affects(mk.call("shuffle", "p1", 0, 1, 1))
+	var r7: bool = NopWindow.affects(mk.call("skip", "p0", 1, 1, 1))            # un Nop anuló mi jugada
+	_ux_line(report, "nop", "me afecta: ataque a mi turno %s/%s/%s, apocalipsis %s/%s, barajar %s, mi jugada anulada %s" % [str(r1), str(r2), str(r3), str(r4), str(r5), str(r6), str(r7)], r1 and not r2 and r3 and r4 and not r5 and not r6 and r7)
+	# Ajuste en el menú de pausa: se guarda en [plus] auto_pass
+	var menu := _find_button(self, "MENÚ")
+	var toggled := false
+	var saved_on := false
+	if menu:
+		await _tap_control(menu)
+		await _wait(0.4)
+		var b := _find_button(self, "Paso automático: no")
+		if b:
+			await _save_shot(dir + "/t31_menu_paso_automatico.png")
+			await _tap_control(b)
+			await _wait(0.3)
+			var cfg1 := ConfigFile.new()
+			cfg1.load("user://settings.cfg")
+			saved_on = bool(cfg1.get_value("plus", "auto_pass", false))
+			var b2 := _find_button(self, "Paso automático: sí")
+			var found2 := b2 != null
+			if found2:
+				await _tap_control(b2)
+				await _wait(0.3)
+			toggled = found2 and not NopWindow.load_auto_pass()
+		var back := _find_button(self, "Seguir jugando")
+		if back:
+			await _tap_control(back)
+			await _wait(0.3)
+	# Se restaura el archivo de ajustes del usuario
+	var cfg2 := ConfigFile.new()
+	cfg2.load("user://settings.cfg")
+	if had_key:
+		cfg2.set_value("plus", "auto_pass", old_val)
+	elif cfg2.has_section_key("plus", "auto_pass"):
+		cfg2.erase_section_key("plus", "auto_pass")
+	cfg2.save("user://settings.cfg")
+	var cfg3 := ConfigFile.new()
+	cfg3.load("user://settings.cfg")
+	_ux_line(report, "nop", "ajuste en el menú: guardado sí=%s, vuelto a no=%s | archivo restaurado=%s" % [str(saved_on), str(toggled), str(cfg3.has_section_key("plus", "auto_pass") == had_key)], saved_on and toggled and cfg3.has_section_key("plus", "auto_pass") == had_key)
+	_ux_reset(g, 2)
+	_session.updated.emit()
+	await _wait(0.3)
+
+	# --- UX-12: historial con iconos y filtro
+	var hist := _find_button(self, "HISTORIAL")
+	if hist:
+		await _tap_control(hist)
+		await _wait(0.6)
+		var all_n: int = _game.debug_history_count(false)
+		var rows_all: int = _game.debug_history_rows()
+		var info: Dictionary = _game.debug_history_info()
+		_ux_line(report, "historial", "todo: %d entradas (esperadas %d) | %d avatares, %d miniaturas | controles que bloquean el toque: %d" % [rows_all, all_n, int(info.get("avatars", 0)), int(info.get("thumbs", 0)), int(info.get("blockers", -1))], rows_all == all_n and all_n > 10 and int(info.get("avatars", 0)) > 3 and int(info.get("thumbs", 0)) > 0 and int(info.get("blockers", -1)) == 0)
+		await _save_shot(dir + "/t32_historial_todo.png")
+		var mine := _find_button(self, "Solo lo mío")
+		var found_mine := mine != null
+		if found_mine:
+			await _tap_control(mine)
+			await _wait(0.6)
+		var rows_mine: int = _game.debug_history_rows()
+		_ux_line(report, "historial", "filtro «Solo lo mío»: %d entradas (esperadas %d) frente a %d" % [rows_mine, _game.debug_history_count(true), rows_all], found_mine and rows_mine == _game.debug_history_count(true) and rows_mine > 0 and rows_mine < rows_all)
+		await _save_shot(dir + "/t33_historial_mio.png")
+		var all_btn := _find_button(self, "Todo")
+		if all_btn:
+			await _tap_control(all_btn)
+			await _wait(0.4)
+		var close := _find_button(self, "Cerrar")
+		if close:
+			await _tap_control(close)
+			await _wait(0.3)
+	else:
+		_ux_line(report, "historial", "no hay botón HISTORIAL", false)
+
+	# --- UX-09: resumen final con una partida forzada a terminar
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
+	var stats: MatchStats = _game.debug_stats()
+	var seq0 := g.seq
+	var turns0 := {}
+	var before := {}        # contadores previos: la partida de la prueba ya tuvo sus propias explosiones y Nops
+	for pl in g.players:
+		turns0[pl.id] = int(stats.of(pl.id).turns)
+		before[pl.id] = stats.of(pl.id)
+	var now := lm.now()
+	g.cur = 1
+	g._die(g.P("p1"), ZKGame.Card.new("zk1", "exploding", false), now)                  # p1 explota
+	g.P("p1").alive = true                                                              # y lo revivieron
+	g.emit("revived", {"player": "p0", "target": "p1", "text": "p0 revive a p1."})
+	g.cur = 1
+	g._die(g.P("p1"), ZKGame.Card.new("zk2", "exploding", false), now)                  # explota otra vez
+	g.emit("nope", {"player": "p2", "yup": false, "text": "p2 dice NOP."})
+	g.emit("nope", {"player": "p2", "yup": true, "text": "p2 dice NOP otra vez."})
+	g.emit("steal", {"player": "p3", "target": "p0", "text": "p3 roba."})
+	g.emit("steal", {"player": "p0", "target": "p4", "text": "p0 roba."})
+	g.emit("gave", {"player": "p4", "target": "p0", "text": "p4 da un favor."})
+	g._die(g.P("p2"), ZKGame.Card.new("zk3", "exploding", false), now)
+	g._die(g.P("p3"), ZKGame.Card.new("zk4", "exploding", false), now)
+	g._die(g.P("p4"), ZKGame.Card.new("zk5", "exploding", false), now)                  # solo queda p0: gana
+	_session.updated.emit()
+	var rows: Array = []
+	for _i in 80:
+		await _wait(0.5)
+		if (_game.debug_modal_title() == "¡GANASTE!" or _game.debug_modal_title().begins_with("Ganó")) and (stats.debug_rows() as Array).size() == g.players.size():
+			break
+	await _wait(0.6)
+	rows = stats.debug_rows()
+	var turns_ok := true
+	var by_id := {}
+	for r: Dictionary in rows:
+		by_id[r.id] = r
+	for pl in g.players:
+		var expect := 0
+		for e: Dictionary in g.events:
+			if e.seq > seq0 and e.type == "turn" and e.player == pl.id:
+				expect += 1
+		turns_ok = turns_ok and by_id.has(pl.id) and int(by_id[pl.id].values[4]) == turns0[pl.id] + expect
+	var want := {"p1": [2, 1, 0, 0], "p2": [1, 0, 2, 0], "p3": [1, 0, 0, 1], "p4": [1, 0, 0, 0], "p0": [0, 0, 0, 2]}
+	var counts_ok := rows.size() == 5
+	var shown := []
+	for id: String in want:
+		if not by_id.has(id):
+			counts_ok = false
+			continue
+		var b: Dictionary = before[id]
+		var vals: Array = [int(by_id[id].values[0]) - int(b.boom), int(by_id[id].values[1]) - int(b.revived), int(by_id[id].values[2]) - int(b.nopes), int(by_id[id].values[3]) - int(b.steals)]
+		shown.append("%s=%s" % [id, str(vals)])
+		counts_ok = counts_ok and vals == want[id]
+	var win_ok := rows.size() == 5
+	for r: Dictionary in rows:
+		win_ok = win_ok and r.winner == (r.id == "p0") and (r.border == UIKit.C.gold) == (r.id == "p0")
+	_ux_line(report, "resumen", "ventana «%s», %d filas | contadores añadidos %s | turnos coherentes con los eventos=%s | solo p0 resaltado=%s" % [_game.debug_modal_title(), rows.size(), " ".join(PackedStringArray(shown)), str(turns_ok), str(win_ok)], counts_ok and turns_ok and win_ok and _game.debug_modal_title() == "¡GANASTE!")
+	await _save_shot(dir + "/t34_resumen_final.png")
+	var btn_ok := _find_button(self, "JUGAR OTRA VEZ") != null and _find_button(self, "Volver al menú") != null
+	_ux_line(report, "resumen", "botones de la ventana final conservados=%s" % str(btn_ok), btn_ok)
+	# Una pantalla abierta sobre la partida ya terminada cuenta también los eventos antiguos
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await _wait(0.4)
+	var s2: MatchStats = g2.debug_stats()
+	var old_ok: bool = int(s2.of("p1").boom) >= 2 and int(s2.of("p1").revived) >= 1 and int(s2.of("p2").nopes) >= 2 and int(s2.of("p0").steals) >= 2
+	_ux_line(report, "resumen", "pantalla nueva: p1 explotó %d, revivido %d, p2 Nops %d, p0 robos %d (%d eventos antiguos sin efectos)" % [int(s2.of("p1").boom), int(s2.of("p1").revived), int(s2.of("p2").nopes), int(s2.of("p0").steals), g2.replay_skipped], old_ok and g2.replay_skipped > 0)
+	g2.queue_free()
+	await _wait(0.3)
+	# Hueco del marcador de sala: con {id: victorias} aparece una columna más
+	var sc := MatchStats.new().build_table(_session.view(), {"p0": 3, "p1": 1})
+	var sc_head: HBoxContainer = sc.get_child(0).get_child(0)
+	_ux_line(report, "resumen", "marcador de sala preparado: columnas %d (con victorias) frente a 6" % sc_head.get_child_count(), sc_head.get_child_count() == 7)
+	sc.free()
+	lm.set_process(true)
