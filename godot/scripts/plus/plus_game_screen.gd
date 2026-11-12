@@ -56,6 +56,7 @@ const TIPS := {
 	"nope": "¡Tienes un Nop! Toca ¡NOP! para anular esta jugada, o «Dejar pasar» si no te importa.",
 	"risk": "El riesgo de explotar ya es alto. Antes de robar, considera usar Saltar, Ataque o Ver el Futuro.",
 	"aim": "Toca al rival que quieres elegir: los resaltados son válidos. Toca CANCELAR para volver sin jugar la carta.",
+	"rot": "☣ El Gatito Putrefacto está boca ARRIBA en el mazo (mira el rótulo verde). Quien lo robe así, muere: ni el Zombi lo salva. Usa Saltar, Ataque o Barajar si te toca robarlo.",
 	"dead": "Explotaste, pero conservas tu mano. Aún puedes jugar Nop y cartas ⚡, y otro jugador puede revivirte con su Gatito Zombi.",
 }
 
@@ -118,12 +119,35 @@ var _memory := DeckMemory.new()  # lo que sé de posiciones concretas del mazo (
 var _mem_strip: DeckMemoryStrip  # tira con las próximas cartas conocidas, junto al mazo
 var _first_view := true          # la próxima vista es la primera de esta pantalla (UX-15)
 var _stats := MatchStats.new()   # contadores de la ventana final (UX-09), desde los eventos públicos
-var room_scores := {}            # {id: victorias} del marcador de sala (otra tarea); vacío = sin columna
 var _hist_mine := false          # filtro del historial: solo lo mío (UX-12)
 var _auto_pass := NopWindow.load_auto_pass()   # «Dejar pasar lo que no me afecta» (UX-05)
 var _auto_sig := ""              # jugada sobre la que ya se pasó sola
 var _nop_lit: Array[String] = [] # Nop de la mano resaltados mientras puedo responder
 var replay_skipped := 0          # solo prueba: eventos antiguos registrados sin efectos al abrir la pantalla (UX-15)
+# --- Tiempo de turno (UX-07)
+var _turn_bar: ProgressBar       # barra del panel de turno
+var _turn_end := 0               # instante (ms de la sesión) en que se agota el turno; solo vale con _turn_total > 0
+var _turn_total := 0             # duración del turno en ms (0 = sin límite)
+var _turn_player := ""           # jugador al que corresponde _turn_end
+var _turn_blink := -1            # estado visual de la barra: 0 normal, 1 rojo, 2 rojo apagado
+var _alarm_done := false         # ya sonó la alarma de los últimos 10 s en este turno
+var _tick_sec := -1              # último segundo para el que sonó el tic
+var dbg_ticks := 0               # prueba: tics y alarmas sonados
+var dbg_alarms := 0
+var dbg_timeouts := 0            # prueba: avisos «Se acabó el tiempo»
+# --- Gatito Putrefacto
+var _rot_card: Card3D            # carta boca arriba asomando de lado en el mazo
+var _rot_glow: MeshInstance3D    # marco verde bajo esa carta
+var _rot_label: Label3D          # «☣ en N» junto al contador del mazo
+var _rot_depth := -1
+var _rot_death := false          # la próxima muerte es por el Putrefacto (tinte verde)
+# --- Sonido, avisos y música
+static var _screens := 0         # pantallas Plus vivas: la música por capas se apaga al cerrar la última
+var _last_eff := ""              # última carta jugada (para distinguir el Ataque Dirigido)
+var _sudden_snd := false         # el sonido de muerte súbita solo suena la primera vez
+var _music_key := ""
+var _sfx_log: Array[String] = [] # prueba: últimos sonidos pedidos
+var _vol_sliders := {}           # prueba: deslizadores del menú de pausa
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -178,11 +202,40 @@ func _ready() -> void:
 	_dir_ring = DirIndicator.new()
 	_dir_ring.position = Vector3(0, 0.016, -0.2)
 	add_child(_dir_ring)
+	_rot_label = Label3D.new()
+	_rot_label.font = UIKit.TITLE_FONT
+	_rot_label.font_size = 80
+	_rot_label.pixel_size = 0.0022
+	_rot_label.outline_size = 24
+	_rot_label.modulate = Color("9be21c")
+	_rot_label.outline_modulate = UIKit.C.dark
+	_rot_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_rot_label.no_depth_test = true
+	_rot_label.visible = false
+	add_child(_rot_label)
 	_build_hud()
+	_screens += 1
+	Sfx.set_layers(true)       # música por capas mientras se juega en Plus
 	_opps.chip_pressed.connect(_aim_pick)
 	session.updated.connect(_refresh)
 	session.error.connect(func(msg: String) -> void: _toast(msg, true))
 	_refresh()
+
+
+## Reproduce un efecto y lo anota (la prueba comprueba qué suena en cada evento).
+func _snd(sound: String, volume_db: float = 0.0, pitch_var: float = 0.05) -> void:
+	_sfx_log.append(sound)
+	if _sfx_log.size() > 60:
+		_sfx_log.pop_front()
+	Sfx.play(sound, volume_db, pitch_var)
+
+
+## Prueba: sonidos pedidos desde que se vació el registro.
+func debug_sounds(clear: bool = false) -> Array[String]:
+	var out := _sfx_log.duplicate()
+	if clear:
+		_sfx_log.clear()
+	return out
 
 
 func _process(delta: float) -> void:
@@ -197,6 +250,8 @@ func _process(delta: float) -> void:
 		av.scale = Vector3.ONE * (1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0))
 	_place_strip()
 	var now := session.now()
+	_tick_turn(now)
+	_pulse_rot()
 	for t: Array in _timers:
 		if is_instance_valid(t[0]):
 			t[0].value = clampf(float(t[1] - now) / float(maxi(1, t[2])), 0.0, 1.0) * 100.0
@@ -274,13 +329,19 @@ func _refresh() -> void:
 		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
 	_sync_seats()
 	_process_events()
+	_anchor_turn()
 	_sync_deck()
+	_sync_rot()
 	_sync_hand()
 	_sync_discard()
 	_sync_dir()
 	var pr0: Variant = _v.prompt
-	_alter_live = pr0 != null and pr0.mine and pr0.type == "alter"
+	var alter_now: bool = pr0 != null and pr0.mine and pr0.type == "alter"
+	if alter_now and not _alter_live:
+		_snd("alter")          # se abre Alterar el Futuro
+	_alter_live = alter_now
 	_update_hud()
+	_sync_music()
 	_check_auto_pass()
 
 
@@ -335,6 +396,187 @@ func _sync_deck() -> void:
 	_deck_label.text = str(_v.draw)
 	_deck_label.position = _deck_top() + Vector3(0, 0.3, 0)
 	_deck_label.visible = _v.draw > 0
+
+
+# ---------------------------------------------------------------- tiempo de turno (UX-07)
+
+## Fija el fin del turno a partir de la vista (solo en `_refresh`: las demás redibujadas no mueven el reloj).
+func _anchor_turn() -> void:
+	var tn: Variant = _v.get("turn")
+	if tn == null or _v.over != null:
+		_turn_total = 0
+		return
+	var cur: String = _v.cur
+	if cur != _turn_player:
+		_turn_player = cur
+		_alarm_done = false
+		_tick_sec = -1
+	_turn_total = maxi(1, int(tn.total))
+	_turn_end = session.now() + int(tn.remain)
+
+
+## Cada cuadro: avanza la barra, parpadea en rojo en los últimos 10 s y, si el turno es mío, tic cada segundo y alarma al entrar.
+func _tick_turn(now: int) -> void:
+	if _turn_bar == null:
+		return
+	if _turn_total <= 0:
+		_turn_bar.visible = false
+		if _turn_blink != -1:
+			_turn_blink = -1
+			_opps.set_turn("", 0.0)
+			_paint_turn_panel(0)
+		return
+	var remain := _turn_end - now
+	var frac := clampf(float(remain) / float(_turn_total), 0.0, 1.0)
+	_turn_bar.visible = true
+	_turn_bar.value = frac * 100.0
+	var red := 0
+	if remain <= 10000:
+		red = 1 if int(_time * 4.0) % 2 == 0 else 2
+		if _my_turn() and remain > 0:
+			if not _alarm_done:
+				_alarm_done = true
+				dbg_alarms += 1
+				_snd("alarm", -2.0, 0.0)
+				Input.vibrate_handheld(300)
+			var sec := ceili(remain / 1000.0)
+			if sec != _tick_sec:
+				_tick_sec = sec
+				dbg_ticks += 1
+				_snd("tick", -3.0, 0.0)
+	elif remain > 10500:
+		_alarm_done = false
+	_opps.set_turn("" if _my_turn() else str(_v.cur), frac, red)
+	if red != _turn_blink:
+		_turn_blink = red
+		_paint_turn_panel(red)
+
+
+## Colores de la barra y del panel de turno según el estado (0 normal, 1 rojo, 2 rojo apagado).
+func _paint_turn_panel(red: int) -> void:
+	var col: Color = UIKit.C.gold if red == 0 else (UIKit.C.red if red == 1 else Color("7a1020"))
+	_turn_bar.add_theme_stylebox_override("fill", UIKit.box(col, col, 7, 0, Vector2.ZERO))
+	if _v.is_empty():
+		return
+	var my := _my_turn()
+	var border: Color = UIKit.C.toxic if my else UIKit.C.line
+	if red == 1:
+		border = UIKit.C.red
+	_turn_panel.add_theme_stylebox_override("panel", UIKit.box(Color("4a1424") if red == 1 else UIKit.C.panel, border, 30, 5, Vector2(20, 8)))
+
+
+## Prueba: estado de la barra de turno.
+func debug_turn() -> Dictionary:
+	return {"visible": _turn_bar != null and _turn_bar.visible, "value": _turn_bar.value if _turn_bar != null else 0.0,
+		"red": _turn_blink, "total": _turn_total, "remain": _turn_end - session.now(), "ticks": dbg_ticks, "alarms": dbg_alarms,
+		"chip": _opps.debug_turn_bar(str(_v.cur)) if not _v.is_empty() else {}}
+
+
+## Prueba: acerca el fin del turno (solo la pantalla; el motor no se toca).
+func debug_set_turn_remain(ms: int) -> void:
+	if _turn_total > 0:
+		_turn_end = session.now() + ms
+
+
+# ---------------------------------------------------------------- Gatito Putrefacto en el mazo
+
+## Carta boca arriba asomando de lado del mazo, a la altura aproximada, y el rótulo «☣ en N».
+func _sync_rot() -> void:
+	var d := int(_v.get("rotDepth", -1))
+	var n := int(_v.draw)
+	if d < 0 or d >= n or _v.over != null:
+		_rot_depth = -1
+		if is_instance_valid(_rot_card):
+			_rot_card.queue_free()
+		_rot_card = null
+		_rot_label.visible = false
+		return
+	_rot_depth = d
+	var vis := _deck_cards.size()
+	var idx := vis - 1 if n <= 1 else roundi(float(n - 1 - d) / float(n - 1) * float(maxi(0, vis - 1)))
+	var pos := DECK_POS + Vector3(0.2, 0.012 + idx * 0.007, 0.02)
+	if not is_instance_valid(_rot_card):
+		_rot_card = Card3D.new().setup("rotten", true)
+		_rot_card.position = pos + Vector3(0.0, 0.25, 0.0)
+		_rot_card.rotation.y = 0.14
+		for ch in _rot_card.get_children():
+			if ch is Area3D:
+				(ch as Area3D).input_ray_pickable = false     # no tapa el toque al mazo (robar sigue siendo tocar el mazo)
+		add_child(_rot_card)
+		_rot_glow = MeshInstance3D.new()
+		var pm := PlaneMesh.new()
+		pm.size = Vector2(0.71, 0.96)
+		_rot_glow.mesh = pm
+		var gm := StandardMaterial3D.new()
+		gm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		gm.albedo_color = Color(0.55, 0.9, 0.1, 0.9)
+		_rot_glow.material_override = gm
+		_rot_glow.position = Vector3(0, -0.0035, 0)
+		_rot_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_rot_card.add_child(_rot_glow)
+	_rot_card.fly_to(pos, Vector3(0, 0.14, 0), 0.35)
+	_rot_label.text = "☣ ¡ARRIBA!" if d == 0 else "☣ en %d" % d
+	_rot_label.position = _deck_top() + Vector3(0.42, 0.32, 0.05)
+	_rot_label.visible = true
+
+
+## El rótulo y el marco del Putrefacto pulsan en verde enfermizo; con `rotDepth == 0` pulsan deprisa.
+func _pulse_rot() -> void:
+	if _rot_depth < 0 or not _rot_label.visible:
+		return
+	var speed := 9.0 if _rot_depth == 0 else 3.0
+	var k := 0.5 + 0.5 * sin(_time * speed)
+	_rot_label.modulate = Color("9be21c").lerp(Color("d6ff6a"), k)
+	_rot_label.scale = Vector3.ONE * (1.0 + (0.14 * k if _rot_depth == 0 else 0.04 * k))
+	if is_instance_valid(_rot_glow):
+		(_rot_glow.material_override as StandardMaterial3D).albedo_color = Color(0.45 + 0.25 * k, 0.85, 0.1, 0.55 + 0.4 * k)
+
+
+## Texto de estado de la ficha de ese rival («Difícil · Agresivo», «su turno»…) (prueba).
+func debug_chip_state(id: String) -> String:
+	return _opps.debug_state_of(id)
+
+
+## Rótulo «MUERTE SÚBITA» visible junto al medidor (prueba).
+func debug_sudden() -> bool:
+	return _risk.debug_sudden()
+
+
+## Prueba: abre el menú de pausa.
+func debug_open_menu() -> void:
+	_open_menu()
+
+
+## Prueba: texto del primer consejo del tutorial pendiente ("" si ninguno).
+func debug_tip() -> String:
+	return _tip
+
+
+## Prueba: {depth, label, visible, card} del marcador del Putrefacto.
+func debug_rot() -> Dictionary:
+	return {"depth": _rot_depth, "label": _rot_label.text if _rot_label.visible else "", "card": is_instance_valid(_rot_card)}
+
+
+# ---------------------------------------------------------------- música por capas (A-01)
+
+## Intensidad según el riesgo de robar: tensión desde 30 %, percusión desde 50 % o mientras me atacan.
+func _sync_music() -> void:
+	if _v.is_empty():
+		return
+	var drums := 0.0
+	var tension := 0.0
+	if _v.over == null:
+		var pct := float(_risk.debug_risk().pct) / 100.0
+		var attacked_me: bool = _v.cur == _v.you and bool(_v.attacked) and int(_v.turnsLeft) > 1
+		if pct >= 0.30:
+			tension = 0.5 + 0.5 * clampf((pct - 0.30) / 0.4, 0.0, 1.0)
+		if pct >= 0.50 or attacked_me:
+			drums = 0.8
+	var key := "%.2f|%.2f" % [drums, tension]
+	if key != _music_key:
+		_music_key = key
+		Sfx.set_intensity(drums, tension)
 
 
 ## Pone la tira del recordatorio justo debajo del mazo (sigue su proyección en pantalla).
@@ -549,17 +791,17 @@ func _run_fx() -> void:
 
 
 ## El Gatito Explosivo sale del mazo, se voltea y queda temblando frente a la cámara.
-func _fx_reveal() -> void:
+func _fx_reveal(type: String = "exploding") -> void:
 	if _ek:
 		_ek.queue_free()
-	_ek = Card3D.new().setup("exploding", false)
+	_ek = Card3D.new().setup(type, false)
 	add_child(_ek)
 	_ek.position = _deck_top()
 	_ek.scale = Vector3.ONE * HAND_SCALE
 	if _bottom_draw:
 		_ek.position = _deck_bottom_out()
 		_bottom_draw = false
-	Sfx.play("fuse")
+	_snd("rotten" if type == "rotten" else "fuse")
 	world.shake(0.3)
 	_ek.fly_to(Vector3(0, 0.95, 0.3), Vector3(deg_to_rad(54.0), 0, 0), 0.45, 1.3)
 	_ek.flip()
@@ -580,34 +822,49 @@ func _fx_bottom_draw(player_id: String) -> void:
 		_ghost(_deck_bottom_out(), _pos_of(player_id))
 
 
-func _fx_die(player_id: String, mine: bool) -> void:
+func _fx_die(player_id: String, mine: bool, rotten: bool = false) -> void:
 	var at := _pos_of(player_id) + Vector3(0, 0.25, 0)
 	if _ek:
 		at = _ek.global_position
 		_ek.queue_free()
 		_ek = null
-	Vfx.explosion(self, at)
-	Vfx.shockwave(self, at)
-	Sfx.play("explosion", 2.0, 0.0)
-	world.flash(Color("ffd9a0"), 0.8)
+	if rotten:
+		# Muerte por el Putrefacto: mismo estallido, pero verde enfermizo en vez de fuego
+		Vfx.burst(self, at, [Color(0.85, 1, 0.5, 0.5), Color(0.55, 0.9, 0.1, 0.45), Color(0.2, 0.55, 0.05, 0.35), Color(0.0, 0.15, 0.0, 0.0)], Color(0.7, 1.0, 0.25, 1), 1.3)
+		Vfx.shockwave(self, at, Color(0.55, 0.9, 0.15))
+		_snd("rotten", 2.0, 0.0)
+		world.flash(Color("9be21c"), 0.7)
+	else:
+		Vfx.explosion(self, at)
+		Vfx.shockwave(self, at)
+		_snd("explosion", 2.0, 0.0)
+		world.flash(Color("ffd9a0"), 0.8)
 	world.shake(1.0)
 	Input.vibrate_handheld(350)
-	_popup("¡EXPLOTASTE!" if mine else "¡BOOM!", UIKit.C.red)
+	if rotten:
+		_popup("¡TE PUDRISTE!" if mine else "¡SE PUDRIÓ!", Color("9be21c"))
+	else:
+		_popup("¡EXPLOTASTE!" if mine else "¡BOOM!", UIKit.C.red)
 	# Un instante de cámara lenta para sentir el golpe
 	Engine.time_scale = 0.35
 	await get_tree().create_timer(0.16, true, false, true).timeout
 	Engine.time_scale = 1.0
 	await get_tree().create_timer(0.55).timeout
+	_snd("tomb")
 
 
 func _fx_over(won: bool) -> void:
-	Sfx.play("win" if won else "lose", 0.0, 0.0)
+	_snd("win" if won else "lose", 0.0, 0.0)
 	if won:
 		_confetti()
 
 
 func _exit_tree() -> void:
 	Engine.time_scale = 1.0
+	_screens = maxi(0, _screens - 1)
+	if _screens == 0:
+		Sfx.set_intensity(0.0, 0.0)
+		Sfx.set_layers(false)
 
 
 func _slashes() -> void:
@@ -696,44 +953,48 @@ func _process_events() -> void:
 			continue
 		match e.type:
 			"start":
-				Sfx.play("shuffle")
+				_snd("shuffle")
 			"play":
-				Sfx.play("card")
+				_snd("card")
+				_last_eff = str(e.get("eff", ""))
 			"draw":
-				Sfx.play("draw", -3.0)
+				_snd("draw", -3.0)
 				if e.get("bottom", false):
+					_snd("bottom")
 					_fx_bottom_draw(e.player)
 				elif e.player != me:
 					_ghost(_deck_top(), _pos_of(e.player))
+				# Robó justo al agotarse su turno: lo hizo el motor por tiempo
+				if _turn_total > 0 and e.player == _turn_player and session.now() >= _turn_end - 300:
+					_toast("Se acabó el tiempo: robas una carta." if e.player == me else "Se acabó el tiempo: %s roba." % _pname(e.player), true)
+					dbg_timeouts += 1
 			"turn":
 				if e.player == me and _v.over == null:
 					_popup("¡TU TURNO!", UIKit.C.toxic)
-					Sfx.play("turn")
+					_snd("turn")
 					Input.vibrate_handheld(40)
 			"nope":
-				Sfx.play("yup" if e.yup else "nope")
+				_snd("yup" if e.yup else "nope")
 				_popup("¡SIP!" if e.yup else "¡NOP!", UIKit.C.toxic if e.yup else UIKit.C.red)
 				world.flash(UIKit.C.toxic if e.yup else UIKit.C.red, 0.22, 0.3)
 			"attack":
-				Sfx.play("attack")
+				_snd("targeted" if _last_eff == "targeted_attack" else "attack")
 				_slashes()
 				world.shake(0.4)
 				if e.target == me:
 					_popup("¡TE ATACAN! ×%d" % int(e.n), UIKit.C.red)
-					Sfx.play("alarm")
+					_snd("alarm")
 					Input.vibrate_handheld(150)
 			"shuffle":
-				Sfx.play("shuffle")
+				_snd("shuffle")
 				_jiggle_deck()
 			"reverse":
-				Sfx.play("shuffle")
-				Sfx.play("turn", -3.0)
+				_snd("reverse")
 				world.flash(Color("49e0e6"), 0.25, 0.4)
 				world.shake(0.25)
 				_popup("¡MARCHA ATRÁS!", Color("49e0e6"))
 			"apocalypse":
-				Sfx.play("alarm")
-				Sfx.play("explosion", -6.0, 0.0)
+				_snd("apocalypse")
 				world.flash(UIKit.C.red, 0.55, 0.7)
 				world.shake(0.9)
 				Input.vibrate_handheld(200)
@@ -741,7 +1002,7 @@ func _process_events() -> void:
 				_popup("¡APOCALIPSIS!", UIKit.C.red)
 				_toast(e.text, true)
 			"swap":
-				Sfx.play("steal")
+				_snd("swap")
 				_ghost(_pos_of(e.player), _pos_of(e.target))
 				_ghost(_pos_of(e.target), _pos_of(e.player))
 				world.flash(Color("8a5cff"), 0.2, 0.35)
@@ -749,8 +1010,7 @@ func _process_events() -> void:
 				_known_hands.erase(e.player)      # lo visto con Ojo de Cuervo ya no vale
 				_known_hands.erase(e.target)
 			"haunt":
-				Sfx.play("steal")
-				Sfx.play("zombie", -7.0)
+				_snd("haunt")
 				# La carta descartada vuela de la víctima a la pila: lo hace _sync_discard (el descarte lleva `by` = víctima)
 				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
 				world.flash(Color("8a5cff"), 0.2, 0.35)
@@ -761,31 +1021,48 @@ func _process_events() -> void:
 				else:
 					_popup("¡ESPANTO!", Color("c9a6ff"))
 			"peek":
-				Sfx.play("draw", -2.0)
 				_known_hands[e.target] = {"cards": (e.cards as Array).duplicate(), "count": (e.cards as Array).size()}
 				_modal = {"type": "peek", "target": e.target, "cards": e.cards}
 			"buried":
-				Sfx.play("card")
+				_snd("bury")
 				_jiggle_deck()
 				_toast(e.text)
 			"info":
-				if str(e.get("text", "")).ends_with("mira la mano de %s." % str(_me().get("name", "?"))):
-					Sfx.play("draw", -4.0)
-					_toast(e.text, true)      # a quien miran se le avisa
+				if str(e.get("text", "")).contains(" mira la mano de "):
+					_snd("crow")                # Ojo de Cuervo: lo oyen todos (lo ve solo quien juega)
+					if str(e.get("text", "")).ends_with("mira la mano de %s." % str(_me().get("name", "?"))):
+						_toast(e.text, true)      # a quien miran se le avisa
 			"steal":
-				Sfx.play("steal")
+				_snd("steal")
 				_ghost(_pos_of(e.target), _pos_of(e.player))
 				if e.target == me and e.has("card"):
 					_toast(e.text, true)
 			"gave":
-				Sfx.play("steal", -4.0)
+				_snd("steal", -4.0)
 				_ghost(_pos_of(e.player), _pos_of(e.target))
 			"boom":
-				_enqueue(_fx_reveal)
+				_rot_death = bool(e.get("rotten", false))
+				_enqueue(_fx_reveal.bind("rotten" if _rot_death else "exploding"))
 			"died":
-				_enqueue(_fx_die.bind(e.player, e.player == me))
+				_enqueue(_fx_die.bind(e.player, e.player == me, _rot_death))
+				_rot_death = false
+			"rot_found":
+				_snd("rotten")
+				_popup("¡PUTREFACTO!", Color("9be21c"))
+				world.flash(Color("9be21c"), 0.22, 0.4)
+				world.shake(0.3)
+				Input.vibrate_handheld(60)
+			"rot_placed":
+				_snd("card")
+				_jiggle_deck()
+				_toast("☣ " + str(e.text))
+			"sudden":
+				if not _sudden_snd:
+					_sudden_snd = true
+					_snd("sudden")
+				_toast(str(e.text), true)
 			"zombie":
-				Sfx.play("zombie")
+				_snd("zombie")
 				Vfx.zombie_rise(self, _ek.global_position if _ek else DISCARD_POS + Vector3(0, 0.15, 0))
 				world.flash(UIKit.C.toxic, 0.14)
 				world.shake(0.3)
@@ -798,9 +1075,9 @@ func _process_events() -> void:
 					c.flip()
 					var tw := c.fly_to(_deck_top(), Vector3.ZERO, 0.45, HAND_SCALE)
 					tw.chain().tween_callback(c.queue_free)
-					Sfx.play("card")
+					_snd("card")
 			"revived":
-				Sfx.play("revive")
+				_snd("revive")
 				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
 				if e.target == me:
 					_popup("¡REVIVISTE!", UIKit.C.toxic)
@@ -872,7 +1149,7 @@ func _set_hover(id: String) -> void:
 	_hover = id
 	if id != "":
 		hover_changes += 1
-		Sfx.play("tap", -14.0, 0.15)
+		_snd("tap", -14.0, 0.15)
 		Input.vibrate_handheld(8)
 	_sync_hand()
 	_update_zoom()
@@ -959,7 +1236,7 @@ func _start_carry(id: String, screen_pos: Vector2) -> void:
 	n.set_glow(0.2)
 	_carry_prev = n.global_position
 	_drop_ring.visible = true
-	Sfx.play("card", -4.0)
+	_snd("card", -4.0)
 	Input.vibrate_handheld(15)
 	_sync_hand()
 	_update_hud()          # el panel de abajo describe la carta que se lleva
@@ -1133,6 +1410,7 @@ func _request_target(kind: String) -> void:
 		_aim_kind = kind
 		_aim_forced = false
 		_modal = {}
+		_snd("aim", -2.0)
 	_update_hud()
 
 
@@ -1265,7 +1543,14 @@ func _build_hud() -> void:
 	_turn_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_turn = UIKit.label("", 50, UIKit.C.ink, true)
 	_turn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_turn_panel.add_child(_turn)
+	var turn_col := UIKit.vbox(2)
+	turn_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	turn_col.add_child(_turn)
+	_turn_bar = UIKit.timer_bar()          # tiempo de turno (UX-07): solo con la regla `turn_ms`
+	_turn_bar.custom_minimum_size = Vector2(0, 14)
+	_turn_bar.visible = false
+	turn_col.add_child(_turn_bar)
+	_turn_panel.add_child(turn_col)
 	bar.add_child(_turn_panel)
 	var hist := UIKit.button("HISTORIAL", "normal", 34)
 	hist.size_flags_horizontal = Control.SIZE_SHRINK_END
@@ -1367,14 +1652,14 @@ func _update_hud() -> void:
 	var cur := _player(v.cur)
 	_turn.text = ("TU TURNO" if my_turn else "Turno de " + cur.get("name", "")) + (("  ×%d" % v.turnsLeft) if v.turnsLeft > 1 else "")
 	_turn.add_theme_color_override("font_color", UIKit.C.toxic if my_turn else UIKit.C.ink)
-	_turn_panel.add_theme_stylebox_override("panel", UIKit.box(UIKit.C.panel, UIKit.C.toxic if my_turn else UIKit.C.line, 30, 5, Vector2(20, 8)))
+	_paint_turn_panel(maxi(0, _turn_blink))
 
 	# Modo puntería: asientos y fichas resaltados (también mientras se lleva una carta que pide objetivo)
 	var vis := _aim_vis_kind()
 	_aim.set_kind(vis, v, _seats)
 	_opps.set_aim({} if vis == "" else _aim_valid_map(vis))
 	_opps.set_pickable(_aim_kind != "")
-	_opps.update(v, session.level_of)
+	_opps.update(v, session.level_of, session.trait_of)
 	_risk.update(v)
 	_mem_strip.update(_memory.strip(v))
 
@@ -1438,6 +1723,7 @@ func _update_hud() -> void:
 			"dig": _status.text = "Cavas más hondo…" if pr.mine else "%s cava más hondo…" % who
 			"alter": _status.text = "Reordenas el futuro…" if pr.mine else "%s reordena el futuro…" % who
 			"bury": _status.text = "Entierras una carta…" if pr.mine else "%s entierra una carta…" % who
+			"rot": _status.text = "Decides dónde dejar al Gatito Putrefacto…" if pr.mine else "%s decide dónde deja al Gatito Putrefacto…" % who
 		_status_timer.visible = true
 		_track(_status_timer, pr)
 	else:
@@ -1647,7 +1933,7 @@ func _player_buttons(box: Node, players: Array, fn: Callable) -> void:
 
 ## Huella de una decisión propia con selector de mazo («zombie» / «bury»); "" si no es de ese tipo.
 func _picker_signature(pr: Variant) -> String:
-	if pr == null or not pr.mine or not (pr.type in ["zombie", "bury"]):
+	if pr == null or not pr.mine or not (pr.type in ["zombie", "bury", "rot"]):
 		return ""
 	return "%s|%d|%s|%s|%s|%s" % [pr.type, int(_v.draw), str(pr.get("eks")), str(pr.get("revived")), str(pr.get("waiting")), str(pr.get("card"))]
 
@@ -1676,7 +1962,7 @@ func _build_modal() -> void:
 		var won: bool = v.over.winner == v.you
 		var box := _open_modal("¡GANASTE!" if won else "Ganó " + _pname(v.over.winner), UIKit.C.toxic if won else UIKit.C.gold)
 		_text(box, "Eres el último gatito con vida." if won else "Fue el último gatito con vida.")
-		box.add_child(_stats.build_table(v, room_scores))
+		box.add_child(_stats.build_table(v, session.scores()))
 		if not session.is_network():
 			_add_btn(box, "JUGAR OTRA VEZ", "primary", func() -> void: rematch_requested.emit(), 54)
 			_add_btn(box, "Volver al menú", "ghost", func() -> void: exit_requested.emit())
@@ -1690,7 +1976,7 @@ func _build_modal() -> void:
 	var pr: Variant = v.prompt
 	if pr == null or not pr.mine or pr.type != "alter":
 		_alter_order = []
-	if pr == null or not (pr.type in ["zombie", "bury"]):
+	if pr == null or not (pr.type in ["zombie", "bury", "rot"]):
 		_ins = [0, 0]
 	if pr != null and pr.mine:
 		_build_prompt_modal(pr)
@@ -1779,19 +2065,55 @@ func _build_modal() -> void:
 			var info := UIKit.hbox(12)
 			box.add_child(info)
 			_add_btn(info, "Cómo jugar", "normal", func() -> void: InfoScreen.open(self, "rules"), 38)
-			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards", _v.get("packs", [])), 38)
+			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards", _v.get("packs", []), _v.get("rules", {})), 38)
 			var audio := UIKit.hbox(12)
 			box.add_child(audio)
 			_add_btn(audio, "Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34)
 			_add_btn(audio, "Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34)
+			_volume_row(box, "Efectos", Sfx.sfx_volume, func(x: float) -> void: Sfx.set_sfx_volume(x), true)
+			_volume_row(box, "Música", Sfx.music_volume, func(x: float) -> void: Sfx.set_music_volume(x), false)
 			_add_btn(box, "Paso automático: sí" if _auto_pass else "Paso automático: no", "normal", _toggle_auto_pass, 34)
 			_text(box, "Dejar pasar lo que no me afecta: no se te pide Nop ante jugadas ajenas que no van contra ti.", 24, UIKit.C.dim)
+			_text(box, active_rules_line(), 26, UIKit.C.gold)
 			_add_btn(box, "Salir de la partida", "danger", _ask_exit, 40)
 		"exit":
 			var box := _open_modal("¿Salir de la partida?")
 			_text(box, "Se perderá la partida en curso." if not session.is_network() else ("Eres el anfitrión: la partida termina para todos." if session.is_host() else "Podrás volver a entrar mientras la partida siga."))
 			_add_btn(box, "Seguir jugando", "primary", _close_modal)
 			_add_btn(box, "Salir al menú", "danger", func() -> void: exit_requested.emit())
+
+
+## Una línea con las reglas activas de la partida (cartas de pack y reglas opcionales), p. ej.
+## «La Cripta · Reglas: 30 s por turno · Gatito Putrefacto».
+func active_rules_line() -> String:
+	var parts: Array[String] = []
+	for pk: String in _v.get("packs", []):
+		parts.append(str(InfoScreen.PACK_TITLES.get(pk, pk)))
+	parts.append(MenuScreen.rules_summary(_v.get("rules", {})))
+	return " · ".join(PackedStringArray(parts))
+
+
+## Fila «Etiqueta + deslizador 0-100» de volumen. `tap`: suena un toque al soltar (para oír el nivel de los efectos).
+func _volume_row(box: Node, title: String, value: float, set_fn: Callable, tap: bool) -> void:
+	var row := UIKit.hbox(14)
+	box.add_child(row)
+	var l := UIKit.label(title, 32, UIKit.C.ink, true)
+	l.custom_minimum_size = Vector2(190, 0)
+	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(l)
+	var sl := UIKit.slider(100, roundi(value * 100.0))
+	sl.custom_minimum_size = Vector2(0, 64)
+	sl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sl.value_changed.connect(func(x: float) -> void: set_fn.call(x / 100.0))
+	if tap:
+		sl.drag_ended.connect(func(_changed: bool) -> void: Sfx.play("tap"))
+	row.add_child(sl)
+	_vol_sliders[title] = sl
+
+
+## Prueba: deslizadores de volumen de la ventana de menú abierta (título -> HSlider).
+func debug_volume_sliders() -> Dictionary:
+	return _vol_sliders
 
 
 func _open_menu() -> void:
@@ -1852,6 +2174,7 @@ func _coach_pick() -> void:
 	var risk := 100.0 * (alive - 1) / maxi(1, int(_v.draw))
 	var checks := [
 		["aim", _aim_kind != ""],
+		["rot", int(_v.get("rotDepth", -1)) >= 0],
 		["intro", true],
 		["dead", not me.alive],
 		["nope", _v.win != null and _v.win.canNope and not _v.win.passed],
@@ -1914,6 +2237,7 @@ func _confirm_insert() -> void:
 func _confirm_alter() -> void:
 	var order: Array = _arranger.order() if is_instance_valid(_arranger) else _alter_order
 	_alter_order = []
+	_snd("alter", -2.0)
 	_act({"a": "reorder", "order": order})
 
 
@@ -1921,6 +2245,12 @@ func _confirm_bury() -> void:
 	var pos := _ins[0]
 	_ins = [0, 0]
 	_act({"a": "bury", "pos": pos})
+
+
+func _confirm_rot() -> void:
+	var pos := _ins[0]
+	_ins = [0, 0]
+	_act({"a": "rot", "pos": pos})
 
 
 func _confirm_give() -> void:
@@ -2384,6 +2714,21 @@ func _build_prompt_modal(pr: Dictionary) -> void:
 			_track(bar, pr)
 			_picker_bar = bar
 			_add_btn(box, "CONFIRMAR", "primary", _confirm_bury, 54)
+		"rot":
+			var box := _open_modal("¡Encontraste al Gatito Putrefacto!", Color("9be21c"))
+			_text(box, "No pasa nada… esta vez. Déjalo boca ARRIBA donde quieras: quien lo robe así, muere.", 30)
+			_centered(box, UIKit.card_image("rotten", 300))
+			var max_pos: int = int(v.draw)
+			_ins[0] = mini(_ins[0], max_pos)
+			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0], "", _memory.known(v), 400)
+			picker.changed.connect(func(pos: int) -> void: _ins[0] = pos)
+			box.add_child(picker)
+			_slot_picker = picker
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_picker_bar = bar
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_rot, 54)
 		"dig":
 			var box := _open_modal("Cava Más Hondo")
 			_text(box, "Esta es la carta de arriba. ¿Te la quedas? Si no, DEBES robar la siguiente sea cual sea.")

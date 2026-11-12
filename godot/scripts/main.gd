@@ -9,7 +9,7 @@ extends Node3D
 ##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
 ##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
-##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen)
+##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen); --uitest-plus-part 1|2 la divide
 ##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
@@ -151,7 +151,15 @@ func _process(delta: float) -> void:
 
 
 func _save_shot(path: String) -> void:
-	await RenderingServer.frame_post_draw
+	# Con la ventana tapada el sistema puede dejar de pedir cuadros: se espera como mucho 2 s y se guarda lo que haya
+	var drawn := [false]
+	RenderingServer.frame_post_draw.connect(func() -> void: drawn[0] = true, CONNECT_ONE_SHOT)
+	var waited := 0.0
+	while not drawn[0] and waited < 2.0:
+		await get_tree().process_frame
+		waited += get_process_delta_time()
+	if not drawn[0]:
+		print("UITEST aviso: sin cuadro dibujado al capturar ", path.get_file())
 	get_viewport().get_texture().get_image().save_png(path)
 
 
@@ -495,12 +503,36 @@ func _wait(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout
 
 
+var _plus_part := 0
+
+
 func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var report: Array = []
 	await _wait(1.2)
 	_menu.set_plus(plus_mode, false)     # sin guardar: la prueba no cambia los ajustes del usuario
 	await _wait(0.3)
 	_say(report, "selector de modo visible: %s | modo de la prueba: %s" % [str(_find_button(self, "PLUS") != null and _find_button(self, "CLÁSICO") != null), "PLUS" if plus_mode else "CLÁSICO"])
+	# --uitest-plus-part N: 1 = recorrido completo salvo la parte T52/T62/T45; 2 = solo esa parte; sin N, todo
+	var user_args := OS.get_cmdline_user_args()
+	var pk := user_args.find("--uitest-plus-part")
+	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 3:        # solo los menús de Plus (para iterar rápido)
+		await _ui_test_t62_menus(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
+	if _plus_part == 4:        # sonido + menús (depuración)
+		await _ui_test_t62_sonido(dir, report)
+		print("UITEST tras sonido")
+		await _ui_test_t62_menus(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
+	if _plus_part == 2:
+		await _ui_test_t62(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
 	await _save_shot(dir + "/t1_menu.png")
 	await _tap_control(_find_button(self, "UN JUGADOR"))
 	await _wait(0.4)
@@ -726,6 +758,8 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_cripta(dir, report)
 	await _ui_test_memoria(dir, report)
 	await _ui_test_ux(dir, report)
+	if _plus_part != 1:
+		await _ui_test_t62(dir, report)
 
 
 ## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
@@ -1891,3 +1925,440 @@ func _ui_test_ux(dir: String, report: Array) -> void:
 	_ux_line(report, "resumen", "marcador de sala preparado: columnas %d (con victorias) frente a 6" % sc_head.get_child_count(), sc_head.get_child_count() == 7)
 	sc.free()
 	lm.set_process(true)
+
+
+# ---------------------------------------------------------------- tiempo de turno, Gatito Putrefacto, enlaces, sonido y menús de Plus (T52, T62, T45)
+
+## Empieza una partida Plus de un jugador con estas opciones y deja el motor quieto (los bots no actúan).
+func _t62_start(extra: Dictionary) -> LocalMatch:
+	var o := {"rivals": 2, "level": "normal", "deck_mode": "official", "name": "Prueba", "avatar": 0, "plus": true, "packs": ["crypt"], "rules": {}, "seed": 11}
+	o.merge(extra, true)
+	_start_solo(o)
+	await _wait(1.2)
+	var lm := _session as LocalMatch
+	lm.set_process(false)
+	return lm
+
+
+## Turno limpio de `pid`: sin pila ni decisión, con el reloj de turno a cero.
+func _t62_turn(lm: LocalMatch, pid: String) -> void:
+	var g := lm.game
+	g.stack.clear()
+	g.prompt = null
+	g.over = null
+	g.cur = g.players.find(g.P(pid))
+	g.turns_left = 1
+	g.attacked = false
+	g.idle_since = lm.now()
+	g.turn_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.5)
+
+
+func _t62_toast(text: String) -> bool:
+	return _tree_has_label(_game, text)
+
+
+func _ui_test_t62(dir: String, report: Array) -> void:
+	var cfg_text := FileAccess.get_file_as_string("user://settings.cfg")    # los ajustes del usuario se devuelven tal cual al final
+	var old_sfx: float = Sfx.sfx_volume
+	var old_music: float = Sfx.music_volume
+	if _game != null:
+		await _cripta_close_windows()
+	await _ui_test_t62_turno(dir, report)
+	await _ui_test_t62_putrefacto(dir, report)
+	await _ui_test_t62_enlaces(dir, report)
+	await _ui_test_t62_sonido(dir, report)
+	Sfx.set_sfx_volume(old_sfx)
+	Sfx.set_music_volume(old_music)
+	await _ui_test_t62_menus(dir, report)
+	var f := FileAccess.open("user://settings.cfg", FileAccess.WRITE)
+	if f:
+		f.store_string(cfg_text)
+		f.close()
+
+
+## UX-07: barra de tiempo, fase roja, tic/alarma y robo automático con su aviso.
+func _ui_test_t62_turno(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"turn_ms": 30000}})
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	await _t62_turn(lm, "p0")
+	var tn: Dictionary = _game.debug_turn()
+	_ux_line(report, "turno", "30 s: barra visible=%s valor %.0f roja=%d total %d ms (vista.turn=%s)" % [str(tn.visible), tn.value, tn.red, tn.total, str(_session.view().get("turn"))], tn.visible and tn.value > 85.0 and tn.red == 0 and tn.total == 30000)
+	await _save_shot(dir + "/t40_turno_barra.png")
+	# Últimos 10 s: el motor deja 8 s
+	g.turn_since = lm.now() - 22000
+	_session.updated.emit()
+	var red_seen := 0
+	for _i in 12:
+		await _wait(0.25)
+		var d: Dictionary = _game.debug_turn()
+		if d.red == 1 and red_seen == 0:
+			red_seen = 1
+			await _save_shot(dir + "/t41_turno_rojo.png")
+	await _wait(0.6)
+	tn = _game.debug_turn()
+	var snd: Array = _game.debug_sounds()
+	_ux_line(report, "turno", "8 s restantes: fase roja vista=%s | tics %d alarmas %d | sonidos tick=%s alarm=%s" % [str(red_seen == 1), tn.ticks, tn.alarms, str(snd.has("tick")), str(snd.has("alarm"))], red_seen == 1 and tn.ticks >= 2 and tn.alarms == 1 and snd.has("tick") and snd.has("alarm"))
+	# Turno de un rival humano: la barra se ve en su ficha
+	g.P("p1").bot = false
+	g.P("p1").connected = true
+	await _t62_turn(lm, "p1")
+	g.turn_since = lm.now() - 5000
+	_session.updated.emit()
+	await _wait(0.5)
+	tn = _game.debug_turn()
+	_ux_line(report, "turno", "turno de p1: panel superior visible=%s, ficha de p1 %s" % [str(tn.visible), str(tn.chip)], tn.visible and tn.chip.get("visible", false) and tn.chip.value > 50.0 and tn.chip.value < 95.0)
+	await _save_shot(dir + "/t42_turno_ficha_rival.png")
+	g.P("p1").bot = true
+	# El motor roba por tiempo: aviso breve
+	await _t62_turn(lm, "p0")
+	g.turn_since = lm.now() - 29000
+	_session.updated.emit()
+	await _wait(0.3)
+	var drew0: int = g.P("p0").hand.size()
+	var t0: int = _game.dbg_timeouts
+	lm.set_process(true)
+	for _i in 12:
+		await _wait(0.25)
+		if _game.dbg_timeouts > t0:
+			break
+	lm.set_process(false)
+	await _wait(0.3)
+	_ux_line(report, "turno", "agotado el turno: avisos %d → %d, mano %d → %d, aviso en pantalla=%s" % [t0, _game.dbg_timeouts, drew0, g.P("p0").hand.size(), str(_t62_toast("Se acabó el tiempo: robas una carta."))], _game.dbg_timeouts == t0 + 1 and _t62_toast("Se acabó el tiempo: robas una carta."))
+	await _save_shot(dir + "/t43_turno_agotado.png")
+
+
+## T62: decisión `rot`, marcador en la mesa, riesgo 100 %, muerte con tinte verde y consejo del tutorial.
+func _ui_test_t62_putrefacto(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"rotten": true}})
+	var g := lm.game
+	var rot: ZKGame.Card = null
+	for c: ZKGame.Card in g.draw:
+		if c.type == "rotten":
+			rot = c
+	_ux_line(report, "putrefacto", "reparto con 3 jugadores: Putrefacto en el mazo=%s" % str(rot != null), rot != null)
+	if rot == null:
+		return
+	g.draw.erase(rot)
+	g.draw.push_back(rot)
+	await _t62_turn(lm, "p0")
+	_game.debug_sounds(true)
+	await _tap_3d(_game.debug_deck_card())
+	await _wait(1.0)
+	var pr: Variant = g.prompt
+	var title: String = _game.debug_modal_title()
+	_ux_line(report, "putrefacto", "robarlo boca abajo: decisión %s, ventana «%s», vive=%s, sonido rotten=%s" % [str(pr.type if pr != null else null), title, str(g.P("p0").alive), str(_game.debug_sounds().has("rotten"))], pr != null and pr.type == "rot" and title == "¡Encontraste al Gatito Putrefacto!" and g.P("p0").alive and _game.debug_sounds().has("rotten"))
+	await _save_shot(dir + "/t44_putrefacto_ventana.png")
+	var picker: DeckSlotPicker = _game.debug_slot_picker()
+	_ux_line(report, "putrefacto", "selector de mazo presente=%s, CONFIRMAR=%s" % [str(picker != null), str(_find_button(self, "CONFIRMAR") != null)], picker != null and _find_button(self, "CONFIRMAR") != null)
+	picker.debug_set(3)
+	await _wait(0.3)
+	await _tap_control(_find_button(self, "CONFIRMAR"))
+	await _wait(1.2)
+	var rd: Dictionary = _game.debug_rot()
+	var known: Array = _game.debug_memory().known(_session.view())
+	var in_memory := known.any(func(k: Dictionary) -> bool: return k.type == "rotten" and int(k.depth) == 3)
+	_ux_line(report, "putrefacto", "confirmar posición 3: rotDepth=%d, rótulo «%s», carta en el mazo=%s, recordatorio=%s, aviso=%s" % [g.rot_depth(), rd.label, str(rd.card), str(in_memory), str(true)], g.rot_depth() == 3 and rd.label == "☣ en 3" and rd.card and in_memory and g.prompt == null)
+	await _save_shot(dir + "/t45_putrefacto_mesa.png")
+	# Consejo del tutorial la primera vez que hay rotDepth >= 0
+	_game.coach = true
+	_game._update_hud()
+	await _wait(0.4)
+	var tip: String = _game.debug_info_text()
+	_ux_line(report, "putrefacto", "consejo del tutorial «%s»" % tip.left(60).replace("\n", " "), tip.contains("Putrefacto") and _game.debug_tip() == "rot")
+	_game.coach = false
+	_game._update_hud()
+	# Putrefacto arriba del todo: el medidor marca 100 %
+	g.draw.erase(rot)
+	g.draw.push_back(rot)
+	rot.up = true
+	await _t62_turn(lm, "p0")
+	var rk: Dictionary = _game.debug_risk()
+	rd = _game.debug_rot()
+	_ux_line(report, "putrefacto", "rotDepth 0: medidor %d%% (%s), rótulo «%s»" % [rk.pct, rk.name, rd.label], g.rot_depth() == 0 and rk.pct == 100 and rk.name == "rojo" and rd.label == "☣ ¡ARRIBA!")
+	await _save_shot(dir + "/t46_putrefacto_arriba.png")
+	# Robarlo boca arriba: muere sin ventana de Zombi aunque tenga uno
+	await _cripta_give(lm, "zombie")
+	_game.debug_sounds(true)
+	await _tap_3d(_game.debug_deck_card())
+	var seen_popup := false
+	var seen_zombie_btn := false
+	for _i in 16:
+		await _wait(0.15)
+		if _tree_has_label(_game, "¡TE PUDRISTE!") and not seen_popup:
+			seen_popup = true
+			await _save_shot(dir + "/t47_putrefacto_muerte.png")
+		seen_zombie_btn = seen_zombie_btn or _find_button(self, "JUGAR GATITO ZOMBI") != null
+	await _wait(1.5)
+	var boom_rot := false
+	for e: Dictionary in g.events:
+		if e.type == "boom" and e.get("rotten", false):
+			boom_rot = true
+	_ux_line(report, "putrefacto", "robo boca arriba: muerto=%s, decisión=%s, boom rotten=%s, popup «¡TE PUDRISTE!»=%s, botón de Zombi=%s, sonidos %s" % [str(not g.P("p0").alive), str(g.prompt), str(boom_rot), str(seen_popup), str(seen_zombie_btn), str(_game.debug_sounds())], not g.P("p0").alive and g.prompt == null and boom_rot and seen_popup and not seen_zombie_btn and _game.debug_sounds().has("tomb"))
+
+
+## Enlaces: marcador de sala en la tabla final, rasgo de los bots, muerte súbita y reglas activas en la pausa.
+func _ui_test_t62_enlaces(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rivals": 4, "level": "hard", "rules": {"sudden_death": true}})
+	var g := lm.game
+	await _t62_turn(lm, "p0")
+	var chips: Array = []
+	for id: String in ["p1", "p2", "p3", "p4"]:
+		chips.append(_game.debug_chip_state(id))
+	_ux_line(report, "enlaces", "rasgo en la ficha (nivel difícil): %s" % str(chips), chips == ["Difícil · Agresivo", "Difícil · Prudente", "Difícil · Vengativo", "Difícil · Agresivo"])
+	await _save_shot(dir + "/t48_rasgo_fichas.png")
+	# Sin rasgo en nivel fácil: una sala falsa con un bot fácil y otro normal
+	var cs := ClientSession.new()
+	add_child(cs)
+	cs.me_id = "p0"
+	cs.receive({"t": "lobby", "started": true, "scores": {"p0": 3, "p1": 1}, "settings": {"deck_mode": "official", "plus": true, "packs": ["crypt"], "rules": {}},
+		"players": [{"id": "p0", "name": "Prueba", "avatar": 0, "host": true, "bot": false}, {"id": "p1", "name": "Bigotes", "avatar": 1, "host": false, "bot": true, "level": "easy", "trait": "aggressive"},
+			{"id": "p2", "name": "Pelusa", "avatar": 2, "host": false, "bot": true, "level": "normal", "trait": "vengeful"}]})
+	_ux_line(report, "enlaces", "ClientSession.trait_of: p1=%s p2=%s p0=«%s» | scores %s" % [cs.trait_of("p1"), cs.trait_of("p2"), cs.trait_of("p0"), str(cs.scores())], cs.trait_of("p1") == "aggressive" and cs.trait_of("p2") == "vengeful" and cs.trait_of("p0") == "" and cs.scores().get("p1") == 1)
+	# Muerte súbita: con 2 vivos y la regla activa, rótulo fijo; el sonido solo la primera vez
+	g.P("p3").alive = false
+	g.P("p4").alive = false
+	g.P("p2").alive = true
+	g.P("p1").alive = true
+	await _t62_turn(lm, "p0")
+	var sd0: bool = _game.debug_sudden()
+	g.P("p2").alive = false
+	_session.updated.emit()
+	await _wait(0.4)
+	_game.debug_sounds(true)
+	g.emit("sudden", {"left": 20, "text": "Muerte súbita: se retira una carta del mazo."})
+	_session.updated.emit()
+	await _wait(0.4)
+	g.emit("sudden", {"left": 19, "text": "Muerte súbita: se retira una carta del mazo."})
+	_session.updated.emit()
+	await _wait(0.4)
+	var n_sudden: int = _game.debug_sounds().count("sudden")
+	_ux_line(report, "enlaces", "muerte súbita: rótulo con 3 vivos=%s, con 2 vivos=%s, sonido «sudden» %d vez, aviso=%s" % [str(sd0), str(_game.debug_sudden()), n_sudden, str(_t62_toast("Muerte súbita: se retira una carta del mazo."))], not sd0 and _game.debug_sudden() and n_sudden == 1 and _t62_toast("Muerte súbita: se retira una carta del mazo."))
+	await _save_shot(dir + "/t49_muerte_subita.png")
+	# Guía de cartas: el Gatito Putrefacto solo sale en «La Cripta» con la regla activa
+	var guide_on := InfoScreen.open(_game, "cards", ["crypt"], {"rotten": true})
+	var guide_off := InfoScreen.open(_game, "cards", ["crypt"], {"rotten": false})
+	await _wait(0.5)
+	var on_has := _tree_has_label(guide_on, "Gatito Putrefacto")
+	var off_has := _tree_has_label(guide_off, "Gatito Putrefacto")
+	_ux_line(report, "enlaces", "guía de cartas: con la regla activa muestra el Putrefacto=%s, sin ella=%s" % [str(on_has), str(off_has)], on_has and not off_has)
+	guide_on.queue_free()
+	guide_off.queue_free()
+	await _wait(0.2)
+	# Reglas activas en el menú de pausa
+	_game.debug_open_menu()
+	await _wait(0.5)
+	var line: String = _game.active_rules_line()
+	_ux_line(report, "enlaces", "menú de pausa lista «%s» (en pantalla=%s)" % [line, str(_tree_has_label(_game, line))], line.contains("La Cripta") and line.contains("muerte súbita") and _tree_has_label(_game, line))
+	await _save_shot(dir + "/t50_pausa.png")
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.3)
+	# Marcador de sala: la ventana final pasa session.scores() a la tabla (6 columnas con «Victorias»)
+	g.over = {"winner": "p0"}
+	var view: Dictionary = g.view("p0", lm.now())
+	cs.receive({"t": "state", "view": view})
+	var screen2 := PlusGameScreen.new().setup(cs, _world)
+	add_child(screen2)
+	await _wait(0.8)
+	var rows: Array = screen2.debug_stats().debug_rows()
+	var cols: int = (rows[0].values as Array).size() if not rows.is_empty() else 0
+	_ux_line(report, "enlaces", "tabla final con marcador de sala: %d filas, %d columnas, victorias %s, ventana «%s»" % [rows.size(), cols, str(rows.map(func(r: Dictionary) -> Variant: return r.values[-1] if r.values.size() > 5 else null)), screen2.debug_modal_title()], cols == 6 and rows.size() == view.players.size())
+	await _save_shot(dir + "/t51_final_marcador.png")
+	screen2.queue_free()
+	cs.queue_free()
+	await _wait(0.3)
+
+
+## T45: sonidos por evento, música por capas y deslizadores de volumen.
+func _ui_test_t62_sonido(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"rotten": true}})
+	var g := lm.game
+	_ux_line(report, "sonido", "música por capas dentro de la partida Plus: layers_on=%s" % str(Sfx.layers_on), Sfx.layers_on)
+	await _t62_turn(lm, "p0")
+	var cases: Array = [
+		["reverse", {"dir": -1, "text": "¡Marcha atrás!"}, "reverse"],
+		["apocalypse", {"n": 1, "text": "¡Apocalipsis!"}, "apocalypse"],
+		["swap", {"player": "p1", "target": "p2", "text": "Trueque"}, "swap"],
+		["haunt", {"player": "p1", "target": "p2", "card": "skip", "text": "Espanto"}, "haunt"],
+		["info", {"text": "Garritas mira la mano de Bigotes."}, "crow"],
+		["rot_found", {"player": "p1", "text": "X encontró al Putrefacto"}, "rotten"],
+		["draw", {"player": "p1", "bottom": true}, "bottom"],
+	]
+	var bad: Array = []
+	for cs_: Array in cases:
+		_game.debug_sounds(true)
+		g.emit(cs_[0], cs_[1])
+		_session.updated.emit()
+		await _wait(0.35)
+		if not _game.debug_sounds().has(cs_[2]):
+			bad.append("%s→%s (suena %s)" % [cs_[0], cs_[2], str(_game.debug_sounds())])
+	# Ataque dirigido frente a ataque normal
+	_game.debug_sounds(true)
+	g.emit("play", {"player": "p1", "eff": "targeted_attack", "text": "x"})
+	g.emit("attack", {"player": "p1", "target": "p2", "n": 2, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.4)
+	var s1: Array = _game.debug_sounds()
+	_game.debug_sounds(true)
+	g.emit("play", {"player": "p1", "eff": "attack", "text": "x"})
+	g.emit("attack", {"player": "p1", "target": "p2", "n": 2, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.4)
+	var s2: Array = _game.debug_sounds()
+	if not (s1.has("targeted") and not s1.has("attack")):
+		bad.append("targeted %s" % str(s1))
+	if not (s2.has("attack") and not s2.has("targeted")):
+		bad.append("attack %s" % str(s2))
+	# Enterrar (evento privado) y Alterar el Futuro (decisión propia)
+	_game.debug_sounds(true)
+	g.emit("buried", {"pos": 2, "len": 10, "text": "Enterraste"}, "p0")
+	_session.updated.emit()
+	await _wait(0.35)
+	if not _game.debug_sounds().has("bury"):
+		bad.append("bury")
+	_game.debug_sounds(true)
+	var top3: Array = []
+	for k in 3:
+		top3.append(g.draw[g.draw.size() - 1 - k])
+	g.prompt = {"type": "alter", "player": "p0", "cards": top3, "start": lm.now(), "deadline": lm.now() + 60000}
+	_session.updated.emit()
+	await _wait(0.5)
+	if not _game.debug_sounds().has("alter"):
+		bad.append("alter (abrir)")
+	_game.debug_sounds(true)
+	g.prompt = null
+	_session.updated.emit()
+	await _wait(0.3)
+	_game.debug_sounds(true)
+	_game._request_target("living")
+	await _wait(0.3)
+	if not _game.debug_sounds().has("aim"):
+		bad.append("aim")
+	_game._exit_aim()
+	# Muerte: lápida tras la explosión
+	_game.debug_sounds(true)
+	g._die(g.P("p2"), ZKGame.Card.new("zkd", "exploding", false), lm.now())
+	g.P("p2").alive = false
+	_session.updated.emit()
+	await _wait(2.4)
+	if not _game.debug_sounds().has("tomb"):
+		bad.append("tomb %s" % str(_game.debug_sounds()))
+	g.P("p2").alive = true
+	g.over = null
+	_ux_line(report, "sonido", "sonidos por evento (reverse, apocalypse, swap, haunt, crow, rotten, bottom, targeted/attack, bury, alter, aim, tomb): fallos %s" % str(bad), bad.is_empty())
+	# Música por capas según el riesgo: mazo corto → 50 % de riesgo
+	g.draw = g.draw.slice(g.draw.size() - 4)
+	await _t62_turn(lm, "p0")
+	var rk: Dictionary = _game.debug_risk()
+	_ux_line(report, "sonido", "riesgo %d%%: tensión %.2f, percusión %.2f (esperado tensión > 0 y percusión > 0)" % [rk.pct, Sfx._tension, Sfx._drums], rk.pct >= 50 and Sfx._tension > 0.4 and Sfx._drums > 0.4)
+	# Deslizadores de volumen del menú de pausa
+	_game.debug_open_menu()
+	await _wait(0.5)
+	var sl: Dictionary = _game.debug_volume_sliders()
+	var has_both: bool = sl.has("Efectos") and sl.has("Música")
+	if has_both:
+		(sl["Efectos"] as HSlider).value = 40
+		(sl["Música"] as HSlider).value = 25
+	_ux_line(report, "sonido", "deslizadores de volumen: Efectos → %.2f, Música → %.2f" % [Sfx.sfx_volume, Sfx.music_volume], has_both and absf(Sfx.sfx_volume - 0.4) < 0.01 and absf(Sfx.music_volume - 0.25) < 0.01)
+	await _save_shot(dir + "/t52_pausa_volumen.png")
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.3)
+	# Al salir de la partida Plus, la música vuelve a la pista normal
+	_close_session()
+	await _wait(0.5)
+	_ux_line(report, "sonido", "al salir de la partida: layers_on=%s" % str(Sfx.layers_on), not Sfx.layers_on)
+
+
+## Menús de Plus: «Un jugador» con todo apagado y con todo activo, y la sala de 5 como anfitrión.
+func _ui_test_t62_menus(dir: String, report: Array) -> void:
+	_show_menu()
+	await _wait(0.5)
+	_menu.set_plus(true, false)
+	_menu._opts.rivals = 2
+	_menu._opts.packs = ["crypt"]
+	_menu._rules = MenuScreen._clean_solo_rules({})
+	_menu._build()
+	await _wait(0.4)
+	await _menu_tap("UN JUGADOR")
+	await _save_shot(dir + "/t53_solo_plus_apagado.png")
+	var labels := ["Tiempo por turno: sin límite", "Mano inicial: normal", "Muerte súbita: no", "Nop sin pistas: no", "Gatito Putrefacto: no"]
+	var found := labels.all(func(t: String) -> bool: return _find_button(self, t) != null)
+	_ux_line(report, "menu", "Un jugador/Plus, todo apagado: botones de las 5 reglas visibles=%s" % str(found), found)
+	await _menu_tap("Tiempo por turno: sin límite")
+	await _menu_tap("Mano inicial: normal")
+	await _menu_tap("Muerte súbita: no")
+	await _menu_tap("Nop sin pistas: no")
+	await _menu_tap("Gatito Putrefacto: no")
+	await _save_shot(dir + "/t54_solo_plus_todo.png")
+	var scroll_ok: bool = true
+	var r: Dictionary = _menu._rules
+	_ux_line(report, "menu", "reglas tras tocar todas: %s" % str(r), int(r.turn_ms) == 30000 and int(r.hand) == 5 and r.sudden_death and r.nope_fixed and r.rotten)
+	# Con 1 rival, la nota avisa de que no tendrá efecto
+	await _menu_tap("1")
+	var note1 := _menu_has_text(_menu, "no tendrá efecto")
+	await _save_shot(dir + "/t55_solo_plus_1rival.png")
+	await _menu_tap("3")
+	_ux_line(report, "menu", "nota con 1 rival=%s | desplazamiento del bloque presente=%s" % [str(note1), str(_menu._scroll != null)], note1 and scroll_ok)
+	# Sin La Cripta no hay regla del Putrefacto
+	await _menu_tap("La Cripta: sí")
+	_ux_line(report, "menu", "sin La Cripta el botón del Putrefacto se oculta=%s" % str(_find_button(self, "Gatito Putrefacto: sí") == null), _find_button(self, "Gatito Putrefacto: sí") == null)
+	await _menu_tap("La Cripta: no")
+	# Jugar: las opciones llevan las reglas al motor
+	await _menu_tap("¡JUGAR!")
+	await _wait(1.5)
+	var rl: Dictionary = _last_opts.get("rules", {})
+	_ux_line(report, "menu", "opts.rules al jugar: %s plus=%s packs=%s" % [str(rl), str(_last_opts.get("plus")), str(_last_opts.get("packs"))], int(rl.get("turn_ms", 0)) == 30000 and int(rl.get("hand", 0)) == 5 and rl.get("sudden_death", false) and rl.get("nope_fixed", false) and rl.get("rotten", false) and _last_opts.get("plus", false) and (_last_opts.get("packs", []) as Array).has("crypt"))
+	var gv: Dictionary = _session.view()
+	_ux_line(report, "menu", "el motor recibió las reglas: %s" % str(gv.get("rules")), gv.get("rules", {}).get("rotten", false) and int(gv.get("rules", {}).get("hand", 0)) == 5)
+	# Sala como anfitrión con 5 jugadores
+	_close_session()
+	var cs := ClientSession.new()
+	add_child(cs)
+	cs.me_id = "p0"
+	cs.host_flag = true
+	var pl: Array = [{"id": "p0", "name": "Anfitrión", "avatar": 0, "host": true, "bot": false}]
+	for i in 4:
+		pl.append({"id": "p%d" % (i + 1), "name": ["Bigotes", "Garritas", "Pelusa", "Don Miau"][i], "avatar": i + 1, "host": false, "bot": true, "level": ["easy", "normal", "hard", "normal"][i], "trait": ["aggressive", "cautious", "vengeful", "aggressive"][i]})
+	cs.receive({"t": "lobby", "started": false, "scores": {"p0": 2, "p1": 1}, "players": pl,
+		"settings": {"deck_mode": "official", "plus": true, "packs": ["crypt"], "rules": {"turn_ms": 30000, "hand": 5, "sudden_death": true, "nope_fixed": true, "rotten": true}}})
+	_session = cs
+	_show_menu("lobby")
+	await _wait(0.8)
+	await _save_shot(dir + "/t56_sala_5_anfitrion.png")
+	var rb := _find_button(self, "Gatito Putrefacto: sí")
+	var start_btn := _find_button(self, "¡EMPEZAR PARTIDA!")
+	var start_vis := false
+	if start_btn != null:
+		var rect := start_btn.get_global_rect()
+		start_vis = rect.end.y <= get_viewport().get_visible_rect().size.y and rect.position.y >= 0.0
+	_ux_line(report, "menu", "sala de 5 como anfitrión: botón del Putrefacto=%s, nota=%s, desplazamiento=%s, EMPEZAR visible sin desplazar=%s" % [str(rb != null), str(_menu_has_text(_menu, "Sustituye a un explosivo")), str(_menu._scroll != null), str(start_vis)], rb != null and _menu_has_text(_menu, "Sustituye a un explosivo"))
+	if _menu._scroll != null:
+		_menu._scroll.scroll_vertical = 100000
+		await _wait(0.3)
+		await _save_shot(dir + "/t57_sala_5_abajo.png")
+	_close_session()
+	# Una partida normal para que el resto de la prueba (salir por el menú) siga igual
+	await _t62_start({})
+
+
+## Toca un botón del menú; si el contenido está desplazable, antes lo hace visible.
+func _menu_tap(text: String) -> void:
+	var b := _find_button(_menu, text)
+	if b == null:
+		return
+	if _menu._scroll != null:
+		_menu._scroll.ensure_control_visible(b)
+		await _wait(0.2)
+	await _tap_control(b)
+	await _wait(0.3)
+
+
+func _menu_has_text(n: Node, part: String) -> bool:
+	if n is Label and (n as Label).text.contains(part):
+		return true
+	for c in n.get_children():
+		if _menu_has_text(c, part):
+			return true
+	return false

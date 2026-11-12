@@ -19,9 +19,10 @@ var profile := {"name": "", "avatar": 0}
 var plus := false               # modo elegido en la pantalla de inicio (user://settings.cfg, [game] plus)
 var _plus_ephemeral := false    # el modo viene de una prueba automática: no se guarda en el archivo
 var _title: Label
+var _tag: Label
 var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official", "packs": ["crypt"]}
 ## Reglas de Plus de «Un jugador» (user://settings.cfg, [plus]). hand 0 = normal (el motor decide: 7, u 8 con La Cripta).
-var _rules := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false}
+var _rules := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false, "rotten": false}
 var _rule_touched := ""   # última regla cambiada: enseña su nota aunque haya quedado desactivada
 var _box: VBoxContainer
 var _panel: PanelContainer
@@ -43,7 +44,8 @@ func _ready() -> void:
 		plus = bool(cfg.get_value("game", "plus", false))
 		_rules = _clean_solo_rules({
 			"turn_ms": cfg.get_value("plus", "turn_ms", 0), "hand": cfg.get_value("plus", "hand", 0),
-			"sudden_death": cfg.get_value("plus", "sudden_death", false), "nope_fixed": cfg.get_value("plus", "nope_fixed", false)})
+			"sudden_death": cfg.get_value("plus", "sudden_death", false), "nope_fixed": cfg.get_value("plus", "nope_fixed", false),
+				"rotten": cfg.get_value("plus", "rotten", false)})
 	if str(profile.name).strip_edges() == "":
 		profile.name = "Gatito%d" % (10 + randi() % 90)
 	var root := Control.new()
@@ -62,6 +64,7 @@ func _ready() -> void:
 	tag.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	tag.offset_top = 270
 	root.add_child(tag)
+	_tag = tag
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
@@ -170,6 +173,9 @@ func _build() -> void:
 		"connecting": _build_connecting()
 		"lobby": _build_lobby()
 	_fit_gen += 1
+	if _title != null:
+		_title.visible = true
+		_tag.visible = true
 	if plus and (page == "solo" or page == "lobby"):
 		_fit(_fit_gen)
 	elif _scroll != null:
@@ -185,6 +191,10 @@ func _fit(gen: int) -> void:
 		return
 	var avail := get_viewport().get_visible_rect().size.y - 70.0 - 350.0 - 52.0
 	var need := _box.get_combined_minimum_size().y
+	# Si el panel sube hasta el título, se oculta el título (así no se transparenta detrás de la sala)
+	if _title != null and _panel.get_global_rect().position.y < 345.0:
+		_title.visible = false
+		_tag.visible = false
 	if need <= avail:
 		if _scroll != null:
 			_unscroll()
@@ -399,21 +409,21 @@ func _build_solo() -> void:
 		var crypt: bool = "crypt" in _opts.packs
 		_add("La Cripta: sí" if crypt else "La Cripta: no", "normal", _choose.bind("packs", [] if crypt else ["crypt"]), 38)
 		_note("Añade 9 cartas nuevas: Ataque Dirigido, Marcha Atrás, Robar del Fondo, Ojo de Cuervo y más." if crypt else "Solo las cartas originales, con las mejoras de Plus.", 28)
-		_rules_block(_rules, _set_solo_rule, false)
+		_rules_block(_rules, _set_solo_rule, false, crypt, int(_opts.rivals) + 1)
 	_add("¡JUGAR!", "primary", _on_solo_play, 68)
 	_add("Volver", "ghost", _go.bind("home"), 38)
 
 
 ## Normaliza las reglas guardadas: mismos límites que el motor (turn_ms 0 o 5000-600000, hand 4-8; 0 = normal).
 static func _clean_solo_rules(raw: Dictionary) -> Dictionary:
-	var out := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false}
+	var out := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false, "rotten": false}
 	var t: Variant = raw.get("turn_ms")
 	if t is int or t is float:
 		out.turn_ms = 0 if int(t) <= 0 else clampi(int(t), 5000, 600000)
 	var h: Variant = raw.get("hand")
 	if h is int or h is float:
 		out.hand = 0 if int(h) <= 0 else clampi(int(h), 4, 8)
-	for k: String in ["sudden_death", "nope_fixed"]:
+	for k: String in ["sudden_death", "nope_fixed", "rotten"]:
 		if raw.get(k) is bool:
 			out[k] = raw[k]
 	return out
@@ -459,12 +469,15 @@ static func rules_summary(r: Dictionary) -> String:
 		parts.append("muerte súbita")
 	if bool(r.get("nope_fixed", false)):
 		parts.append("Nop sin pistas")
+	if bool(r.get("rotten", false)):
+		parts.append("Gatito Putrefacto")
 	return "Reglas: " + (" · ".join(parts) if not parts.is_empty() else "las de siempre")
 
 
 ## Bloque «Reglas de Plus»: cuatro botones que alternan y una nota de una línea por regla activa (o recién cambiada).
 ## `change(key, value)` aplica el cambio; en la sala lo manda el anfitrión, en «Un jugador» se guarda.
-func _rules_block(r: Dictionary, change: Callable, in_lobby: bool) -> void:
+## `crypt`: La Cripta activada (solo con ella existe el Gatito Putrefacto); `players`: jugadores de la partida.
+func _rules_block(r: Dictionary, change: Callable, in_lobby: bool, crypt: bool = false, players: int = 0) -> void:
 	_box.add_child(UIKit.label("Reglas de Plus", 36 if in_lobby else 40, UIKit.C.toxic, true))
 	var turn := int(r.get("turn_ms", 0))
 	var hand := int(r.get("hand", 0))
@@ -490,9 +503,18 @@ func _rules_block(r: Dictionary, change: Callable, in_lobby: bool) -> void:
 		var b := _add(it[1], "on" if it[2] else "normal", change.bind(key, it[3]), 30, grid)
 		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		b.clip_text = true
+	var rot := bool(r.get("rotten", false))
+	if crypt:
+		var rb := _add("Gatito Putrefacto: " + ("sí" if rot else "no"), "on" if rot else "normal", change.bind("rotten", not rot), 30)
+		rb.clip_text = true
 	for it: Array in items:
 		if it[2] or _rule_touched == it[0]:
 			_note(it[4], 26)
+	if crypt and (rot or _rule_touched == "rotten"):
+		var rn := "Sustituye a un explosivo. Con 3 o más jugadores."
+		if players > 0 and players < 3:
+			rn += "\nCon %d jugadores no tendrá efecto." % players if in_lobby else "\nCon 1 rival no tendrá efecto: elige 2 o más."
+		_note(rn, 26)
 
 
 static func _deck_info(players: int, full: bool) -> String:
@@ -618,7 +640,7 @@ func _build_lobby() -> void:
 		_note("La Cripta: activada" if "crypt" in lobby.settings.get("packs", []) else "La Cripta: desactivada", 28)
 		_note(rules_summary(lobby.settings.get("rules", {})), 28)
 	elif session.is_plus():
-		_rules_block(lobby.settings.get("rules", {}), _send_rule, true)
+		_rules_block(lobby.settings.get("rules", {}), _send_rule, true, "crypt" in lobby.settings.get("packs", []), n)
 	if status != "":
 		_note(status, 32, UIKit.C.gold)
 	if is_host:

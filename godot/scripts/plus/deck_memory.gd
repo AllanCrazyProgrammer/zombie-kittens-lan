@@ -105,6 +105,17 @@ static func _changes_deck(f: Dictionary) -> bool:
 
 ## Lo que se sabe y sigue vigente: [{depth, type}] ordenado de arriba abajo (depth 0 = la próxima carta).
 func known(v: Dictionary) -> Array:
+	var out: Array = _known_mem(v)
+	# El Gatito Putrefacto boca arriba es información pública: cuenta como carta conocida en su profundidad
+	var rd := int(v.get("rotDepth", -1))
+	if rd >= 0 and rd < int(v.get("draw", 0)):
+		out = out.filter(func(k: Dictionary) -> bool: return int(k.depth) != rd)
+		out.append({"depth": rd, "type": "rotten"})
+		out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a.depth) < int(b.depth))
+	return out
+
+
+func _known_mem(v: Dictionary) -> Array:
 	var out: Array = []
 	if _shuf < 0 or int(v.get("shuf", -1)) != _shuf:
 		if _shuf >= 0 and int(v.get("shuf", -1)) > _shuf:

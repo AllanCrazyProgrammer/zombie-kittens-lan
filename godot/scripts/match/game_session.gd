@@ -44,3 +44,8 @@ func is_host() -> bool:
 ## Victorias por jugador en la sala ({id: n}); vacío fuera de salas Plus.
 func scores() -> Dictionary:
 	return {}
+
+
+## Rasgo de personalidad del bot ("" si no tiene o no es Plus). Ver ZKBots.TRAIT_LABELS.
+func trait_of(_id: String) -> String:
+	return ""

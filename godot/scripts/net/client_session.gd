@@ -76,6 +76,14 @@ func level_of(id: String) -> String:
 	return ""
 
 
+## Rasgo de personalidad de un bot de la sala ("" en salas clásicas o si no tiene).
+func trait_of(id: String) -> String:
+	for p: Dictionary in lobby.get("players", []):
+		if p.id == id and p.bot:
+			return str(p.get("trait", ""))
+	return ""
+
+
 ## Marcador de victorias de la sala {id: victorias}. Vacío en salas clásicas y antes del primer `lobby`.
 func scores() -> Dictionary:
 	var sc: Variant = lobby.get("scores", {})

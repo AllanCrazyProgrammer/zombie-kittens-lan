@@ -121,7 +121,7 @@ func _draw() -> void:
 		var r := Rect2(rx, y, rw, h)
 		var kind: String = _known.get(i, "")
 		if kind != "":
-			col = Color("c63a4e") if kind == "exploding" else Color("2a9fb0")
+			col = Color("c63a4e") if kind == "exploding" else (Color("5f8f1a") if kind == "rotten" else Color("2a9fb0"))
 			edge = UIKit.C.gold
 		draw_rect(r, col, true)
 		if not thin:

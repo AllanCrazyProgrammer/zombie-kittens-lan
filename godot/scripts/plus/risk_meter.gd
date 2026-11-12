@@ -14,6 +14,8 @@ var _tier := -1
 var _eks := 0
 var _cards := 0
 var _time := 0.0
+var _rot0 := false        # el Gatito Putrefacto está boca arriba en la cima: robar es muerte segura
+var _sudden := false      # muerte súbita en marcha: regla activa y quedan 2 vivos
 
 
 func _init() -> void:
@@ -34,7 +36,18 @@ func debug_risk() -> Dictionary:
 	return {"pct": int(round(_pct * 100.0)), "tier": _tier, "name": TIER_NAMES[maxi(0, _tier)]}
 
 
-## view: vista de la partida. riesgo = (vivos − 1) / max(1, cartas del mazo).
+## Rótulo fijo «MUERTE SÚBITA» visible (prueba).
+func debug_sudden() -> bool:
+	return _sudden
+
+
+## ¿Muestra el aviso de Putrefacto en la cima? (prueba)
+func debug_rot0() -> bool:
+	return _rot0
+
+
+## view: vista de la partida. riesgo = (vivos − 1) / max(1, cartas del mazo); con el Putrefacto boca arriba en la
+## cima (`rotDepth == 0`) robar es muerte segura: 100 %.
 func update(view: Dictionary) -> void:
 	var alive := 0
 	for p: Dictionary in view.players:
@@ -42,6 +55,11 @@ func update(view: Dictionary) -> void:
 	_eks = maxi(0, alive - 1)
 	_cards = int(view.draw)
 	_pct = clampf(float(_eks) / maxf(1.0, float(_cards)), 0.0, 1.0)
+	_rot0 = int(view.get("rotDepth", -1)) == 0 and view.get("over") == null
+	if _rot0:
+		_pct = 1.0
+	var rules: Variant = view.get("rules", {})
+	_sudden = rules is Dictionary and bool(rules.get("sudden_death", false)) and alive == 2 and view.get("over") == null
 	var tier := tier_of(_pct)
 	if _tier >= 0 and tier > _tier:
 		Sfx.play("fuse", -10.0)
@@ -107,9 +125,20 @@ func _draw() -> void:
 		draw_line(sp + Vector2(cos(ang), sin(ang)) * 4.0, sp + Vector2(cos(ang), sin(ang)) * r, Color(1.0, 0.9, 0.5, 0.9), 2.0)
 	# Detalle en pequeño, bajo la mecha: empieza siempre a la derecha del porcentaje y se encoge si no cabe
 	var sub := "%d %s en %d cartas" % [_eks, "explosivo" if _eks == 1 else "explosivos", _cards]
+	if _rot0:
+		sub = "☣ ¡El Putrefacto es el siguiente!"
 	var sfont := UIKit.bold()
 	var sfs := 26
 	var avail := maxf(40.0, w - bx - 8.0)
+	if _sudden:
+		# Rótulo fijo a la derecha de esa línea; el detalle se encoge para dejarle sitio
+		var bt := "MUERTE SÚBITA"
+		var bw2 := sfont.get_string_size(bt, HORIZONTAL_ALIGNMENT_LEFT, -1, 26).x
+		var pulse := 0.65 + 0.35 * sin(_time * 5.0)
+		var bpos := Vector2(w - bw2 - 8.0, by + BAR_H + 27.0)
+		draw_string_outline(sfont, bpos, bt, HORIZONTAL_ALIGNMENT_LEFT, -1, 26, 6, UIKit.C.dark)
+		draw_string(sfont, bpos, bt, HORIZONTAL_ALIGNMENT_LEFT, -1, 26, Color(1.0, 0.25 + 0.2 * pulse, 0.3))
+		avail = maxf(40.0, w - bx - 8.0 - bw2 - 16.0)
 	while sfs > 14 and sfont.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, sfs).x > avail:
 		sfs -= 1
 	var sp_pos := Vector2(bx, by + BAR_H + 27.0)

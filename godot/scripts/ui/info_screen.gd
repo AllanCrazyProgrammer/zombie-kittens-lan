@@ -25,12 +25,16 @@ const PACK_TITLES := {"crypt": "La Cripta"}
 ## packs: packs de cartas cuyas cartas se añaden a la guía, cada uno bajo su título (p. ej. ["crypt"]).
 ## Vacío = solo las 19 cartas de siempre. Si se abre desde el menú con el modo Plus elegido y no se
 ## indica nada, se usan los packs que tenga elegidos el menú.
-static func open(parent: Node, kind: String, packs: Array = []) -> InfoScreen:
+## rules: reglas de Plus de la partida o del menú; con `rotten` activa, el Gatito Putrefacto sale en «La Cripta».
+static func open(parent: Node, kind: String, packs: Array = [], rules: Dictionary = {}) -> InfoScreen:
 	var s := InfoScreen.new()
 	s.set_meta("kind", kind)
 	if packs.is_empty() and parent.get("plus") == true and parent.get("_opts") is Dictionary:
 		packs = (parent.get("_opts") as Dictionary).get("packs", [])
+		if rules.is_empty() and parent.get("_rules") is Dictionary:
+			rules = parent.get("_rules")
 	s.set_meta("packs", packs.duplicate())
+	s.set_meta("rules", rules.duplicate())
 	parent.add_child(s)
 	return s
 
@@ -100,6 +104,9 @@ func _fill_cards(body: VBoxContainer) -> void:
 		counts[row[0]] = "%d con huella + %d sin huella" % [row[1], row[2]]
 	for row: Array in ZKGame.DECK_CRYPT:
 		counts[row[0]] = "%d con huella + %d sin huella" % [row[1], row[2]]
+	var rules: Dictionary = get_meta("rules", {})
+	if bool(rules.get("rotten", false)) and packs.has("crypt"):
+		counts["rotten"] = "1 (sustituye a un explosivo; 3 o más jugadores)"   # solo con la regla activa
 	for t: String in CardDB.types():
 		_card_panel(body, t, counts)
 	for pack: String in packs:
