@@ -38,7 +38,7 @@ const NAMES := {
 const NOW := {"shuffle": true, "feed_dead": true, "clairvoyance": true}
 ## Cartas ⚡ añadidas por el modo Plus (el Espanto solo lo juega un muerto)
 const NOW_PLUS := {"haunt": true}
-const DEFAULT_CFG := {"NOPE_MS": 6500, "FAST_MS": 900, "PROMPT_MS": 40000, "GONE_MS": 6000, "CLAIR_MS": 4000, "HAND": 7}
+const DEFAULT_CFG := {"NOPE_MS": 6500, "FAST_MS": 900, "PROMPT_MS": 40000, "GONE_MS": 6000, "CLAIR_MS": 4000, "HAND": 7, "NOPE_FIXED_MS": 3500}
 
 
 class Card:
@@ -95,6 +95,10 @@ var cur: int = 0
 var turns_left: int = 1
 var attacked: bool = false
 var idle_since: int = 0
+var turn_since: int = 0                 # Plus turn_ms: instante desde el que corre el plazo del turno del jugador en turno
+var removed: Array[Card] = []          # Plus sudden_death: cartas retiradas del juego (cuentan para la conservación)
+var _sd_done: Dictionary = {}          # Plus sudden_death: ids que han terminado un turno desde la última retirada
+var _sd_announced: bool = false
 # --- Plus (con plus = false no se lee ni se cambia nada observable)
 var plus: bool = false
 var packs: Array = []
@@ -138,10 +142,10 @@ func _init(opts: Dictionary) -> void:
 	plus = bool(opts.get("plus", false))
 	if plus:
 		packs = (opts.get("packs", []) as Array).duplicate()
-		rules = (opts.get("rules", {}) as Dictionary).duplicate()
+		rules = _sanitize_rules(opts.get("rules", {}))
 		names = (opts.get("names", {}) as Dictionary).duplicate()
 		if rules.has("hand"):
-			cfg["HAND"] = clampi(int(rules["hand"]), 4, 8)   # M-04: mano inicial (solo Plus)
+			cfg["HAND"] = int(rules["hand"])   # M-04: mano inicial (solo Plus)
 		elif packs.has("crypt") and not (opts.get("cfg", {}) as Dictionary).has("HAND"):
 			cfg["HAND"] = 8   # Plus con La Cripta y sin mano explícita: 8 (equilibrio de duración)
 	for d: Dictionary in opts["players"]:
@@ -152,7 +156,44 @@ func _init(opts: Dictionary) -> void:
 		p.bot = bool(d.get("bot", false))
 		players.append(p)
 	idle_since = int(opts.get("now", 0))
+	turn_since = idle_since
 	_setup(opts.get("deck_mode", "official"))
+
+
+static func _is_num(v: Variant) -> bool:
+	return v is int or (v is float and is_finite(v))
+
+
+## Sanea las reglas opcionales de Plus (tipos y rangos); lo que no se reconoce se descarta.
+static func _sanitize_rules(raw: Variant) -> Dictionary:
+	var out := {}
+	if not (raw is Dictionary):
+		return out
+	var r: Dictionary = raw
+	if _is_num(r.get("turn_ms")):
+		var t := int(r["turn_ms"])
+		out["turn_ms"] = 0 if t <= 0 else clampi(t, 5000, 600000)
+	if r.get("nope_fixed") is bool:
+		out["nope_fixed"] = r["nope_fixed"]
+	if _is_num(r.get("hand")):
+		out["hand"] = clampi(int(r["hand"]), 4, 8)
+	if r.get("sudden_death") is bool:
+		out["sudden_death"] = r["sudden_death"]
+	if r.get("crypt_copies") is Dictionary:
+		out["crypt_copies"] = (r["crypt_copies"] as Dictionary).duplicate(true)
+	return out
+
+
+func _turn_ms() -> int:
+	return int(rules.get("turn_ms", 0)) if plus else 0
+
+
+## ¿Corre ahora el plazo del turno? Humano conectado en su turno con la mesa libre.
+func _turn_running() -> bool:
+	if _turn_ms() <= 0 or not idle():
+		return false
+	var c := cur_p()
+	return c.alive and not c.bot and c.connected
 
 
 ## Filas de La Cripta de esta partida: DECK_CRYPT con `rules.crypt_copies` {tipo: [con_huella, sin_huella]} encima
@@ -222,6 +263,7 @@ func _setup(mode: String) -> void:
 	draw = cards
 	cur = int(floor(rnd.call() * n))
 	emit("start", {"text": "¡Comienza la partida! Empieza " + cur_p().name + "."})
+	_sd_announce()
 
 
 # ---------------------------------------------------------------- utilidades
@@ -464,6 +506,7 @@ func act(player_id: String, a: Variant, now: int) -> String:
 	var p := P(player_id)
 	if p == null or not (a is Dictionary):
 		return "Acción inválida."
+	var busy := not idle()
 	var err := ""
 	match a.get("a", ""):
 		"play": err = _do_play(p, a, now)
@@ -479,6 +522,8 @@ func act(player_id: String, a: Variant, now: int) -> String:
 		_: err = "Acción desconocida."
 	if err == "":
 		idle_since = now
+		if busy or cur_p().id == player_id:
+			turn_since = now   # turn_ms: acción del jugador en turno, o la mesa vuelve a quedar libre
 	return err
 
 
@@ -555,12 +600,22 @@ func eligible(s: Dictionary) -> Array[Player]:
 	return _where(players, func(o: Player) -> bool: return o.id != s.last and (o.bot or o.connected) and o.find_type("nope") != null)
 
 
+## Plus nope_fixed: ventana de duración constante (y sin cierre anticipado) salvo que no quede otro humano conectado.
+func _fixed_window(s: Dictionary) -> bool:
+	if not plus or not bool(rules.get("nope_fixed", false)):
+		return false
+	return players.any(func(o: Player) -> bool: return o.id != s.last and not o.bot and o.connected)
+
+
 func _open_window(now: int) -> void:
 	var s: Variant = top()
 	if s == null:
 		return
 	s.passed = {}
-	s.total = int(cfg["NOPE_MS"]) if eligible(s).size() > 0 else int(cfg["FAST_MS"])
+	if _fixed_window(s):
+		s.total = int(cfg["NOPE_FIXED_MS"])
+	else:
+		s.total = int(cfg["NOPE_MS"]) if eligible(s).size() > 0 else int(cfg["FAST_MS"])
 	s.deadline = now + s.total
 
 
@@ -569,6 +624,8 @@ func _do_pass(p: Player, now: int) -> String:
 	if s == null or (prompt != null and prompt.type != "zombie"):
 		return "No hay nada que pasar."
 	s.passed[p.id] = 1
+	if _fixed_window(s):
+		return ""   # nope_fixed: cerrar antes delataría quién tiene Nop
 	if eligible(s).all(func(o: Player) -> bool: return s.passed.has(o.id)):
 		_resolve_top(now)
 	return ""
@@ -688,12 +745,15 @@ func _apply(s: Dictionary, now: int) -> void:
 				if players[idx].id == p.id:
 					idx = next_living_idx(idx)   # nadie se ataca a sí mismo
 			var n: int = (turns_left if attacked else 0) + 2
+			var prev_cur := cur
 			cur = idx
 			turns_left = n
 			attacked = true
 			idle_since = now
+			turn_since = now
 			emit("turn", {"player": cur_p().id})
 			emit("attack", {"player": p.id, "target": cur_p().id, "n": n, "text": cur_p().name + " debe jugar " + str(n) + " turnos seguidos."})
+			_sd_handover(prev_cur)
 		"reverse":
 			if not plus or not is_cur:
 				return
@@ -999,14 +1059,53 @@ func _end_turn(now: int) -> void:
 		_advance(1, false, now)
 	else:
 		idle_since = now
+		turn_since = now
 
 
 func _advance(n: int, was_attacked: bool, now: int) -> void:
+	var prev_cur := cur
 	cur = next_living_idx(cur)
 	turns_left = n
 	attacked = was_attacked
 	idle_since = now
+	turn_since = now
 	emit("turn", {"player": cur_p().id})
+	_sd_handover(prev_cur)
+
+
+# ---------------------------------------------------------------- Plus: muerte súbita
+
+func _sd_on() -> bool:
+	return plus and bool(rules.get("sudden_death", false))
+
+
+## Avisa la primera vez que la regla entra en juego (2 vivos).
+func _sd_announce() -> void:
+	if _sd_on() and not _sd_announced and living().size() == 2:
+		_sd_announced = true
+		emit("info", {"text": "¡Muerte súbita! Cada vuelta se retira una carta del mazo."})
+
+
+## `prev` acaba de ceder el turno. Con 2 vivos, cuando ambos han terminado un turno se retira una carta del fondo.
+func _sd_handover(prev: int) -> void:
+	if not _sd_on():
+		return
+	var alive := living()
+	if alive.size() != 2:
+		_sd_done.clear()
+		return
+	_sd_announce()
+	if players[prev].alive:
+		_sd_done[players[prev].id] = 1
+	if not alive.all(func(o: Player) -> bool: return _sd_done.has(o.id)):
+		return
+	_sd_done.clear()
+	for i in draw.size():   # índice 0 = fondo
+		if draw[i].type != "exploding":
+			removed.append(draw.pop_at(i))
+			mut += 1
+			emit("sudden", {"left": draw.size(), "text": "Muerte súbita: se retira una carta del mazo."})
+			return
 
 
 # ---------------------------------------------------------------- tiempo: plazos y acciones automáticas
@@ -1023,6 +1122,8 @@ func set_connected(player_id: String, on: bool, now: int) -> void:
 			pr.deadline = mini(pr.deadline, now + int(cfg["GONE_MS"]))
 	if not on:
 		idle_since = maxi(idle_since, now)
+	elif idle() and cur_p().id == player_id:
+		turn_since = now   # al volver, el plazo de su turno empieza de nuevo
 
 
 ## Próximo instante en que `tick` tendrá algo que hacer, o -1 si no hay nada pendiente.
@@ -1040,6 +1141,8 @@ func next_deadline() -> int:
 	var c := cur_p()
 	if idle() and not c.bot and not c.connected:
 		cands.append(idle_since + int(cfg["GONE_MS"]))
+	if _turn_running():
+		cands.append(turn_since + _turn_ms())
 	return cands.min() if cands.size() > 0 else -1
 
 
@@ -1050,16 +1153,23 @@ func tick(now: int) -> void:
 		var pr: Variant = prompt
 		if pr != null and pr.type == "zombie" and pr.pendingPos != null and stack.is_empty() and now >= pr.minUntil:
 			_finish_insert(now)
+			turn_since = now
 			continue
 		if not stack.is_empty() and (pr == null or pr.type == "zombie") and now >= top().deadline:
 			_resolve_top(now)
+			turn_since = now
 			continue
 		if pr != null and now >= pr.deadline:
 			_auto_prompt(now)
+			turn_since = now
 			continue
 		var c := cur_p()
 		if idle() and not c.bot and not c.connected and now >= idle_since + int(cfg["GONE_MS"]):
 			act(c.id, {"a": "draw"}, now)
+			continue
+		if _turn_running() and now >= turn_since + _turn_ms():
+			turn_since = now
+			act(c.id, {"a": "draw"}, now)   # turn_ms vencido: roba por el humano conectado que no actuó
 			continue
 		break
 
@@ -1151,7 +1261,9 @@ func view(player_id: String, now: int) -> Dictionary:
 		v["deckTypes"] = deck_types.duplicate()
 		v["tops"] = tops
 		v["shuf"] = shuf
-		v["rules"] = rules.duplicate()
+		v["rules"] = rules.duplicate(true)
+		if _turn_running():
+			v["turn"] = {"remain": maxi(0, turn_since + _turn_ms() - now), "total": _turn_ms()}
 		v["discard"] = discard.slice(maxi(0, discard.size() - 20)).map(func(d: Dictionary) -> Dictionary: return {"id": d.card.id, "type": d.card.type, "by": d.by})
 	if me != null:
 		for c in me.hand:

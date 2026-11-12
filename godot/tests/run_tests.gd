@@ -30,6 +30,7 @@ func _initialize() -> void:
 	_test_classic_guard()
 	_test_plus_engine()
 	_test_plus_levers()
+	_test_plus_rules()
 	_test_crypt_cards_1()
 	_test_crypt_cards_2()
 	_test_plus_network()
@@ -110,7 +111,7 @@ static func _mk(n: int, seed_value: int, mode: String = "official", rng: Rng = n
 
 
 static func _count(g: Game) -> int:
-	var n := g.draw.size() + g.discard.size()
+	var n := g.draw.size() + g.discard.size() + g.removed.size()
 	for p in g.players:
 		n += p.hand.size() + (1 if p.ek != null else 0)
 	if g.prompt != null:
@@ -479,6 +480,377 @@ func _test_plus_levers() -> void:
 	_check(tot == _count(_mk(3, 77, "official", null, true, ["crypt"])) - 0 + 1, "crypt_copies: el total de cartas cuadra")
 	if _fails == f0:
 		_ok("palancas hand y crypt_copies: límites, sobrescritura e inocuas con plus = false")
+
+
+# ---------------------------------------------------------------- Plus (T50): reglas opcionales
+
+## Partida Plus sin cartas en mano: `humans[i]` = true si el jugador es humano (conectado). Turno de p0, reloj a 0.
+func _pg(humans: Array, rules: Dictionary, seed_value: int = 1, plus: bool = true) -> Game:
+	var ps: Array = []
+	for i in humans.size():
+		ps.append({"id": "p%d" % i, "name": "P%d" % i, "bot": not humans[i]})
+	var g := Game.new({"players": ps, "deck_mode": "official", "rng": Rng.new(seed_value), "now": 0, "plus": plus, "rules": rules})
+	for p in g.players:
+		p.hand.clear()
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.events.clear()
+	_clk = 0
+	return g
+
+
+func _rules_game(n: int, seed_value: int, mode: String, packs: Array, rules: Dictionary, humans: int, stats: Dictionary) -> String:
+	var rng := Rng.new(seed_value)
+	var arng := Rng.new(seed_value * 3 + 1)
+	var ps: Array = []
+	var lv := {}
+	for i in n:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": i >= humans})
+		lv["b%d" % i] = ["easy", "normal", "hard"][(i + seed_value) % 3]
+	var g := Game.new({"players": ps, "deck_mode": mode, "rng": rng, "now": 0, "plus": true, "packs": packs, "rules": rules})
+	var bots := Bots.new(g, lv, rng.next, true)
+	var total := _count(g)
+	var afk := {}
+	var seen := 0
+	var now := 0
+	var steps := 0
+	var first := 0
+	var turn_ms := int(g.rules.get("turn_ms", 0))
+	var tag := "semilla %d, %s" % [seed_value, JSON.stringify(rules)]
+	while g.over == null:
+		steps += 1
+		if not _check(steps < 20000, "reglas: partida interminable (%s)" % tag):
+			return ""
+		g.tick(now)
+		bots.learn()
+		for e: Dictionary in g.events:
+			if e.seq > seen:
+				seen = e.seq
+				if e.type == "turn":
+					stats["turns"] = int(stats.get("turns", 0)) + 1
+					afk.clear()
+					if turn_ms > 0 and not g.cur_p().bot and arng.next() < 0.25:
+						afk[g.cur_p().id] = true   # humano que no actúa en este turno
+						stats["afk"] = int(stats.get("afk", 0)) + 1
+				elif e.type == "sudden":
+					stats["sudden"] = int(stats.get("sudden", 0)) + 1
+		var acted := false
+		for k in n:
+			var id := "b%d" % ((first + k) % n)
+			if afk.has(id) and g.cur_p().id == id:
+				continue
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			if not _check(err == "", "reglas: acción rechazada de %s: %s (%s)" % [id, err, JSON.stringify(a)]):
+				return ""
+			acted = true
+			first = (first + k + 1) % n
+			break
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if g.over != null:
+				break
+			if not _check(d >= 0, "reglas: partida atascada (%s)" % tag):
+				return ""
+			now = maxi(now + 1, d)
+		if not _check(_count(g) == total, "reglas: se perdieron o duplicaron cartas (%s)" % tag):
+			return ""
+		if g.over == null:
+			var eks := 0
+			for c in g.draw:
+				eks += 1 if c.type == "exploding" else 0
+			if g.prompt != null:
+				eks += (1 if g.prompt.has("card") and g.prompt.card.type == "exploding" else 0) + (g.prompt.eks.size() if g.prompt.has("eks") else 0)
+			if not _check(eks == g.living().size() - 1, "reglas: explosivos en juego != vivos - 1 (%s)" % tag):
+				return ""
+	if not _check(not g.removed.any(func(c: Game.Card) -> bool: return c.type == "exploding"), "reglas: se retiró un explosivo"):
+		return ""
+	stats["games"] = int(stats.get("games", 0)) + 1
+	stats["removed"] = int(stats.get("removed", 0)) + g.removed.size()
+	return g.over.winner
+
+
+## Huella de una partida de bots (digest, firma en cada paso y eventos) para comparar dos configuraciones.
+func _hash_game(seed_value: int, n: int, opts_extra: Dictionary) -> String:
+	var rng := Rng.new(seed_value)
+	var ps: Array = []
+	var lv := {}
+	for i in n:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+		lv["b%d" % i] = ["easy", "normal", "hard"][i % 3]
+	var opts := {"players": ps, "deck_mode": "official", "rng": rng, "now": 0}
+	opts.merge(opts_extra)
+	var g := Game.new(opts)
+	var bots := Bots.new(g, lv, rng.next, bool(opts_extra.get("plus", false)))
+	var h := ""
+	var now := 0
+	var steps := 0
+	var first := 0
+	while g.over == null and steps < 20000:
+		steps += 1
+		g.tick(now)
+		bots.learn()
+		var acted := false
+		for k in n:
+			var id := "b%d" % ((first + k) % n)
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			var err := g.act(id, a, now)
+			bots.note(id, a, err)
+			bots.learn()
+			acted = true
+			first = (first + k + 1) % n
+			break
+		h += digest(g) + g.signature() + "\n"
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if d < 0:
+				break
+			now = maxi(now + 1, d)
+	return (h + JSON.stringify(g.events)).sha256_text()
+
+
+func _announces(g: Game) -> int:
+	return _evs(g, "info").filter(func(e: Dictionary) -> bool: return e.text.begins_with("¡Muerte súbita!")).size()
+
+
+func _test_plus_rules() -> void:
+	print("Plus: reglas opcionales (turn_ms, nope_fixed, sudden_death)")
+	var f0 := _fails
+	# --- saneado
+	var g := _pg([true, true], {"turn_ms": "x", "nope_fixed": 1, "hand": 99, "sudden_death": true, "foo": 1})
+	_check(g.rules == {"hand": 8, "sudden_death": true}, "reglas mal formadas se descartan y se sanean: %s" % JSON.stringify(g.rules))
+	g = _pg([true, true], {"turn_ms": 30000.0, "nope_fixed": true, "hand": 5.0, "sudden_death": false})
+	_check(g.rules == {"turn_ms": 30000, "nope_fixed": true, "hand": 5, "sudden_death": false} and g.view("p0", 0).rules == g.rules, "reglas válidas se guardan saneadas y la vista las devuelve")
+	_check(_pg([true, true], {"turn_ms": -5}).rules == {"turn_ms": 0} and _pg([true, true], {"turn_ms": 10}).rules == {"turn_ms": 5000}, "turn_ms: negativo = 0, mínimo 5000")
+	_check(_pg([true, true], {"turn_ms": 30000}, 1, false).rules == {}, "plus = false: rules vacío")
+
+	# --- turn_ms
+	var R := {"turn_ms": 30000}
+	g = _pg([true, true, false], R)
+	_setdraw(g, ["cat_a", "cat_a", "cat_b", "cat_c"])
+	_check(g.next_deadline() == 30000, "turn_ms: el plazo del humano en turno entra en next_deadline")
+	var v := g.view("p1", 10000)
+	_check(v.has("turn") and v.turn.remain == 20000 and v.turn.total == 30000, "view.turn visible para todos y con el tiempo restante")
+	g.tick(29999)
+	_check(g.cur == 0 and g.draw.size() == 4, "turn_ms: no roba antes de vencer")
+	g.tick(30000)
+	_check(g.draw.size() == 3 and g.players[0].hand.size() == 1 and g.cur == 1, "turn_ms: al vencer roba por el humano y pasa el turno")
+	_check(g.view("p0", 30000).turn.remain == 30000, "el contador empieza al comenzar el turno siguiente")
+	# la ventana de Nop no consume el plazo
+	g = _pg([true, true, false], R)
+	_setdraw(g, ["cat_a", "cat_a", "cat_b", "cat_c"])
+	var sf := _give(g, 0, "see_future")
+	_give(g, 1, "nope")
+	_clk = 20000
+	_check(_play(g, "p0", sf) == "", "p0 juega Ver el Futuro")
+	_check(not g.view("p1", _clk).has("turn") and g.next_deadline() == _clk + 6500, "durante la ventana de Nop no hay plazo de turno ni view.turn")
+	g.tick(_clk + 6500)
+	_check(g.stack.is_empty() and g.view("p0", 26500).turn.remain == 30000 and g.next_deadline() == 56500, "al cerrarse la ventana el contador vuelve a empezar completo")
+	g.tick(50000)
+	_check(g.draw.size() == 4 and g.cur == 0, "turn_ms: lo gastado en la ventana no cuenta (y la acción reinició el contador)")
+	g.tick(56500)
+	_check(g.draw.size() == 3 and g.cur == 1, "turn_ms: vence 30 s después de cerrarse la ventana")
+	# una decisión abierta pausa el contador
+	g = _pg([true, true], R)
+	_setdraw(g, ["cat_a", "cat_a", "cat_b", "cat_c"])
+	_play(g, "p0", _give(g, 0, "dig_deeper"))
+	g.tick(900)
+	_check(g.prompt != null and g.prompt.type == "dig", "Cava Más Hondo abre una decisión")
+	_check(not g.view("p0", 1000).has("turn"), "con una decisión abierta no hay view.turn")
+	g.tick(900 + 35000)
+	_check(g.prompt != null and g.prompt.type == "dig" and g.cur == 0, "turn_ms: no corre con una decisión abierta")
+	# bots: sin plazo
+	g = _pg([false, true], R)
+	_check(g.next_deadline() == -1 and not g.view("p1", 5).has("turn"), "turn_ms: no afecta a bots (sin plazo ni view.turn)")
+	var n_draw := g.draw.size()
+	g.tick(5000000)
+	_check(g.draw.size() == n_draw and g.cur == 0, "turn_ms: el bot no roba solo")
+	# desconectado: sigue el plazo de desconexión, no el de turno
+	g = _pg([true, true], R)
+	g.set_connected("p0", false, 1000)
+	_check(g.next_deadline() == 1000 + int(g.cfg["GONE_MS"]) and not g.view("p1", 1000).has("turn"), "desconectado: plazo GONE_MS y sin view.turn")
+	g.set_connected("p0", true, 4000)
+	_check(g.next_deadline() == 34000 and g.view("p1", 4000).turn.remain == 30000, "al reconectar, el plazo de turno empieza de nuevo")
+	# sin la regla: no hay robo automático para conectados
+	g = _pg([true, true], {})
+	g.tick(10000000)
+	_check(g.cur == 0 and g.next_deadline() == -1 and not g.view("p0", 0).has("turn"), "sin turn_ms no hay robo automático ni view.turn")
+	g = _pg([true, true], {"turn_ms": 0})
+	_check(g.next_deadline() == -1 and not g.view("p0", 0).has("turn"), "turn_ms = 0: sin límite")
+	g = _pg([true, true], R, 1, false)
+	g.tick(10000000)
+	_check(g.cur == 0 and g.next_deadline() == -1 and not g.view("p0", 0).has("turn"), "plus = false: turn_ms se ignora")
+
+	# --- nope_fixed
+	var NF := {"nope_fixed": true}
+	var tot := {}
+	for with_nope: bool in [false, true]:
+		for fixed: bool in [false, true]:
+			g = _pg([true, true, false], NF if fixed else {})
+			if with_nope:
+				_give(g, 1, "nope")
+			_clk = 100
+			_play(g, "p0", _give(g, 0, "see_future"))
+			tot["%s/%s" % [fixed, with_nope]] = g.stack[0].total
+	_check(tot["true/false"] == 3500 and tot["true/true"] == 3500, "nope_fixed: ventana de 3500 ms con y sin Nop en la mesa")
+	_check(tot["false/false"] == 900 and tot["false/true"] == 6500, "sin nope_fixed: 900 ms sin Nop y 6500 ms con Nop (comportamiento actual)")
+	g = _pg([true, true, false], NF)
+	_give(g, 1, "nope")
+	_give(g, 2, "nope")
+	_clk = 100
+	_play(g, "p0", _give(g, 0, "see_future"))
+	g.act("p1", {"a": "pass"}, 200)
+	g.act("p2", {"a": "pass"}, 200)
+	_check(g.stack.size() == 1, "nope_fixed: aunque todos pasen la ventana no se cierra antes")
+	g.tick(3599)
+	_check(g.stack.size() == 1, "nope_fixed: sigue abierta antes de 3500 ms")
+	g.tick(3600)
+	_check(g.stack.is_empty(), "nope_fixed: se cierra a los 3500 ms")
+	# tras un Nop la ventana se reabre con la misma duración
+	g = _pg([true, true, false], NF)
+	_give(g, 1, "nope")
+	_clk = 100
+	_play(g, "p0", _give(g, 0, "see_future"))
+	g.act("p1", {"a": "play", "cards": [g.players[1].hand[0].id]}, 1000)
+	_check(g.stack[0].total == 3500 and g.stack[0].deadline == 4500, "nope_fixed: tras un Nop la ventana dura 3500 ms otra vez")
+	# excepción: ningún otro humano conectado
+	for with_nope: bool in [false, true]:
+		g = _pg([true, false, false], NF)
+		if with_nope:
+			_give(g, 1, "nope")
+		_clk = 100
+		_play(g, "p0", _give(g, 0, "see_future"))
+		_check(g.stack[0].total == (6500 if with_nope else 900), "nope_fixed: contra bots solos se usa la ventana de siempre (%s)" % ("con Nop" if with_nope else "sin Nop"))
+	g = _pg([true, false, false], NF)
+	_give(g, 1, "nope")
+	_play(g, "p0", _give(g, 0, "see_future"))
+	g.act("p1", {"a": "pass"}, 200)
+	_check(g.stack.is_empty(), "nope_fixed: contra bots solos sí se cierra al pasar todos")
+	g = _pg([true, true, false], NF)
+	g.set_connected("p1", false, 0)
+	_play(g, "p0", _give(g, 0, "see_future"))
+	_check(g.stack[0].total == 900, "nope_fixed: un humano desconectado no cuenta como otro humano")
+	g = _pg([true, true, false], NF, 1, false)
+	_play(g, "p0", _give(g, 0, "see_future"))
+	_check(g.stack[0].total == 900, "plus = false: nope_fixed se ignora")
+
+	# --- sudden_death
+	var SD := {"sudden_death": true}
+	g = Game.new({"players": [{"id": "p0", "name": "P0", "bot": true}, {"id": "p1", "name": "P1", "bot": true}], "deck_mode": "official", "rng": Rng.new(3), "now": 0, "plus": true, "rules": SD})
+	_check(_announces(g) == 1, "sudden_death: con 2 jugadores se anuncia al empezar")
+	for p in g.players:
+		p.hand.clear()
+	g.cur = 0
+	g.turns_left = 1
+	g.events.clear()
+	# fondo = índice 0; arriba = último
+	_setdraw(g, ["exploding", "cat_a", "cat_b", "cat_c", "cat_d", "cat_a", "cat_b", "cat_c"])
+	var mut0 := g.mut
+	g.act("p0", {"a": "draw"}, 10)
+	_check(g.removed.is_empty() and g.draw.size() == 7, "sudden_death: tras el turno de uno solo no se retira nada")
+	g.act("p1", {"a": "draw"}, 20)
+	_check(g.removed.size() == 1 and g.removed[0].type == "cat_a" and g.draw.size() == 5 and g.draw[0].type == "exploding", "sudden_death: tras la vuelta se retira la primera no explosiva desde el fondo (salta el explosivo)")
+	var se := _evs(g, "sudden")
+	_check(se.size() == 1 and se[0].left == 5 and se[0].text == "Muerte súbita: se retira una carta del mazo." and not se[0].has("to"), "evento sudden público con left y texto")
+	_check(g.mut == mut0 + 3 and g.tops == 2, "sudden_death: mut cambia y tops solo cuenta las cartas robadas de arriba")
+	g.act("p0", {"a": "draw"}, 30)
+	g.act("p1", {"a": "draw"}, 40)
+	_check(g.removed.size() == 2 and g.draw.size() == 2 and _evs(g, "sudden").size() == 2, "sudden_death: una carta por vuelta")
+	# solo explosivos: no se retira nada
+	g = _pg([false, false, false], SD)
+	_check(_evs(g, "sudden").is_empty() and _announces(g) == 0, "sudden_death: con 3 vivos no hay anuncio ni retirada")
+	g.players[2].alive = false
+	_setdraw(g, ["exploding", "exploding"])
+	g.cur = 0
+	g._advance(1, false, 5)
+	g._advance(1, false, 6)
+	_check(g.removed.is_empty() and g.draw.size() == 2, "sudden_death: si solo quedan explosivos no se retira nada")
+	# pausa con 3+: si reviven a alguien se reinicia la cuenta
+	g = _pg([false, false, false], SD)
+	_setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d", "cat_a", "cat_b"])
+	g.players[2].alive = false
+	g._advance(1, false, 1)   # p0 termina
+	_check(g.cur == 1 and g._sd_done.size() == 1, "sudden_death: cuenta el turno terminado de p0")
+	g.players[2].alive = true   # reviven: 3 vivos
+	g._advance(1, false, 2)
+	_check(g.removed.is_empty() and g._sd_done.is_empty(), "sudden_death: con 3 vivos se pausa y se reinicia la cuenta")
+	g.players[2].alive = false
+	g.cur = 0
+	g._advance(1, false, 3)
+	g._advance(1, false, 4)
+	_check(g.removed.size() == 1, "sudden_death: reanuda con 2 vivos")
+	# muerte real 3 -> 2: anuncio una sola vez
+	g = _pg([false, false, false], SD)
+	_setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d", "cat_a", "cat_b", "exploding"])
+	g.act("p0", {"a": "draw"}, 1)
+	_check(g.living().size() == 2 and _announces(g) == 1, "sudden_death: al quedar 2 vivos se anuncia")
+	g.act("p1", {"a": "draw"}, 2)
+	g.act("p2", {"a": "draw"}, 3)
+	_check(g.removed.size() == 1 and _evs(g, "sudden").size() == 1 and _announces(g) == 1, "sudden_death: la vuelta de los 2 vivos retira una carta (anuncio único)")
+	# sin la regla / plus = false: nada
+	for opts: Array in [[{}, true], [SD, false]]:
+		g = _pg([false, false], opts[0], 3, opts[1])
+		_setdraw(g, ["cat_a", "cat_b", "cat_c", "cat_d", "cat_a", "cat_b"])
+		for i in 4:
+			g.act("p%d" % (i % 2), {"a": "draw"}, i)
+		_check(g.removed.is_empty() and g.draw.size() == 2 and _evs(g, "sudden").is_empty(), "sin la regla (o con plus = false) no se retira nada")
+
+	# --- plus = false con reglas rellenas: idéntico al clásico
+	var full := {"turn_ms": 30000, "nope_fixed": true, "hand": 5, "sudden_death": true}
+	for i in 8:
+		var n := 2 + i % 4
+		var a := _hash_game(900 + i, n, {})
+		var b := _hash_game(900 + i, n, {"plus": false, "rules": full, "packs": ["crypt"]})
+		_check(a == b, "plus = false con rules rellenas difiere del clásico (semilla %d)" % (900 + i))
+	var c1 := Game.new({"players": [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}], "rng": Rng.new(4), "now": 0})
+	var c2 := Game.new({"players": [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}], "rng": Rng.new(4), "now": 0, "plus": false, "rules": full})
+	_check(c1.signature() == c2.signature() and c2.rules.is_empty() and c1.view("a", 0).keys() == c2.view("a", 0).keys(), "plus = false con rules: firma y claves de la vista idénticas al clásico")
+
+	# --- la muerte súbita acorta las partidas (2 jugadores, bots)
+	var s_off := {}
+	var s_on := {}
+	for sd_i in 200:
+		var sd_seed := 5000 + sd_i * 11
+		if _rules_game(2, sd_seed, "official", [], {}, 0, s_off) == "" or _rules_game(2, sd_seed, "official", [], SD, 0, s_on) == "":
+			return
+	var t_off: float = float(s_off["turns"]) / float(s_off["games"])
+	var t_on: float = float(s_on["turns"]) / float(s_on["games"])
+	_check(t_on < t_off and s_on.get("sudden", 0) > 0, "sudden_death: las partidas acaban antes (%.1f turnos de media frente a %.1f)" % [t_on, t_off])
+
+	# --- simulación general: combinaciones aleatorias, «humanos» que a veces no actúan
+	var crng := Rng.new(2024)
+	var st := {}
+	var games := 0
+	for gi in 300:
+		var n := 2 + gi % 4
+		var rl := {}
+		if crng.next() < 0.6:
+			rl["turn_ms"] = [0, 30000, 60000][int(crng.next() * 3)]
+		if crng.next() < 0.5:
+			rl["nope_fixed"] = true
+		if crng.next() < 0.4:
+			rl["hand"] = [5, 6, 7][int(crng.next() * 3)]
+		if crng.next() < 0.5:
+			rl["sudden_death"] = true
+		var humans := int(crng.next() * (n + 1))
+		var pk: Array = ["crypt"] if crng.next() < 0.8 else []
+		if _rules_game(n, 8000 + gi * 7, "full" if gi % 5 == 0 else "official", pk, rl, humans, st) == "":
+			return
+		games += 1
+	_check(st.get("afk", 0) > 0 and st.get("sudden", 0) > 0, "la simulación ejerció turnos ausentes y retiradas (%d y %d)" % [st.get("afk", 0), st.get("sudden", 0)])
+	if _fails == f0:
+		_ok("reglas opcionales: turn_ms, nope_fixed y sudden_death; %d partidas mezcladas sin atascos ni cartas perdidas" % games)
 
 
 ## Sala de pruebas: recoge los mensajes en lugar de enviarlos por la red. Se crea al vuelo con load() porque
