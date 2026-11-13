@@ -5,6 +5,8 @@ extends Node
 
 signal updated
 signal error(message: String)
+## Reacción rápida de un jugador (solo Plus, UX-08): índice 0-5 de EmoteSet. No forma parte de la partida.
+signal emote(player_id: String, index: int)
 
 var me_id := ""
 
@@ -39,6 +41,11 @@ func is_network() -> bool:
 
 func is_host() -> bool:
 	return true
+
+
+## Envía una reacción rápida (índice 0-5). Solo hace algo en partidas Plus; el resto la ignora en silencio.
+func send_emote(_index: int) -> void:
+	pass
 
 
 ## Victorias por jugador en la sala ({id: n}); vacío fuera de salas Plus.

@@ -38,6 +38,7 @@ func _initialize() -> void:
 	_test_difficulty()
 	_test_plus_bots()
 	_test_rotten()
+	_test_plus_emotes()
 	await _test_sfx_plus()
 	print("\n%s  (%d ms)" % ["TODO OK" if _fails == 0 else "%d FALLOS" % _fails, Time.get_ticks_msec() - t0])
 	quit(1 if _fails > 0 else 0)
@@ -860,7 +861,7 @@ func _test_plus_rules() -> void:
 ## las salas usan autoloads (Net, CardDB), que no existen cuando se compila este archivo.
 func _test_room() -> Node:
 	var sc := GDScript.new()
-	sc.source_code = "extends \"res://scripts/net/room_host.gd\"\nvar out: Array = []\nfunc send(peer: int, m: Dictionary) -> void:\n\tout.append([peer, m])\n"
+	sc.source_code = "extends \"res://scripts/net/room_host.gd\"\nvar out: Array = []\nvar clock := -1   # >= 0: reloj controlado por la prueba\nfunc send(peer: int, m: Dictionary) -> void:\n\tout.append([peer, m])\nfunc now() -> int:\n\treturn clock if clock >= 0 else Time.get_ticks_msec()\n"
 	sc.reload()
 	return sc.new()
 
@@ -3882,3 +3883,293 @@ func _test_sfx_plus() -> void:
 	sfx.set_sfx(s0[0])
 	_check(sfx._music.volume_db == -15.0 or s0[3] < 1.0, "volumen por defecto = -15 dB como antes")
 	_ok("set_layers / set_intensity / volúmenes sin errores")
+
+
+# ---------------------------------------------------------------- T53: reacciones rápidas (UX-08) y bots que reaccionan (IA-04)
+
+## Sala de pruebas con un anfitrión (peer 1), dos invitados (peers 7 y 8) y un bot, con la partida empezada si `start`.
+func _emote_room(plus: bool, start: bool) -> Node:
+	var room = _test_room()
+	room.clock = 1000
+	if plus:
+		room.configure(true)
+	room.on_msg(1, {"t": "hello", "name": "Host", "token": "h", "proto": 3})
+	room.on_msg(7, {"t": "hello", "name": "Ana", "token": "a", "proto": 3})
+	room.on_msg(8, {"t": "hello", "name": "Beto", "token": "b", "proto": 3})
+	room.on_msg(1, {"t": "addBot"})
+	if start:
+		room.on_msg(1, {"t": "start"})
+	room.out.clear()
+	return room
+
+
+static func _emotes_out(room: Node) -> Array:
+	return room.out.filter(func(x: Array) -> bool: return x[1].t == "emote")
+
+
+func _test_plus_emotes() -> void:
+	print("Plus: reacciones rápidas")
+	var f0 := _fails
+	_check(EmoteSet.COUNT == 6 and EmoteSet.EMOJI.size() == 6 and EmoteSet.WORDS.size() == 6 and EmoteSet.COLORS.size() == 6, "EmoteSet: 6 reacciones con emoji, palabra y color")
+	_check(EmoteSet.valid(0) and EmoteSet.valid(5) and EmoteSet.valid(3.0) and not EmoteSet.valid(-1) and not EmoteSet.valid(6) and not EmoteSet.valid(2.5) and not EmoteSet.valid("1") and not EmoteSet.valid(null) and not EmoteSet.valid(true), "EmoteSet.valid: solo enteros 0-5")
+	# --- Sala Plus: reenvío a todos
+	var room = _emote_room(true, true)
+	var ana: String = room._by_peer(7).id
+	var sig0: String = room.game.signature()
+	room.clock = 10000
+	room.on_msg(7, {"t": "emote", "e": 3})
+	var out := _emotes_out(room)
+	var peers: Array = out.map(func(x: Array) -> int: return x[0])
+	peers.sort()
+	_check(out.size() == 3 and peers == [1, 7, 8], "sala Plus: la reacción llega al anfitrión, al emisor y al otro invitado (peers %s)" % str(peers))
+	_check(out.all(func(x: Array) -> bool: return x[1] == {"t": "emote", "id": ana, "e": 3}), "el mensaje reenviado es {t, id del emisor, e}")
+	_check(room.out.size() == 3 and room.game.signature() == sig0, "no se envía estado ni cambia la partida")
+	# Descartes: índice inválido, jugador desconocido
+	room.out.clear()
+	room.clock = 20000
+	for bad: Variant in [-1, 6, 99, "2", null, 2.5, true, [1]]:
+		room.on_msg(8, {"t": "emote", "e": bad})
+	room.on_msg(8, {"t": "emote"})
+	room.on_msg(99, {"t": "emote", "e": 1})
+	room.on_msg(0, {"t": "emote", "e": 1})
+	_check(room.out.is_empty(), "índice inválido y jugador desconocido: descartados sin respuesta")
+	room.on_msg(8, {"t": "emote", "e": 5})
+	_check(_emotes_out(room).size() == 3 and _emotes_out(room)[0][1].e == 5, "los descartes no gastan el turno de espera")
+	# Límite: 1 cada 3 s por jugador
+	room.out.clear()
+	room.clock = 22999
+	room.on_msg(8, {"t": "emote", "e": 1})
+	_check(room.out.is_empty(), "a los 2,999 s se descarta")
+	room.on_msg(7, {"t": "emote", "e": 1})
+	_check(_emotes_out(room).size() == 3, "el límite es por jugador: otro jugador sí puede")
+	room.out.clear()
+	room.clock = 23000
+	room.on_msg(8, {"t": "emote", "e": 1})
+	_check(_emotes_out(room).size() == 3, "a los 3 s vuelve a aceptarse")
+	room.out.clear()
+	room.clock = 23100
+	room.on_msg(8, {"t": "emote", "e": 2})
+	_check(room.out.is_empty(), "lo descartado no reinicia la cuenta (sigue contando desde la última aceptada)")
+	# Muertos y fin de partida
+	room.out.clear()
+	room.clock = 40000
+	room.game.P(ana).alive = false
+	room.on_msg(7, {"t": "emote", "e": 3})
+	_check(_emotes_out(room).size() == 3, "un jugador muerto puede reaccionar")
+	room.out.clear()
+	room.clock = 50000
+	room.game.over = {"winner": "p1"}
+	room.on_msg(7, {"t": "emote", "e": 3})
+	_check(room.out.is_empty(), "con la partida terminada se ignora")
+	room.free()
+	# --- Antes de empezar
+	room = _emote_room(true, false)
+	room.clock = 10000
+	room.on_msg(7, {"t": "emote", "e": 3})
+	_check(room.out.is_empty(), "antes de empezar la partida se ignora")
+	room.free()
+	# --- Sala clásica: ignora en silencio
+	room = _emote_room(false, true)
+	room.clock = 10000
+	room.on_msg(7, {"t": "emote", "e": 3})
+	room.on_msg(1, {"t": "emote", "e": 3})
+	_check(room.out.is_empty() and room._emotes == null, "sala clásica: `emote` se ignora y no se envía nada")
+	room.free()
+	# --- Sesiones
+	room = _emote_room(true, false)
+	var cs: Node = load("res://scripts/net/client_session.gd").new()
+	cs.setup(room)
+	cs.me_id = "p1"
+	var got := []
+	cs.emote.connect(func(id: String, i: int) -> void: got.append([id, i]))
+	cs.send_emote(2)
+	_check(room.out.is_empty(), "ClientSession.send_emote sin lobby Plus no envía nada")
+	cs.receive({"t": "lobby", "settings": {"plus": false}, "started": true, "players": []})
+	cs.send_emote(2)
+	cs.receive({"t": "emote", "id": "p2", "e": 2})
+	_check(room.out.is_empty() and got.is_empty(), "ClientSession en sala clásica: ni envía ni muestra reacciones")
+	cs.receive({"t": "lobby", "settings": {"plus": true}, "started": true, "players": []})
+	room.on_msg(1, {"t": "start"})   # el anfitrión (peer 1) ya existe como jugador
+	room.out.clear()
+	room.clock = 10000
+	cs.send_emote(4)
+	var mine: Array = _emotes_out(room)
+	_check(mine.size() == 3 and mine[0][1].t == "emote" and mine[0][1].e == 4, "ClientSession Plus envía {t: emote, e} a la sala (que la reenvía)")
+	cs.send_emote(9)
+	cs.send_emote(-1)
+	_check(_emotes_out(room).size() == 3, "ClientSession no envía índices inválidos")
+	cs.receive({"t": "emote", "id": "p2", "e": 4})
+	cs.receive({"t": "emote", "id": "p2", "e": 7})
+	cs.receive({"t": "emote", "e": 1})
+	_check(got == [["p2", 4]], "ClientSession emite la señal solo con reacciones válidas (%s)" % str(got))
+	cs.free()
+	room.free()
+	var lm: Node = load("res://scripts/match/local_match.gd").new()
+	lm.start({"rivals": 2, "plus": true, "seed": 5})
+	var lgot := []
+	lm.emote.connect(func(id: String, i: int) -> void: lgot.append([id, i]))
+	lm.send_emote(1)
+	lm.send_emote(2)
+	lm.send_emote(9)
+	_check(lgot == [["p0", 1]], "LocalMatch Plus: emite la propia reacción y aplica el límite de 3 s (%s)" % str(lgot))
+	lm._emote_at -= 3000
+	lm.send_emote(5)
+	_check(lgot.size() == 2 and lgot[1] == ["p0", 5], "LocalMatch: pasados 3 s vuelve a emitir")
+	lm.start({"rivals": 2, "seed": 5})
+	lgot.clear()
+	lm.send_emote(1)
+	_check(lgot.is_empty() and lm._emotes == null, "LocalMatch clásico: sin reacciones ni bots que reaccionen")
+	lm.free()
+	_emotes_bots()
+	if _fails == f0:
+		_ok("reacciones: reenvío a todos con id, validación, límite de 3 s, clásico y pre-partida ignorados, sesiones, bots (IA-04)")
+
+
+## Simula una partida de bots por completo; con `emotes` también deja correr BotEmotes. Devuelve {digests, reactions}.
+func _emote_sim(seed_value: int, n: int, with_emotes: bool, emote_seed: int) -> Dictionary:
+	var rng := Rng.new(seed_value)
+	var ps: Array = []
+	var lv := {}
+	var ids: Array = []
+	for i in n:
+		ps.append({"id": "b%d" % i, "name": "B%d" % i, "bot": true})
+		lv["b%d" % i] = ["easy", "normal", "hard"][i % 3]
+		ids.append("b%d" % i)
+	var g := Game.new({"players": ps, "deck_mode": "full", "rng": rng, "now": 0, "plus": true, "packs": ["crypt"], "rules": {"rotten": true}})
+	var bots := Bots.new(g, lv, rng.next, true)
+	var em: BotEmotes = BotEmotes.new(emote_seed).start(g) if with_emotes else null
+	var digests: Array[String] = []
+	var reactions: Array[Dictionary] = []
+	var now := 0
+	var steps := 0
+	var first := 0
+	while g.over == null and steps < 20000:
+		steps += 1
+		g.tick(now)
+		bots.learn()
+		var acted := false
+		for k in n:
+			var id: String = ids[(first + k) % n]
+			var a := bots.decide(id)
+			if a.is_empty():
+				continue
+			bots.note(id, a, g.act(id, a, now))
+			bots.learn()
+			acted = true
+			first = (first + k + 1) % n
+			break
+		if em != null:
+			em.observe(g, ids, now)
+			for r: Dictionary in em.due(now):
+				reactions.append({"t": now, "id": r.id, "e": r.e})
+		digests.append(digest(g) + g.signature())
+		if acted:
+			now += 400
+		else:
+			var d := g.next_deadline()
+			if d < 0:
+				break
+			now = maxi(now + 1, d)
+	return {"digests": digests, "reactions": reactions, "over": g.over != null}
+
+
+func _emotes_bots() -> void:
+	# Reglas por suceso: probado a mano con eventos públicos sobre un motor real
+	var g := _rgame(3, 7, {"rotten": true})
+	var ids := ["b0", "b1", "b2"]
+	var kinds := {"died_other": {}, "died_self": {}, "attack": {}, "steal": {}, "cancel": {}, "rot": {}, "private": {}}
+	var early := 0
+	var late_ok := 0
+	var total := 0
+	for sd in range(1, 81):
+		var base := 100000 * sd
+		var em := BotEmotes.new(sd).start(g)
+		var probes := {
+			"died_other": ["died", {"player": "b0"}, ["b1", "b2"], [0, 5], ["b1", "b2"]],   # b0 es humano
+			"died_self": ["died", {"player": "b0"}, ["b0"], [3]],
+			"attack": ["attack", {"player": "b2", "target": "b1", "n": 2}, ["b1"], [1]],
+			"steal": ["steal", {"player": "b2", "target": "b1"}, ["b1"], [1]],
+			"private": ["steal", {"player": "b2", "target": "b1"}, [], []],
+		}
+		for k: String in probes:
+			var pr: Array = probes[k]
+			var gg := _rgame(3, 7, {"rotten": true})
+			var em2 := BotEmotes.new(sd).start(gg)
+			gg.emit(pr[0], pr[1], "b1" if k == "private" else "")
+			em2.observe(gg, pr[4] if pr.size() > 4 else ids, base)
+			total += 1
+			if not em2.due(base + 499).is_empty():
+				early += 1
+			var rs := em2.due(base + 1500)
+			for r: Dictionary in rs:
+				kinds[k][r.e] = int(kinds[k].get(r.e, 0)) + 1
+				if k == "died_self":
+					late_ok += 1 if r.id == "b0" else 0
+				elif not (pr[2] as Array).has(r.id) or not (pr[3] as Array).has(r.e):
+					_check(false, "reacción inesperada en «%s»: %s" % [k, str(r)])
+		# Anulación: le anulan a b1 la jugada de Ataque
+		var gc := _rgame(3, 7, {"rotten": true})
+		var emc := BotEmotes.new(sd).start(gc)
+		gc.emit("play", {"player": "b1", "eff": "attack"})
+		gc.emit("play", {"player": "b2", "eff": "skip"})
+		gc.emit("cancel", {"eff": "attack"})
+		emc.observe(gc, ids, base)
+		for r: Dictionary in emc.due(base + 1500):
+			kinds["cancel"][r.e] = int(kinds["cancel"].get(r.e, 0)) + 1
+			_check(r.id == "b1" and r.e == 2, "anulación: reacciona la víctima con 😾 (%s)" % str(r))
+		# Putrefacto arriba y le toca robar
+		var gr := _rgame(3, 7, {"rotten": true})
+		for c: Game.Card in gr.draw:
+			if c.type == "rotten":
+				gr.draw.erase(c)
+				gr.draw.append(c)
+				c.up = true
+				break
+		var emr := BotEmotes.new(sd).start(gr)
+		_check(gr.rot_depth() == 0, "montaje: el Putrefacto está arriba")
+		gr.emit("turn", {"player": "b2"})
+		emr.observe(gr, ids, base)
+		for r: Dictionary in emr.due(base + 1500):
+			kinds["rot"][r.e] = int(kinds["rot"].get(r.e, 0)) + 1
+			_check(r.id == "b2" and r.e == 4, "Putrefacto arriba: reacciona quien roba con 🙏 (%s)" % str(r))
+		# Si no está arriba, no hay reacción
+		var gn := _rgame(3, 7, {"rotten": true})
+		var emn := BotEmotes.new(sd).start(gn)
+		gn.emit("turn", {"player": "b2"})
+		emn.observe(gn, ids, base)
+		_check(emn.due(base + 5000).is_empty(), "sin Putrefacto arriba, nadie reza")
+	_check(early == 0, "ninguna reacción sale antes de 0,5 s (%d)" % early)
+	var seen := true
+	for k: String in ["died_other", "died_self", "attack", "steal", "cancel", "rot"]:
+		seen = _check(not (kinds[k] as Dictionary).is_empty(), "los bots reaccionan alguna vez ante «%s»" % k) and seen
+	_check(kinds["died_other"].has(0) and kinds["died_other"].has(5), "ante la muerte de un rival salen tanto 😹 como 👏")
+	_check(kinds["private"].is_empty(), "los eventos privados (con `to`) no provocan reacciones")
+	var frac := float(kinds["attack"].values().reduce(func(a: int, b: int) -> int: return a + b, 0)) / 80.0
+	_check(frac > 0.1 and frac < 0.8, "reaccionan A VECES, no siempre (ante un ataque: %.0f%% de 80 intentos)" % (frac * 100.0))
+	# Espera mínima de 8 s por bot y alguna reacción en partidas largas con semilla fija
+	var total_r := 0
+	var gap_ok := true
+	var by_bot := {}
+	for sd in 12:
+		var r := _emote_sim(900 + sd, 5, true, 31 + sd)
+		_check(r.over, "la simulación %d termina" % sd)
+		var last := {}
+		for x: Dictionary in r.reactions:
+			total_r += 1
+			by_bot[x.id] = int(by_bot.get(x.id, 0)) + 1
+			if last.has(x.id) and x.t - int(last[x.id]) < 8000:
+				gap_ok = false
+				_check(false, "el bot %s reaccionó dos veces en %d ms (partida %d)" % [x.id, x.t - int(last[x.id]), sd])
+			last[x.id] = x.t
+			_check(EmoteSet.valid(x.e), "índice de reacción válido")
+	_check(total_r > 0 and by_bot.size() >= 3, "en 12 partidas simuladas los bots reaccionan (%d reacciones, %d bots distintos)" % [total_r, by_bot.size()])
+	_check(gap_ok, "nunca más de una reacción cada 8 s por bot")
+	# Misma evolución con y sin reacciones: firma del motor paso a paso
+	var same := 0
+	for sd in 6:
+		var a := _emote_sim(700 + sd, 3 + sd % 3, false, 0)
+		var b := _emote_sim(700 + sd, 3 + sd % 3, true, 5 + sd)
+		if _check(a.digests == b.digests and a.digests.size() > 20, "partida %d: misma firma paso a paso con y sin reacciones (%d pasos)" % [sd, a.digests.size()]):
+			same += 1
+	print("    %d reacciones de bots en 12 partidas de 5 jugadores; %d partidas idénticas con y sin reacciones" % [total_r, same])
+

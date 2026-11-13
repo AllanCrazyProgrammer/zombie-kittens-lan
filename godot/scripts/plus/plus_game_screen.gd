@@ -148,6 +148,17 @@ var _sudden_snd := false         # el sonido de muerte súbita solo suena la pri
 var _music_key := ""
 var _sfx_log: Array[String] = [] # prueba: últimos sonidos pedidos
 var _vol_sliders := {}           # prueba: deslizadores del menú de pausa
+# --- Reacciones rápidas (UX-08)
+var _hud_root: Control           # raíz de la interfaz (para insertar el selector bajo las ventanas)
+var _emotes_on := EmoteSet.load_enabled()   # ajuste local «Reacciones: sí/no»
+var _emote_btn: Button           # botón de la barra superior
+var _emote_icon: EmoteIcon       # su dibujo y su enfriamiento
+var _emote_picker: EmotePicker   # selector abierto
+var _emote_layer: Control        # capa de los globos
+var _emote_bubbles := {}         # id del jugador -> EmoteBubble (un solo globo por jugador)
+var _emote_cd_end := 0           # instante (ms de la sesión) en que se puede volver a reaccionar
+var _turn_fit_key := ""
+var dbg_emotes := 0              # prueba: reacciones recibidas y mostradas
 
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
@@ -218,6 +229,7 @@ func _ready() -> void:
 	Sfx.set_layers(true)       # música por capas mientras se juega en Plus
 	_opps.chip_pressed.connect(_aim_pick)
 	session.updated.connect(_refresh)
+	session.emote.connect(_on_emote)
 	session.error.connect(func(msg: String) -> void: _toast(msg, true))
 	_refresh()
 
@@ -250,6 +262,8 @@ func _process(delta: float) -> void:
 		av.scale = Vector3.ONE * (1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0))
 	_place_strip()
 	var now := session.now()
+	_tick_emotes(now)
+	_fit_turn_label()
 	_tick_turn(now)
 	_pulse_rot()
 	for t: Array in _timers:
@@ -1506,6 +1520,7 @@ func _build_hud() -> void:
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(root)
+	_hud_root = root
 
 	var top := MarginContainer.new()
 	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -1543,6 +1558,8 @@ func _build_hud() -> void:
 	_turn_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_turn = UIKit.label("", 50, UIKit.C.ink, true)
 	_turn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_turn.clip_text = true            # la barra manda: el rótulo se encoge (ver _fit_turn_label) en vez de empujar los botones
+	_turn.custom_minimum_size = Vector2(0, 0)
 	var turn_col := UIKit.vbox(2)
 	turn_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	turn_col.add_child(_turn)
@@ -1552,6 +1569,15 @@ func _build_hud() -> void:
 	turn_col.add_child(_turn_bar)
 	_turn_panel.add_child(turn_col)
 	bar.add_child(_turn_panel)
+	# Reacciones (UX-08): botón con un globo dibujado, junto a HISTORIAL
+	_emote_btn = UIKit.button("", "normal", 34)
+	_emote_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_emote_btn.custom_minimum_size = Vector2(104, 0)
+	_emote_btn.visible = _emotes_on
+	_emote_btn.pressed.connect(_toggle_emote_picker)
+	_emote_icon = EmoteIcon.new()
+	_emote_btn.add_child(_emote_icon)
+	bar.add_child(_emote_btn)
 	var hist := UIKit.button("HISTORIAL", "normal", 34)
 	hist.size_flags_horizontal = Control.SIZE_SHRINK_END
 	hist.pressed.connect(_open_history)
@@ -1621,6 +1647,10 @@ func _build_hud() -> void:
 	_fx_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_fx_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	root.add_child(_fx_root)
+	_emote_layer = Control.new()
+	_emote_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_emote_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_emote_layer)
 	_modal_root = Control.new()
 	_modal_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_modal_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2072,7 +2102,10 @@ func _build_modal() -> void:
 			_add_btn(audio, "Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34)
 			_volume_row(box, "Efectos", Sfx.sfx_volume, func(x: float) -> void: Sfx.set_sfx_volume(x), true)
 			_volume_row(box, "Música", Sfx.music_volume, func(x: float) -> void: Sfx.set_music_volume(x), false)
-			_add_btn(box, "Paso automático: sí" if _auto_pass else "Paso automático: no", "normal", _toggle_auto_pass, 34)
+			var opts := UIKit.hbox(12)
+			box.add_child(opts)
+			_add_btn(opts, "Paso automático: sí" if _auto_pass else "Paso automático: no", "normal", _toggle_auto_pass, 34)
+			_add_btn(opts, "Reacciones: sí" if _emotes_on else "Reacciones: no", "normal", _toggle_emotes, 34)
 			_text(box, "Dejar pasar lo que no me afecta: no se te pide Nop ante jugadas ajenas que no van contra ti.", 24, UIKit.C.dim)
 			_text(box, active_rules_line(), 26, UIKit.C.gold)
 			_add_btn(box, "Salir de la partida", "danger", _ask_exit, 40)
@@ -2153,6 +2186,129 @@ func _check_auto_pass() -> void:
 func _auto_pass_send(sig: String) -> void:
 	if _auto_pass and NopWindow.signature(_v) == sig and NopWindow.should_auto_pass(_v):
 		_act({"a": "pass"})
+
+
+## Ajuste local «Reacciones»: en «no» se oculta el botón y no se ven las reacciones de nadie.
+func _toggle_emotes() -> void:
+	_emotes_on = not _emotes_on
+	EmoteSet.save_enabled(_emotes_on)
+	_emote_btn.visible = _emotes_on
+	if not _emotes_on:
+		_close_emote_picker()
+		for id: Variant in _emote_bubbles.keys():
+			if is_instance_valid(_emote_bubbles[id]):
+				_emote_bubbles[id].queue_free()
+		_emote_bubbles.clear()
+	_update_hud()
+
+
+# ---------------------------------------------------------------- reacciones rápidas (UX-08)
+
+func _toggle_emote_picker() -> void:
+	if is_instance_valid(_emote_picker):
+		_close_emote_picker()
+		return
+	if not _emotes_on or _v.is_empty() or _v.over != null or _modal_root.get_child_count() > 0 or session.now() < _emote_cd_end:
+		return
+	_exit_aim(false)
+	var screen := get_viewport().get_visible_rect().size
+	_emote_picker = EmotePicker.new().setup(_emote_btn.get_global_rect(), screen)
+	_emote_picker.chosen.connect(_send_emote)
+	_emote_picker.closed.connect(_close_emote_picker)
+	_hud_root.add_child(_emote_picker)
+	_hud_root.move_child(_emote_picker, _modal_root.get_index())
+
+
+func _close_emote_picker() -> void:
+	if is_instance_valid(_emote_picker):
+		_emote_picker.queue_free()
+	_emote_picker = null
+
+
+func _send_emote(index: int) -> void:
+	_close_emote_picker()
+	if session.now() < _emote_cd_end:
+		return
+	_emote_cd_end = session.now() + EmoteSet.COOLDOWN_MS
+	session.send_emote(index)
+
+
+## Llega una reacción (la mía también: la sala la devuelve a todos). Un globo por jugador: la nueva sustituye a la anterior.
+func _on_emote(id: String, index: int) -> void:
+	if not _emotes_on or _v.is_empty() or not EmoteSet.valid(index):
+		return
+	if id != _v.you and not _seats.has(id):
+		return
+	if _emote_bubbles.has(id) and is_instance_valid(_emote_bubbles[id]):
+		_emote_bubbles[id].queue_free()
+	var b := EmoteBubble.new().setup(id, _avatar_index(id), index, _seats.has(id))
+	_emote_layer.add_child(b)
+	_emote_bubbles[id] = b
+	b.place(_emote_anchor(id), get_viewport().get_visible_rect().size)
+	b.play()
+	dbg_emotes += 1
+	_snd("emote", -6.0, 0.03)
+
+
+## Dónde apunta la cola del globo: sobre el avatar 3D del rival, o sobre mi mano si soy yo.
+func _emote_anchor(id: String) -> Vector2:
+	var screen := get_viewport().get_visible_rect().size
+	if _seats.has(id):
+		# Los rivales están bajo las fichas de la barra: el globo cuelga justo debajo de su gato, con la cola hacia él
+		return world.camera.unproject_position((_seats[id].avatar as Node3D).global_position + Vector3(0, -0.18, 0))
+	return Vector2(screen.x * 0.5, _hand_top_y() + 40.0)
+
+
+## Ajusta el tamaño del rótulo de turno al hueco que dejan los botones de la barra (5 jugadores, nombre largo, sentido invertido...).
+func _fit_turn_label() -> void:
+	var avail := _turn_panel.size.x - 40.0
+	var key := "%s|%d" % [_turn.text, int(avail)]
+	if key == _turn_fit_key or avail < 40.0:
+		return
+	_turn_fit_key = key
+	var f: Font = UIKit.TITLE_FONT
+	var need := f.get_string_size(_turn.text, HORIZONTAL_ALIGNMENT_LEFT, -1, 50).x
+	var sz := clampi(int(50.0 * minf(1.0, avail / maxf(1.0, need))), 28, 50)
+	_turn.add_theme_font_size_override("font_size", sz)
+
+
+func _tick_emotes(now: int) -> void:
+	var left := _emote_cd_end - now
+	var cd := left > 0
+	_emote_btn.disabled = cd
+	_emote_icon.set_cooldown(clampf(float(left) / float(EmoteSet.COOLDOWN_MS), 0.0, 1.0) if cd else 0.0, ceili(float(left) / 1000.0) if cd else 0)
+	if is_instance_valid(_emote_picker) and _modal_root.get_child_count() > 0:
+		_close_emote_picker()      # una ventana del juego tiene prioridad sobre el selector
+	if _emote_bubbles.is_empty():
+		return
+	var screen := get_viewport().get_visible_rect().size
+	for id: String in _emote_bubbles.keys():
+		var b: Variant = _emote_bubbles[id]
+		if not is_instance_valid(b) or (b as EmoteBubble).is_queued_for_deletion():
+			_emote_bubbles.erase(id)
+		else:
+			(b as EmoteBubble).place(_emote_anchor(id), screen)
+
+
+## Prueba: estado de las reacciones en pantalla.
+func debug_emotes() -> Dictionary:
+	var shown := {}
+	for id: String in _emote_bubbles:
+		var b: Variant = _emote_bubbles[id]
+		if is_instance_valid(b) and (b as EmoteBubble).shown():
+			shown[id] = {"word": EmoteSet.word(b.index), "rect": b.get_global_rect(), "index": b.index}
+	return {
+		"button": _emote_btn.visible, "enabled": _emotes_on, "cooling": _emote_icon.cooling(), "disabled": _emote_btn.disabled,
+		"picker": is_instance_valid(_emote_picker), "bubbles": shown, "received": dbg_emotes,
+	}
+
+
+func debug_emote_button() -> Button:
+	return _emote_btn
+
+
+func debug_emote_options() -> Array[Button]:
+	return _emote_picker.buttons if is_instance_valid(_emote_picker) else ([] as Array[Button])
 
 
 func _toggle_music() -> void:

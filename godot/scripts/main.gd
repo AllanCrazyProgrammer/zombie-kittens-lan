@@ -10,7 +10,7 @@ extends Node3D
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
 ##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
 ##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen); --uitest-plus-part 1|2 la divide
-##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
+##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola (con --plus la sala es Plus y el invitado envía una reacción)
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
 ##   --no-broadcast             el anfitrión no se anuncia por difusión (prueba la búsqueda directa)
@@ -42,6 +42,10 @@ var _elapsed := 0.0
 var _nettest := ""
 var _nettest_humans := 2
 var _nettest_started := false
+var _nettest_plus := false
+var _nettest_emote_sent := false
+var _nettest_hooked := false
+var _nettest_emotes: Array[String] = []
 var _auto_t := 0.0
 var _drop_at := -1.0
 var _game_started_at := -1.0
@@ -95,6 +99,9 @@ func _ready() -> void:
 		_nettest = arg.call("--nettest")
 		_show_menu()
 		_menu.profile.name = "Anfitrion" if _nettest == "host" else "Invitado" + _token.left(3)
+		_nettest_plus = args.has("--plus")
+		if _nettest_plus and _nettest == "host":
+			_menu.set_plus(true, false)      # sin guardar: la prueba no cambia los ajustes del usuario
 		if _nettest == "host":
 			if arg.call("--nettest", 2).is_valid_int():
 				_nettest_humans = int(arg.call("--nettest", 2))
@@ -368,6 +375,11 @@ func _nettest_step(delta: float) -> void:
 	var cs := _session as ClientSession
 	if cs == null:
 		return
+	if not _nettest_hooked:
+		_nettest_hooked = true      # se engancha antes de empezar la partida para no perder ninguna reacción
+		cs.emote.connect(func(id: String, i: int) -> void:
+			_nettest_emotes.append("%s:%d" % [id, i])
+			print("NETTEST reacción recibida de %s (índice %d)" % [id, i]))
 	if _nettest == "host" and not cs.in_game() and not _nettest_started and not cs.lobby.is_empty():
 		var humans := 0
 		for p: Dictionary in cs.lobby.players:
@@ -389,12 +401,20 @@ func _nettest_step(delta: float) -> void:
 	var v := cs.view()
 	if v.is_empty():
 		return
+	if cs.is_plus():
+		_nettest_plus = true      # el invitado lo sabe por la sala, sin necesitar --plus
+	if _nettest_plus and _nettest != "host" and not _nettest_emote_sent and cs.is_plus():
+		_nettest_emote_sent = true
+		print("NETTEST invitado %s envía la reacción 2" % cs.me_id)
+		cs.send_emote(2)
 	if v.over != null:
 		var winner := ""
 		for p: Dictionary in v.players:
 			if p.id == v.over.winner:
 				winner = p.name
 		print("NETTEST fin: ganó %s | soy %s | cartas en mano %d" % [winner, cs.me_id, v.hand.size()])
+		if _nettest_plus:
+			print("NETTEST reacciones vistas: %s" % str(_nettest_emotes))
 		_nettest = ""
 		await get_tree().create_timer(1.0).timeout
 		get_tree().quit()
@@ -508,6 +528,7 @@ var _plus_part := 0
 
 func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var report: Array = []
+	_t53_restore_stale()      # si una ejecución anterior se interrumpió a medias, devuelve el ajuste de reacciones
 	await _wait(1.2)
 	_menu.set_plus(plus_mode, false)     # sin guardar: la prueba no cambia los ajustes del usuario
 	await _wait(0.3)
@@ -516,6 +537,11 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var user_args := OS.get_cmdline_user_args()
 	var pk := user_args.find("--uitest-plus-part")
 	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 5:        # solo las reacciones rápidas (T53)
+		await _ui_test_t53(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
 	if _plus_part == 3:        # solo los menús de Plus (para iterar rápido)
 		await _ui_test_t62_menus(dir, report)
 		print("UITEST fin")
@@ -758,6 +784,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_cripta(dir, report)
 	await _ui_test_memoria(dir, report)
 	await _ui_test_ux(dir, report)
+	await _ui_test_t53(dir, report)
 	if _plus_part != 1:
 		await _ui_test_t62(dir, report)
 
@@ -1445,6 +1472,11 @@ func _ui_test_memoria(dir: String, report: Array) -> void:
 	var strip: DeckMemoryStrip = _game.debug_strip()
 	await _cripta_close_windows()
 	await _cripta_my_turn(lm)
+	# Los bots de Plus barajan cuando un rival acaba de ver el futuro (IA-02): es correcto, pero borraría la memoria
+	# que este recorrido comprueba. Se quitan Barajar y Nop de las manos rivales mientras dura.
+	for pl in g.players:
+		if pl.id != lm.me_id:
+			pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "shuffle" and c.type != "nope")
 	while g.draw.size() < 24:       # tras la partida de la prueba el mazo puede estar casi vacío: se repone (cartas Saltar)
 		_cripta_n += 1
 		g.draw.insert(0, ZKGame.Card.new("z%d" % _cripta_n, "skip", false))
@@ -2362,3 +2394,178 @@ func _menu_has_text(n: Node, part: String) -> bool:
 		if _menu_has_text(c, part):
 			return true
 	return false
+
+
+# ---------------------------------------------------------------- T53: reacciones rápidas (UX-08)
+
+## Si la prueba anterior murió con el ajuste «Reacciones» cambiado, lo devuelve a su valor original (marca `emotes_test_backup`).
+func _t53_restore_stale(announce: bool = true) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	if not cfg.has_section_key("plus", "emotes_test_backup"):
+		return
+	var old: Variant = cfg.get_value("plus", "emotes_test_backup")
+	if old is bool:
+		cfg.set_value("plus", "emotes", old)
+	elif cfg.has_section_key("plus", "emotes"):
+		cfg.erase_section_key("plus", "emotes")
+	cfg.erase_section_key("plus", "emotes_test_backup")
+	cfg.save(SETTINGS)
+	if announce:
+		print("UITEST aviso: ajuste de reacciones restaurado de una prueba interrumpida")
+
+
+func _t53_begin() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	if not cfg.has_section_key("plus", "emotes_test_backup"):
+		cfg.set_value("plus", "emotes_test_backup", cfg.get_value("plus", "emotes", "absent"))
+		cfg.save(SETTINGS)
+
+
+func _t53_line(report: Array, detail: String, ok: bool) -> void:
+	_say(report, "Plus/reacciones: %s | %s" % [detail, "OK" if ok else "ERROR"])
+
+
+func _t53_bar_ok() -> Dictionary:
+	var bar: Node = (_game.debug_emote_button() as Control).get_parent()
+	var rects: Array[Rect2] = []
+	var names: Array[String] = []
+	for c in bar.get_children():
+		if c is Control and (c as Control).visible:
+			rects.append((c as Control).get_global_rect())
+			names.append(c.get_class() + ":" + (c.text if c is Button else ""))
+	var width := get_viewport().get_visible_rect().size.x
+	var clean := true
+	for i in rects.size():
+		if rects[i].end.x > width + 0.5 or rects[i].position.x < -0.5:
+			clean = false
+		for j in range(i + 1, rects.size()):
+			if rects[i].grow(-1.0).intersects(rects[j].grow(-1.0)):
+				clean = false
+	return {"ok": clean, "n": rects.size(), "rects": rects, "names": names}
+
+
+func _ui_test_t53(dir: String, report: Array) -> void:
+	_t53_begin()
+	EmoteSet.save_enabled(true)
+	var lm := await _t62_start({"rivals": 4, "seed": 21})
+	var g := lm.game
+	var screen := get_viewport().get_visible_rect().size
+	_memo_safe_top(g, 4)
+	await _t62_turn(lm, "p0")
+	# Barra superior en el peor caso: sentido invertido, turno doble de un nombre largo y 5 jugadores
+	g.dir = -1
+	await _t62_turn(lm, "p4")
+	g.turns_left = 2
+	_session.updated.emit()
+	await _wait(0.4)
+	var bar := _t53_bar_ok()
+	var d0: Dictionary = _game.debug_emotes()
+	_t53_line(report, "botón visible junto a HISTORIAL, sin solaparse con nada en la barra (%d elementos, 5 jugadores)" % bar.n, d0.button and bar.ok and _find_button(self, "HISTORIAL") != null)
+	await _save_shot(dir + "/t60_barra_5_jugadores.png")
+	g.dir = 1
+	await _t62_turn(lm, "p0")
+	var hist_before: int = _game.debug_history_size()
+	# Abrir el selector
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.4)
+	var d1: Dictionary = _game.debug_emotes()
+	var opts: Array[Button] = _game.debug_emote_options()
+	var in_screen: bool = opts.size() == 6 and opts.all(func(b: Button) -> bool: return Rect2(Vector2.ZERO, screen).encloses(b.get_global_rect()))
+	_t53_line(report, "tocar el botón abre el selector con 6 reacciones dentro de la pantalla (%s)" % ", ".join(PackedStringArray(opts.map(func(b: Button) -> String: return b.text))), d1.picker and in_screen)
+	await _save_shot(dir + "/t61_selector.png")
+	# Tocar fuera lo cierra
+	await _tap(get_viewport().get_final_transform() * Vector2(screen.x * 0.5, screen.y * 0.55))
+	await _wait(0.3)
+	_t53_line(report, "tocar fuera cierra el selector sin enviar nada", not _game.debug_emotes().picker and _game.debug_emotes().bubbles.is_empty() and not _game.debug_emotes().cooling)
+	# Enviar una
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.3)
+	opts = _game.debug_emote_options()
+	_game.debug_sounds(true)
+	if opts.size() == 6:
+		await _tap_control(opts[0])
+	await _wait(0.45)
+	var d2: Dictionary = _game.debug_emotes()
+	var mine: Dictionary = d2.bubbles.get("p0", {})
+	_t53_line(report, "enviar «JAJA»: selector cerrado=%s, mi globo=%s, enfriamiento activo=%s, botón desactivado=%s" % [str(not d2.picker), str(mine.get("word")), str(d2.cooling), str(d2.disabled)], not d2.picker and mine.get("word", "") == "JAJA" and d2.cooling and d2.disabled)
+	_t53_line(report, "sonido emote y sin entrada en el historial ni ventana abierta (historial %d → %d)" % [hist_before, _game.debug_history_size()], _game.debug_sounds().has("emote") and _game.debug_history_size() == hist_before and _game.debug_modal_title() == "")
+	await _save_shot(dir + "/t62_globo_propio.png")
+	var rect_ok: bool = mine.has("rect") and Rect2(Vector2.ZERO, screen).encloses(mine.rect)
+	_t53_line(report, "mi globo cabe en pantalla (%s)" % str(mine.get("rect")), rect_ok)
+	# Durante el enfriamiento el botón no abre nada
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.2)
+	_t53_line(report, "durante el enfriamiento el botón no abre el selector", not _game.debug_emotes().picker)
+	# Reacción de un rival simulada: globo sobre su asiento
+	_session.emote.emit("p2", 1)
+	_session.emote.emit("p4", 3)
+	await _wait(0.45)
+	var d3: Dictionary = _game.debug_emotes()
+	var seat: Vector2 = _game.debug_seat_pos("p2")
+	var b2: Dictionary = d3.bubbles.get("p2", {})
+	var above: bool = b2.has("rect") and absf(b2.rect.get_center().x - seat.x) < 90.0 and b2.rect.position.y >= seat.y - 20.0 and b2.rect.position.y < seat.y + 250.0
+	_t53_line(report, "reacción de p2 simulada: globo «%s» colgando de su gato (centro x %.0f / asiento %.0f, cima y %.0f / asiento %.0f); p4 también: %s" % [str(b2.get("word")), b2.rect.get_center().x if b2.has("rect") else -1.0, seat.x, b2.rect.position.y if b2.has("rect") else -1.0, seat.y, str(d3.bubbles.has("p4"))], above and b2.word == "¡NO!" and d3.bubbles.has("p4") and d3.bubbles.has("p0"))
+	await _save_shot(dir + "/t63_globo_rival.png")
+	# Varias seguidas del mismo jugador: sustituye
+	_session.emote.emit("p2", 4)
+	await _wait(0.3)
+	var n_p2 := 0
+	for c in _game._emote_layer.get_children():
+		if c is EmoteBubble and c.player == "p2" and not c.is_queued_for_deletion():
+			n_p2 += 1
+	var d4: Dictionary = _game.debug_emotes()
+	_t53_line(report, "otra reacción seguida de p2 sustituye al globo (globos de p2: %d, ahora «%s»)" % [n_p2, str(d4.bubbles.get("p2", {}).get("word"))], n_p2 == 1 and d4.bubbles.get("p2", {}).get("word", "") == "PORFA")
+	# Un muerto puede reaccionar y se le ve
+	g.P("p3").alive = false
+	_session.updated.emit()
+	await _wait(0.3)
+	_session.emote.emit("p3", 3)
+	await _wait(0.4)
+	_t53_line(report, "un rival muerto reacciona y se ve su globo: %s" % str(_game.debug_emotes().bubbles.has("p3")), _game.debug_emotes().bubbles.has("p3"))
+	await _save_shot(dir + "/t64_globos_varios.png")
+	g.P("p3").alive = true
+	# Se desvanecen (2 s visibles) y el enfriamiento termina a los 3 s
+	await _wait(2.7)
+	var d5: Dictionary = _game.debug_emotes()
+	_t53_line(report, "pasados ~3 s: globos desaparecidos=%s, enfriamiento terminado=%s, botón activo=%s" % [str(d5.bubbles.is_empty()), str(not d5.cooling), str(not d5.disabled)], d5.bubbles.is_empty() and not d5.cooling and not d5.disabled)
+	# Ajuste «Reacciones: no» desde el menú de pausa
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	await _save_shot(dir + "/t65_menu_reacciones.png")
+	var tog := _find_button(self, "Reacciones: sí")
+	_t53_line(report, "el menú de pausa ofrece «Reacciones: sí»", tog != null)
+	if tog:
+		await _tap_control(tog)
+		await _wait(0.3)
+	var off_label := _find_button(self, "Reacciones: no") != null
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.4)
+	_session.emote.emit("p2", 2)
+	await _wait(0.4)
+	var d6: Dictionary = _game.debug_emotes()
+	_t53_line(report, "ajuste «no»: etiqueta cambiada=%s, botón oculto=%s, globo ajeno oculto=%s, guardado en settings=%s" % [str(off_label), str(not d6.button), str(d6.bubbles.is_empty()), str(EmoteSet.load_enabled())], off_label and not d6.button and d6.bubbles.is_empty() and not EmoteSet.load_enabled())
+	await _save_shot(dir + "/t66_reacciones_no.png")
+	var bar2 := _t53_bar_ok()
+	_t53_line(report, "sin el botón la barra sigue sin solaparse", bar2.ok)
+	# Volver a «sí»
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	tog = _find_button(self, "Reacciones: no")
+	if tog:
+		await _tap_control(tog)
+		await _wait(0.3)
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.4)
+	_session.emote.emit("p2", 0)
+	await _wait(0.4)
+	var d7: Dictionary = _game.debug_emotes()
+	_t53_line(report, "ajuste «sí» otra vez: botón visible=%s, globo ajeno visible=%s, guardado=%s" % [str(d7.button), str(d7.bubbles.has("p2")), str(EmoteSet.load_enabled())], d7.button and d7.bubbles.has("p2") and EmoteSet.load_enabled())
+	# Devuelve el ajuste del usuario
+	_t53_restore_stale(false)
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	_t53_line(report, "ajuste del usuario restaurado (marca de prueba borrada: %s)" % str(not cfg.has_section_key("plus", "emotes_test_backup")), not cfg.has_section_key("plus", "emotes_test_backup"))
+	await _wait(2.8)
+

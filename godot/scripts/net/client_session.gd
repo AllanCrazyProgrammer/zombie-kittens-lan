@@ -50,6 +50,9 @@ func receive(m: Dictionary) -> void:
 		"state":
 			_view = m.view
 			updated.emit()
+		"emote":
+			if is_plus() and EmoteSet.valid(m.get("e")) and m.get("id") is String:
+				emote.emit(m.id, int(m.e))
 		"err":
 			error.emit(m.get("msg", ""))
 		"kicked", "full":
@@ -67,6 +70,12 @@ func view() -> Dictionary:
 func act(a: Dictionary) -> String:
 	send({"t": "act", "a": a})
 	return ""
+
+
+## Reacción rápida: solo existe en salas Plus (en una clásica no se envía nada).
+func send_emote(index: int) -> void:
+	if is_plus() and EmoteSet.valid(index):
+		send({"t": "emote", "e": index})
 
 
 func level_of(id: String) -> String:

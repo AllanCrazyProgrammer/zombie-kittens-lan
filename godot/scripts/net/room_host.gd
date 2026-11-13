@@ -2,8 +2,8 @@ class_name RoomHost
 extends Node
 ## Sala de juego en el dispositivo anfitrión: lobby, reconexión por ficha (token), bots y la partida.
 ## Port de la sala de web/www/room.js. Habla con cada jugador mediante mensajes {t: ...}:
-##   recibe: hello (con proto), set, addBot, botLevel, kick, settings, start, toLobby, act
-##   envía:  welcome, lobby, state, err, kicked, full
+##   recibe: hello (con proto), set, addBot, botLevel, kick, settings, start, toLobby, act, emote (solo Plus)
+##   envía:  welcome, lobby, state, err, kicked, full, emote (solo Plus)
 
 signal local_message(m: Dictionary)
 
@@ -27,6 +27,8 @@ var _next_id := 1
 ## Plus (M-06): victorias por id de jugador mientras la sala exista. Solo se llena en salas Plus.
 var scores := {}
 var _scored := false   # la partida en curso ya se ha contado
+var _emotes: BotEmotes   # IA-04: reacciones de los bots (solo Plus); su azar es propio y no toca el de la partida
+var _emote_at := {}      # id de jugador -> instante (ms) de su última reacción aceptada
 
 
 func _ready() -> void:
@@ -172,6 +174,7 @@ func on_msg(peer: int, m: Dictionary) -> void:
 				return
 			game = null
 			bots = null
+			_emotes = null
 			for q: Dictionary in players.duplicate():
 				if not q.bot and q.peer == 0:
 					_drop(q)
@@ -183,6 +186,17 @@ func on_msg(peer: int, m: Dictionary) -> void:
 			if err != "":
 				send(peer, {"t": "err", "msg": err})
 			_check_changed()
+		"emote":
+			# UX-08: solo salas Plus y con la partida en curso; no pasa por el motor ni cambia la vista
+			if not settings.plus or game == null or game.over != null or p.bot:
+				return
+			if not EmoteSet.valid(m.get("e")):
+				return
+			var at := now()
+			if at - int(_emote_at.get(p.id, -EmoteSet.COOLDOWN_MS)) < EmoteSet.COOLDOWN_MS:
+				return
+			_emote_at[p.id] = at
+			_broadcast_emote(p.id, int(m.e))
 
 
 func _clean_name(raw: String, me: Dictionary) -> String:
@@ -314,6 +328,8 @@ func _start() -> void:
 	_due = {}
 	_sig = ""
 	_scored = false
+	_emote_at = {}
+	_emotes = BotEmotes.new().start(game) if settings.plus else null
 	_send_lobby()
 	_check_changed()
 
@@ -336,6 +352,18 @@ func _process(_delta: float) -> void:
 			elif not bots.decide(id).is_empty():
 				_due[id] = t + 650 + int(_rng.next() * 900)
 	_check_changed()
+	if _emotes != null:
+		_emotes.observe(game, bots.levels.keys(), t)
+		if game.over == null:
+			for r: Dictionary in _emotes.due(t):
+				_broadcast_emote(r.id, r.e)
+
+
+## Reenvía una reacción a todos los jugadores conectados (el emisor incluido).
+func _broadcast_emote(id: String, e: int) -> void:
+	for q in players:
+		if q.peer > 0:
+			send(q.peer, {"t": "emote", "id": id, "e": e})
 
 
 ## Plus: suma una victoria al ganador (una sola vez por partida) y reenvía el lobby con el marcador nuevo.

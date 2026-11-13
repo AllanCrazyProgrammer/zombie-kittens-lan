@@ -15,6 +15,8 @@ var _due := {}          # id del bot -> instante (ms) en que hará su jugada
 var _sig := ""
 var _rng: ZKRng
 var _plus := false
+var _emotes: BotEmotes     # IA-04: reacciones de los bots (solo Plus); su azar es propio
+var _emote_at := -100000  # última reacción enviada por el humano (ms)
 var _me_delay := 900     # solo en modo demostración: cuánto tarda la IA en jugar por el humano
 
 
@@ -51,6 +53,8 @@ func start(opts: Dictionary) -> void:
 		bots.set_traits(traits)
 	_due = {}
 	_sig = ""
+	_emotes = BotEmotes.new(int(opts.get("emote_seed", 0))).start(game) if _plus else null
+	_emote_at = -100000
 
 
 func view() -> Dictionary:
@@ -66,6 +70,17 @@ func act(a: Dictionary) -> String:
 
 func is_plus() -> bool:
 	return _plus
+
+
+## Reacción del jugador humano: se emite al momento, con el mismo límite (1 cada 3 s) que pone la sala.
+func send_emote(index: int) -> void:
+	if not _plus or game == null or game.over != null or not EmoteSet.valid(index):
+		return
+	var t := now()
+	if t - _emote_at < EmoteSet.COOLDOWN_MS:
+		return
+	_emote_at = t
+	emote.emit(me_id, index)
 
 
 func scores() -> Dictionary:
@@ -99,6 +114,15 @@ func _process(_delta: float) -> void:
 			elif not bots.decide(id).is_empty():
 				_due[id] = t + (_me_delay if id == me_id else 650 + int(_rng.next() * 900))
 	_check_changed()
+	if _emotes != null:
+		_emotes.observe(game, _bot_ids(), t)
+		if game.over == null:
+			for r: Dictionary in _emotes.due(t):
+				emote.emit(r.id, r.e)
+
+
+func _bot_ids() -> Array:
+	return game.players.filter(func(p: ZKGame.Player) -> bool: return p.bot).map(func(p: ZKGame.Player) -> String: return p.id)
 
 
 func _check_changed() -> void:
