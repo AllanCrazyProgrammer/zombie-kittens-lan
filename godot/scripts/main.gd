@@ -537,6 +537,12 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var user_args := OS.get_cmdline_user_args()
 	var pk := user_args.find("--uitest-plus-part")
 	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 7:        # solo la mesa viva (V-04, V-05, V-07, V-08), sobre una partida de 5
+		await _t62_start({"rivals": 4})
+		await _ui_test_mesa_viva(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
 	if _plus_part == 6:        # solo la carta en escena y las lápidas (V-02, V-03), sobre una partida de 5
 		await _t62_start({"rivals": 4})
 		await _ui_test_escena(dir, report)
@@ -792,6 +798,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_memoria(dir, report)
 	await _ui_test_escena(dir, report)
 	await _ui_test_lapidas(dir, report)
+	await _ui_test_mesa_viva(dir, report)
 	await _ui_test_ux(dir, report)
 	await _ui_test_t53(dir, report)
 	if _plus_part != 1:
@@ -2221,6 +2228,635 @@ func _ui_test_lapidas(dir: String, report: Array) -> void:
 	_session.updated.emit()
 	await _wait(0.6)
 	lm.set_process(true)
+
+
+# ---------------------------------------------------------------- mesa viva: efectos por carta, mazo, mano y avatares (V-04, V-05, V-07, V-08)
+
+var _mv_q := "high"
+
+
+## Espera a que el efecto `kind` deje de estar vivo; devuelve cuánto tardó (máx. `limit`).
+func _mv_wait_gone(kind: String, limit: float = 4.0) -> float:
+	var fx: PlusVfx = _game.debug_fx()
+	var t := 0.0
+	while fx.is_live(kind) and t < limit:
+		await _wait(0.05)
+		t += 0.05
+	return t
+
+
+## Espera a que no quede ningún efecto vivo.
+func _mv_settle(limit: float = 4.0) -> float:
+	var fx: PlusVfx = _game.debug_fx()
+	var t := 0.0
+	while fx.live_count() > 0 and t < limit:
+		await _wait(0.05)
+		t += 0.05
+	return t
+
+
+## `by` juega una carta (con objetivo y cartas extra opcionales) y la pantalla lo recibe al instante (sin esperas).
+func _mv_play(lm: LocalMatch, by: String, type: String, target: String = "", extra: Array = []) -> String:
+	var g := lm.game
+	g.cur = g.players.find(g.P(by))
+	g.turns_left = 1
+	g.attacked = false
+	var ids: Array = [_ux_give(g, by, type)]
+	for t: String in extra:
+		ids.append(_ux_give(g, by, t))
+	var a := {"a": "play", "cards": ids}
+	if target != "":
+		a["target"] = target
+	var err := g.act(by, a, lm.now())
+	_session.updated.emit()
+	return err
+
+
+func _mv_resolve(lm: LocalMatch) -> void:
+	lm.game._resolve_top(lm.now())
+	_session.updated.emit()
+
+
+## Tras lanzar el efecto `kind` (n0 = veces lanzado antes): ¿se creó su nodo y desaparece solo en ≤ 1,2 s?
+func _mv_expect(report: Array, label: String, kind: String, n0: int, dir: String, shot: bool = true, note: String = "") -> bool:
+	var fx: PlusVfx = _game.debug_fx()
+	var made := fx.launched(kind) > n0
+	var live := fx.is_live(kind)
+	var waited := 0.0
+	if shot and live:
+		await _wait(0.3)
+		waited = 0.3
+		await _save_shot("%s/t42_fx_%s.png" % [dir, kind])
+	var dur := waited + await _mv_wait_gone(kind)
+	var ok := made and live and dur <= 1.4
+	_ux_line(report, "efectos", "%s: nodo «Fx_%s» creado=%s, vivo al lanzar=%s, se retira solo a los %.2f s%s" % [label, kind, str(made), str(live), dur, note], ok)
+	return ok
+
+
+func _mv_dead(g: ZKGame, pid: String, with_hand: bool) -> void:
+	var p: ZKGame.Player = g.P(pid)
+	p.alive = false
+	p.hand.clear()
+	if with_hand:
+		_ux_give(g, pid, "skip")
+		_ux_give(g, pid, "favor")
+	_session.updated.emit()
+
+
+func _ui_test_mesa_viva(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/efectos: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	_mv_q = quality
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	await _mv_efectos(dir, report, lm, g)
+	await _mv_mazo(dir, report, lm, g, quality)
+	await _mv_mano(dir, report, lm, g)
+	await _mv_avatares(dir, report, lm, g)
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	lm.set_process(true)
+
+
+func _mv_efectos(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	var fx: PlusVfx = _game.debug_fx()
+	var n0 := 0
+	var err := ""
+	var mood: AvatarMood = _game.debug_mood()
+	# --- Ver el Futuro: los demás ven dorsos; quien juega ve las caras
+	_ux_reset(g, 0)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p1", "see_future")
+	var backs: Array = fx.faces_of("future")
+	await _mv_expect(report, "Ver el Futuro de p1 (err='%s'), yo veo dorsos=%s" % [err, str(backs.size() == 3 and not backs.any(func(t: String) -> bool: return t != "back"))], "future", n0, dir)
+	_ux_reset(g, 0)
+	var top3: Array = []
+	for i in 3:
+		top3.append(g.draw[g.draw.size() - 1 - i].type)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p0", "see_future")
+	_mv_resolve(lm)
+	var faces: Array = fx.faces_of("future")
+	_ux_line(report, "efectos", "Ver el Futuro mío (err='%s'): caras que veo %s = las 3 de arriba %s" % [err, str(faces), str(top3)], faces == top3)
+	await _mv_expect(report, "Ver el Futuro mío", "future", n0, dir, false)
+	await _cripta_close_windows()
+	# Alterar el Futuro de otro: al abrirse su decisión
+	_ux_reset(g, 0)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p1", "alter_future")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Alterar el Futuro de p1 (err='%s')" % err, "future", n0, dir, false)
+	# --- Barajar
+	_ux_reset(g, 0)
+	n0 = fx.launched("shuffle")
+	err = _mv_play(lm, "p1", "shuffle")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Barajar (err='%s')" % err, "shuffle", n0, dir)
+	# --- Saltar y Súper Salto: salto del avatar + estela azul
+	_ux_reset(g, 0)
+	n0 = fx.launched("skip")
+	var j0 := int(mood.dbg_count.get("jump", 0))
+	err = _mv_play(lm, "p1", "skip")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Saltar de p1 (err='%s'), salto del avatar=%s" % [err, str(int(mood.dbg_count.get("jump", 0)) > j0)], "skip", n0, dir)
+	_ux_reset(g, 0)
+	n0 = fx.launched("super_skip")
+	err = _mv_play(lm, "p2", "super_skip")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Súper Salto de p2 (err='%s')" % err, "super_skip", n0, dir, false)
+	# --- Favor: la carta robada viaja en arco
+	_ux_reset(g, 0)
+	n0 = fx.launched("steal")
+	err = _mv_play(lm, "p1", "favor", "p2")
+	_mv_resolve(lm)
+	var givc: String = g.P("p2").hand[0].id
+	g.act("p2", {"a": "give", "card": givc}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Favor de p1 a p2 (err='%s')" % err, "steal", n0, dir)
+	g.prompt = null
+	# --- Pareja: la carta que llega a MI mano se voltea
+	_ux_reset(g, 0)
+	n0 = fx.launched("steal")
+	err = _mv_play(lm, "p0", "cat_a", "p2", ["cat_a"])
+	_mv_resolve(lm)
+	await _wait(0.5)
+	var sf: Array = fx.faces_of("steal")
+	var flipped: bool = sf.size() == 1 and sf[0] != "back"
+	await _mv_expect(report, "Pareja mía contra p2 (err='%s'), la carta llega boca arriba=%s %s" % [err, str(flipped), str(sf)], "steal", n0, dir, false)
+	# --- Cava Más Hondo y Entierro: tierra y pala
+	_ux_reset(g, 0)
+	n0 = fx.launched("dig")
+	err = _mv_play(lm, "p1", "dig_deeper")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Cava Más Hondo de p1 (err='%s'), decisión=%s" % [err, str(g.prompt.type if g.prompt != null else "-")], "dig", n0, dir)
+	g.prompt = null
+	_ux_reset(g, 0)
+	n0 = fx.launched("bury")
+	err = _mv_play(lm, "p1", "bury")
+	_mv_resolve(lm)
+	var e2 := g.act("p1", {"a": "bury", "pos": 0}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Entierro de p1 (err='%s'/'%s')" % [err, e2], "bury", n0, dir, false)
+	# --- Alimenta a los Muertos: cartas en círculo hacia la lápida de p3
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("feed")
+	err = _mv_play(lm, "p1", "feed_dead", "p3")
+	_mv_resolve(lm)
+	var gv: String = g.P("p2").hand[0].id
+	g.act("p2", {"a": "give", "card": gv}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Alimenta a los Muertos de p1 para p3 (err='%s')" % err, "feed", n0, dir)
+	g.prompt = null
+	# --- Ladrón de Tumbas: manos junto a la lápida de p3
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("grave_robber")
+	err = _mv_play(lm, "p1", "grave_robber")
+	_mv_resolve(lm)
+	var gr3: SeatGrave = _game.debug_grave("p3")
+	var gcard: String = g.P("p3").hand[0].id
+	g.act("p3", {"a": "give", "card": gcard}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Ladrón de Tumbas de p1 (err='%s'), lápida de p3 en estado %s" % [err, gr3.state], "grave_robber", n0, dir)
+	g.prompt = null
+	await _mv_settle()
+	# --- Clon: escaneo sobre la carta clonada
+	_ux_reset(g, 0)
+	n0 = fx.launched("clone")
+	err = _mv_play(lm, "p1", "clone", "p2", ["cat_b"])
+	await _wait(0.1)
+	await _mv_expect(report, "Clon + cat_b de p1 (err='%s')" % err, "clone", n0, dir)
+	_mv_resolve(lm)
+	await _mv_settle()
+	# --- Ataque Dirigido: cortes orientados hacia el objetivo
+	_ux_reset(g, 0)
+	n0 = fx.launched("targeted")
+	var pop0: int = _game.debug_effects().popups
+	err = _mv_play(lm, "p1", "targeted_attack", "p3")
+	_mv_resolve(lm)
+	var cuts: int = _game.debug_effects().popups - pop0
+	await _mv_expect(report, "Ataque Dirigido de p1 a p3 (err='%s'), cortes en pantalla=%d" % [err, cuts], "targeted", n0, dir)
+	# --- Marcha Atrás
+	_ux_reset(g, 0)
+	n0 = fx.launched("reverse")
+	var dir0: int = int(g.dir)
+	err = _mv_play(lm, "p1", "reverse")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Marcha Atrás de p1 (err='%s'), sentido %d → %d" % [err, dir0, int(g.dir)], "reverse", n0, dir)
+	_ux_reset(g, 0)
+	g.dir = 1
+	_session.updated.emit()
+	# --- Ojo de Cuervo: un cuervo cruza de p1 a p2
+	_ux_reset(g, 0)
+	n0 = fx.launched("crow")
+	err = _mv_play(lm, "p1", "crow_eye", "p2")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Ojo de Cuervo de p1 sobre p2 (err='%s')" % err, "crow", n0, dir)
+	# --- Trueque de Almas: dos remolinos entre la lápida de p3 y p1
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("swirl")
+	err = _mv_play(lm, "p1", "soul_swap", "p3")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Trueque de Almas de p1 con p3 (err='%s')" % err, "swirl", n0, dir)
+	# --- Espanto: el fantasma de p3 atraviesa a p2
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("haunt")
+	var sc0 := int(mood.dbg_count.get("scare", 0))
+	err = _mv_play(lm, "p3", "haunt", "p2")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Espanto de p3 sobre p2 (err='%s'), susto de p2=%s" % [err, str(int(mood.dbg_count.get("scare", 0)) > sc0)], "haunt", n0, dir)
+	# --- Apocalipsis Zombi: cielo rojo 2 s y explosivos que emergen
+	_ux_reset(g, 0)
+	n0 = fx.launched("apocalypse")
+	err = _mv_play(lm, "p1", "apocalypse")
+	_mv_resolve(lm)
+	var red0: float = _world._flash.color.a
+	var red_c: Color = _world._flash.color
+	await _mv_expect(report, "Apocalipsis de p1 (err='%s'), cielo rojo al empezar alfa %.2f (r=%.2f g=%.2f)" % [err, red0, red_c.r, red_c.g], "apocalypse", n0, dir)
+	await _wait(0.45)
+	var red1: float = _world._flash.color.a
+	await _wait(1.2)
+	var red2: float = _world._flash.color.a
+	_ux_line(report, "efectos", "Apocalipsis: el cielo sigue rojo a ~1,4 s (alfa %.2f) y se apaga a ~2,7 s (alfa %.2f)" % [red1, red2], red0 > 0.4 and red1 > 0.03 and red2 < 0.02 and red_c.r > red_c.g * 4.0)
+	# --- Nada queda colgando 3 s después de lanzar el último
+	await _mv_settle()
+	await _wait(3.0)
+	_ux_line(report, "efectos", "tras 3 s: efectos vivos=%d, raíces colgando=%d, retirados a la fuerza=%d, descartados por exceso=%d" % [fx.live_count(), fx.roots(), fx.dbg_forced, fx.dbg_dropped], fx.live_count() == 0 and fx.roots() == 0 and fx.dbg_forced == 0)
+	# --- Ráfaga de 20 efectos: el número de nodos de la escena vuelve a ser el mismo
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	var kinds := ["future", "shuffle", "skip", "super_skip", "steal", "dig", "bury", "feed", "grave_robber", "targeted", "reverse", "crow", "swirl", "haunt", "apocalypse", "clone"]
+	for k: String in kinds:
+		fx.demo(k)
+	await _wait(3.2)
+	var nodes0: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var launched0 := 0
+	for k: String in kinds:
+		launched0 += fx.launched(k)
+	for i in 20:
+		fx.demo(kinds[(i * 7) % kinds.size()])
+		await get_tree().process_frame
+	var peak: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	await _wait(3.5)
+	var nodes1: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var launched1 := 0
+	for k: String in kinds:
+		launched1 += fx.launched(k)
+	_ux_line(report, "efectos", "ráfaga de 20 efectos (%d lanzados, %d descartados por exceso): nodos antes %d, en el pico %d, después %d, vivos=%d, retirados a la fuerza=%d" % [launched1 - launched0, fx.dbg_dropped, nodes0, peak, nodes1, fx.live_count(), fx.dbg_forced], nodes1 == nodes0 and fx.live_count() == 0 and fx.dbg_forced == 0 and peak > nodes0)
+	# --- Calidad baja: menos destellos y estelas, y ninguna partícula
+	var g_hi := fx.dbg_glows
+	for k: String in kinds:
+		fx.demo(k)
+	var particles_hi := _mv_count_particles(fx)
+	await _mv_settle()
+	g_hi = fx.dbg_glows - g_hi
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(0.3)
+	var g_lo := fx.dbg_glows
+	for k: String in kinds:
+		fx.demo(k)
+	var particles_lo := _mv_count_particles(fx)
+	await _wait(0.4)
+	await _save_shot(dir + "/t42_fx_calidad_baja.png")
+	await _mv_settle()
+	g_lo = fx.dbg_glows - g_lo
+	_ux_line(report, "efectos", "calidad baja: fx.low=%s, destellos+estelas %d (en alta %d), partículas %d (en alta %d)" % [str(fx.low), g_lo, g_hi, particles_lo, particles_hi], fx.low and g_lo * 2 < g_hi and particles_lo == 0)
+	_world.apply_quality(_mv_q)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+
+
+func _mv_count_emitting(root: Node) -> int:
+	var n := 0
+	for c in root.get_children():
+		if c is GPUParticles3D and (c as GPUParticles3D).emitting:
+			n += 1
+		n += _mv_count_emitting(c)
+	return n
+
+
+func _mv_count_particles(root: Node) -> int:
+	var n := 0
+	for c in root.get_children():
+		if c is GPUParticles3D or c is CPUParticles3D:
+			n += 1
+		n += _mv_count_particles(c)
+	return n
+
+
+func _mv_mazo(dir: String, report: Array, lm: LocalMatch, g: ZKGame, quality: String) -> void:
+	var aura: DeckAura = _game.debug_aura()
+	var fx: PlusVfx = _game.debug_fx()
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	# 1. Altura: 14 modelos como mucho, pero la pila crece con las cartas reales
+	var saved: Array = g.draw.duplicate()
+	var full := saved.size()
+	var h_full: float = _game.debug_deck_height()
+	var m_full: int = _game.debug_deck_models()
+	var small: Array = g.draw.duplicate()
+	small.resize(10)
+	g.draw = small
+	_session.updated.emit()
+	await _wait(0.4)
+	var h_small: float = _game.debug_deck_height()
+	var m_small: int = _game.debug_deck_models()
+	var mid: Array = saved.duplicate()
+	mid.resize(24)
+	g.draw = mid
+	_session.updated.emit()
+	await _wait(0.4)
+	var h_mid: float = _game.debug_deck_height()
+	g.draw = saved
+	_session.updated.emit()
+	await _wait(0.4)
+	_ux_line(report, "mazo", "altura de la cima: %d cartas → %.3f (%d modelos), 24 → %.3f, %d → %.3f (%d modelos); crece con las cartas y el límite de modelos sigue en 14" % [10, h_small, m_small, h_mid, full, h_full, m_full], m_full <= 14 and m_small == 10 and h_small < h_mid and h_mid < h_full and full > 24)
+	# 2. Riesgo bajo: sin humo ni temblor ni luz roja
+	aura.dbg_forced = 20
+	var t0 := aura.dbg_tremors
+	await _wait(5.0)
+	_ux_line(report, "mazo", "riesgo 20%%: humo=%s, temblores=%d, tinte rojo %.2f | ya no hay humo" % [str(aura.smoking()), aura.dbg_tremors - t0, aura.tint_amount()], not aura.smoking() and aura.dbg_tremors == t0 and aura.tint_amount() < 0.01)
+	# 3. Riesgo medio (> 30 %): humo leve, sin temblor
+	aura.dbg_forced = 40
+	await _wait(3.2)
+	await _save_shot(dir + "/t42_mazo_humo.png")
+	_ux_line(report, "mazo", "riesgo 40%%: humo=%s, temblores=%d, tinte rojo %.2f" % [str(aura.smoking()), aura.dbg_tremors - t0, aura.tint_amount()], aura.smoking() and aura.dbg_tremors == t0 and aura.tint_amount() < 0.01)
+	# 4. Riesgo alto (> 50 %): humo, temblor cada pocos segundos y luz roja
+	var tl: OmniLight3D = aura.turn_light
+	aura.dbg_forced = 75
+	await _wait(6.0)
+	await _save_shot(dir + "/t42_mazo_riesgo_alto.png")
+	var lc: Color = tl.light_color
+	_ux_line(report, "mazo", "riesgo 75%%: humo=%s, temblores en 6 s=%d, luz de turno rgb(%.2f, %.2f, %.2f) (antes verde), luz roja propia energía %.2f, tinte %.2f" % [str(aura.smoking()), aura.dbg_tremors - t0, lc.r, lc.g, lc.b, aura.red_energy(), aura.tint_amount()], aura.smoking() and aura.dbg_tremors - t0 >= 1 and lc.r > lc.g + 0.2 and aura.red_energy() > 0.5)
+	# 5. El temblor no mueve el mazo de su sitio
+	var top: Card3D = _game.debug_deck_card()
+	aura.dbg_forced = 45           # sin temblores propios: el que se prueba es el lanzado a mano
+	while aura.trembling():
+		await get_tree().process_frame
+	var y0 := top.position
+	aura.tremble()
+	await _wait(0.8)
+	_ux_line(report, "mazo", "tras un temblor la carta de arriba vuelve exacta a su sitio: %s" % str(top.position.is_equal_approx(y0)), top.position.is_equal_approx(y0))
+	aura.dbg_forced = 75
+	# 6. Calidad baja: sin humo ni luz roja extra (el temblor sigue)
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(1.0)
+	_ux_line(report, "mazo", "calidad baja con riesgo 75%%: humo=%s, luz roja extra=%.2f, partículas en el mazo=%d" % [str(aura.smoking()), aura.red_energy(), _mv_count_emitting(aura)], not aura.smoking() and aura.red_energy() < 0.01 and _mv_count_emitting(aura) == 0)
+	_world.apply_quality(quality)
+	# 7. Riesgo real: pocas cartas en el mazo → más riesgo, sin forzar
+	aura.dbg_forced = -1
+	var five: Array = g.draw.duplicate()
+	five.resize(5)
+	g.draw = five
+	_session.updated.emit()
+	await _wait(0.6)
+	var rk: Dictionary = _game.debug_risk()
+	_ux_line(report, "mazo", "riesgo real con 5 cartas y %d vivos: %d%% → el mazo lo usa (%d%%)" % [g.living().size(), rk.pct, aura.shown_risk()], aura.shown_risk() == rk.pct and rk.pct > 50)
+	g.draw = saved
+	_session.updated.emit()
+	await _wait(0.5)
+
+
+func _mv_mano(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	_ux_reset(g, 0)
+	var me: ZKGame.Player = g.P("p0")
+	me.hand.clear()
+	var ids := {}
+	for t: String in ["skip", "nope", "cat_a", "cat_a", "cat_b", "attack_dead", "favor"]:
+		var id := _ux_give(g, "p0", t)
+		if not ids.has(t):
+			ids[t] = []
+		(ids[t] as Array).append(id)
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	_session.updated.emit()
+	await _wait(0.6)
+	await _save_shot(dir + "/t42_mano_jugables.png")
+	var marks: Dictionary = _game.debug_hand_marks()
+	var playable_ok := true
+	var rows: Array[String] = []
+	for t: String in ["skip", "favor", "cat_a"]:
+		for id: String in ids[t]:
+			var mk: Dictionary = marks[id]
+			playable_ok = playable_ok and mk.edge and mk.dim < 0.001
+		rows.append(t)
+	var dim_ok := true
+	for t: String in ["nope", "cat_b", "attack_dead"]:
+		for id: String in ids[t]:
+			var mk: Dictionary = marks[id]
+			dim_ok = dim_ok and not mk.edge and absf(mk.dim - 0.15) < 0.001
+	_ux_line(report, "mano", "mi turno: jugables con borde y sin velo (%s)=%s; no jugables sin borde y oscurecidas un 15%% (nope, cat_b, attack_dead)=%s" % [", ".join(rows), str(playable_ok), str(dim_ok)], playable_ok and dim_ok)
+	# Seleccionar, y el borde y la selección conviven
+	var skip_card: Card3D = _game.debug_hand_card(ids["skip"][0])
+	await _tap_3d(skip_card, Vector3(-0.24, 0, -0.3))
+	await _wait(0.4)
+	marks = _game.debug_hand_marks()
+	var sel: Array = _game.debug_selection()
+	_ux_line(report, "mano", "al seleccionar la carta jugable: seleccionada=%s, conserva el borde=%s" % [str(sel == [ids["skip"][0]]), str(marks[ids["skip"][0]].edge)], sel == [ids["skip"][0]] and marks[ids["skip"][0]].edge)
+	_game.debug_clear_selection()
+	# No es mi turno: todo oscurecido, sin bordes
+	g.cur = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	marks = _game.debug_hand_marks()
+	var all_dim := true
+	for id: String in marks:
+		all_dim = all_dim and not marks[id].edge and absf(marks[id].dim - 0.15) < 0.001
+	_ux_line(report, "mano", "turno de otro y sin jugada: ninguna con borde y todas oscurecidas=%s" % str(all_dim), all_dim)
+	# Ventana de Nop: el Nop vuelve a tener borde y sigue levantado (brillo propio de Nop)
+	var nid: String = ids["nope"][0]
+	var e1 := _mv_play(lm, "p1", "skip")
+	await _wait(0.6)
+	marks = _game.debug_hand_marks()
+	var lit: Array = _game.debug_nop_lit()
+	_ux_line(report, "mano", "p1 juega Saltar (err='%s'): mi Nop con borde=%s, sin velo=%s, sigue resaltado como Nop=%s; el resto oscurecido=%s" % [e1, str(marks[nid].edge), str(marks[nid].dim < 0.001), str(lit.has(nid)), str(not marks[ids["cat_b"][0]].edge and marks[ids["cat_b"][0]].dim > 0.1)], marks[nid].edge and marks[nid].dim < 0.001 and lit.has(nid))
+	g.stack.clear()
+	# Puntería: elegir objetivo con una carta jugable no depende del borde
+	_ux_reset(g, 0)
+	me = g.P("p0")
+	me.hand = me.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "skip")
+	var fav := _ux_give(g, "p0", "favor")
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	var fcard: Card3D = _game.debug_hand_card(fav)
+	await _tap_3d(fcard, Vector3(-0.24, 0, -0.3))
+	await _wait(0.3)
+	var play := _find_button(self, "JUGAR")
+	if play:
+		await _tap_control(play)
+		await _wait(0.5)
+	var aiming: bool = _game.debug_aim_active() or _find_button(self, "CANCELAR") != null
+	_ux_line(report, "mano", "carta con objetivo (Favor) con borde: al jugarla entra el modo puntería=%s (el borde no estorba)" % str(aiming), aiming)
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	# --- Robar: del mazo a la cámara, sin retrasar la interacción
+	_ux_reset(g, 0)
+	me = g.P("p0")
+	me.hand.clear()
+	for t: String in ["cat_a", "cat_b", "favor", "attack", "nope"]:
+		_ux_give(g, "p0", t)
+	g.draw[g.draw.size() - 1] = ZKGame.Card.new("zdraw", "skip", false)
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.idle_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.6)
+	var before_ids: Array = _game.debug_hand_marks().keys()
+	await _tap_3d(_game.debug_deck_card())
+	await _wait(0.12)
+	var after: Dictionary = _game.debug_hand_marks()
+	var new_id := ""
+	for id: String in after:
+		if not before_ids.has(id):
+			new_id = id
+	var n_mk: Dictionary = after.get(new_id, {})
+	var started: bool = new_id != "" and n_mk.drawing and not n_mk.body and _game.debug_fx().is_live("draw")
+	_ux_line(report, "mano", "al robar: carta nueva %s oculta mientras vuela (drawing=%s), efecto «Fx_draw» vivo=%s" % [new_id, str(n_mk.get("drawing")), str(_game.debug_fx().is_live("draw"))], started)
+	await _wait(0.5)
+	await _save_shot(dir + "/t42_mano_robo.png")
+	# Con la animación en curso se puede tocar otra carta enseguida
+	var ends: Array = _game.debug_hand_ends()
+	_game.debug_clear_selection()
+	await _tap_3d(ends[0], Vector3(-0.24, 0, -0.3))
+	await _wait(0.3)
+	var sel2: Array = _game.debug_selection()
+	var still: bool = _game.debug_fx().is_live("draw")
+	_ux_line(report, "mano", "a los ~1 s de robar (animación aún en curso=%s) toco otra carta y se selecciona=%s (%s)" % [str(still), str(sel2.size() == 1), str(sel2)], sel2.size() == 1)
+	_game.debug_clear_selection()
+	await _wait(1.6)
+	after = _game.debug_hand_marks()
+	n_mk = after.get(new_id, {})
+	_ux_line(report, "mano", "al terminar: la carta robada ya está visible en la mano=%s, sin marca de robo=%s, efectos vivos=%d" % [str(n_mk.get("body")), str(not n_mk.get("drawing", true)), _game.debug_fx().live_count()], n_mk.get("body", false) and not n_mk.get("drawing", true) and _game.debug_fx().live_count() == 0)
+	# --- Brillo tornasol también para Apocalipsis y Putrefacto
+	var foils := {}
+	for t: String in ["apocalypse", "rotten", "skip", "exploding"]:
+		var c := Card3D.new().setup(t, true)
+		foils[t] = float(c._front.get_shader_parameter("foil"))
+		c.free()
+	_ux_line(report, "mano", "brillo tornasol (FOIL): Apocalipsis %.2f, Putrefacto %.2f, Saltar %.2f (normal), Explosivo %.2f (clásico sin cambios)" % [foils.apocalypse, foils.rotten, foils.skip, foils.exploding], foils.apocalypse > 0.15 and foils.rotten > 0.15 and absf(foils.skip - 0.1) < 0.001 and absf(foils.exploding - 0.18) < 0.001)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+
+
+## Sigue un avatar `secs` segundos y devuelve los extremos de su escala y su desvío respecto a su sitio.
+func _mv_track(id: String, secs: float) -> Dictionary:
+	var av: Sprite3D = _game.debug_avatar(id)
+	var home: Vector3 = _game.debug_grave(id).home
+	var out := {"min_sx": 9.0, "min_sy": 9.0, "max_dy": -9.0, "min_dy": 9.0, "span_dx": 0.0, "max_sx": 0.0}
+	var min_dx := 9.0
+	var max_dx := -9.0
+	var t := 0.0
+	while t < secs:
+		await get_tree().process_frame
+		t += get_process_delta_time()
+		out.min_sx = minf(out.min_sx, av.scale.x)
+		out.max_sx = maxf(out.max_sx, av.scale.x)
+		out.min_sy = minf(out.min_sy, av.scale.y)
+		out.max_dy = maxf(out.max_dy, av.position.y - home.y)
+		out.min_dy = minf(out.min_dy, av.position.y - home.y)
+		min_dx = minf(min_dx, av.position.x - home.x)
+		max_dx = maxf(max_dx, av.position.x - home.x)
+	out.span_dx = max_dx - min_dx
+	return out
+
+
+func _mv_avatares(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	_ux_reset(g, 0)
+	g.cur = 0
+	_session.updated.emit()
+	await _wait(0.6)
+	var av2: Sprite3D = _game.debug_avatar("p2")
+	var home2: Vector3 = _game.debug_grave("p2").home
+	_ux_line(report, "avatares", "en reposo: escala %s, en su sitio=%s" % [str(av2.scale), str(av2.position.distance_to(home2) < 0.001)], av2.scale.is_equal_approx(Vector3.ONE) and av2.position.distance_to(home2) < 0.001)
+	# Susto: otro revela un explosivo
+	g.emit("boom", {"player": "p2", "text": "¡%s sacó un GATITO EXPLOSIVO!" % g.P("p2").name})
+	_session.updated.emit()
+	await _wait(0.2)
+	await _save_shot(dir + "/t42_avatar_susto.png")
+	var tr: Dictionary = await _mv_track("p2", 0.5)
+	_ux_line(report, "avatares", "susto de p2 al revelar un explosivo: se encoge a %.2f, tiembla (desvío horizontal %.3f), baja %.3f" % [tr.min_sx, tr.span_dx, tr.min_dy], tr.min_sx < 0.85 and tr.span_dx > 0.01)
+	await _wait(1.0)
+	g.emit("inserted", {"player": "p2", "n": 1, "len": g.draw.size(), "shuf": 0, "text": "p2 lo esconde."})
+	_session.updated.emit()
+	await _wait(0.8)
+	var back: Vector3 = _game.debug_avatar("p2").scale
+	_ux_line(report, "avatares", "pasado el susto vuelve a su escala %s y a su sitio=%s" % [str(back), str(_game.debug_avatar("p2").position.distance_to(home2) < 0.001)], back.is_equal_approx(Vector3.ONE) and _game.debug_avatar("p2").position.distance_to(home2) < 0.001)
+	# Celebración: se salva con Zombi
+	g.emit("zombie", {"player": "p3", "text": "%s juega Zombi y se salva de explotar." % g.P("p3").name})
+	_session.updated.emit()
+	var home3: Vector3 = _game.debug_grave("p3").home
+	var tr2: Dictionary = await _mv_track("p3", 0.7)
+	_ux_line(report, "avatares", "celebración de p3 al salvarse: salta %.3f, giro (escala horizontal mín %.2f)" % [tr2.max_dy, tr2.min_sx], tr2.max_dy > 0.06 and tr2.min_sx < 0.7)
+	await _wait(0.5)
+	# Cabeceo: empieza su turno
+	g.emit("turn", {"player": "p4"})
+	_session.updated.emit()
+	var tr3: Dictionary = await _mv_track("p4", 0.5)
+	_ux_line(report, "avatares", "cabeceo de p4 al empezar su turno: baja %.3f, se aplasta a %.2f" % [tr3.min_dy, tr3.min_sy], tr3.min_dy < -0.01 and tr3.min_sy < 0.97)
+	await _wait(0.6)
+	# Un muerto no se mueve (su fantasma flota por su cuenta)
+	_mv_dead(g, "p3", false)
+	await _wait(0.5)
+	var dead_n: int = _game.debug_mood().active()
+	g.emit("turn", {"player": "p3"})
+	_session.updated.emit()
+	await _wait(0.2)
+	var gr: SeatGrave = _game.debug_grave("p3")
+	_ux_line(report, "avatares", "p3 muerto: su avatar sigue siendo el fantasma (estado %s) sin pose aplicada, escala %s" % [gr.state, str(_game.debug_avatar("p3").scale)], gr.state == "dead" and _game.debug_avatar("p3").scale.is_equal_approx(Vector3.ONE))
+	await _wait(0.8)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	var jumped: int = int(_game.debug_mood().dbg_count.get("jump", 0))
+	_ux_line(report, "avatares", "poses lanzadas en la prueba: %s" % str(_game.debug_mood().dbg_count), jumped >= 1 and _game.debug_mood().dbg_count.has("scare") and _game.debug_mood().dbg_count.has("cheer") and _game.debug_mood().dbg_count.has("nod"))
+	# Calidad baja: las poses siguen (son baratas)
+	_world.apply_quality("low")
+	g.emit("boom", {"player": "p1", "text": "¡Bigotes sacó un GATITO EXPLOSIVO!"})
+	_session.updated.emit()
+	var tr4: Dictionary = await _mv_track("p1", 0.4)
+	g.emit("inserted", {"player": "p1", "n": 1, "len": g.draw.size(), "shuf": 0, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.8)
+	_ux_line(report, "avatares", "calidad baja: el susto se ve igual (escala mín %.2f)" % tr4.min_sx, tr4.min_sx < 0.85)
+	_world.apply_quality(_mv_q)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
 
 
 # ---------------------------------------------------------------- tiempo de turno, Gatito Putrefacto, enlaces, sonido y menús de Plus (T52, T62, T45)

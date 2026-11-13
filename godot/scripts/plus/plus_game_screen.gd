@@ -165,6 +165,16 @@ var _emote_cd_end := 0           # instante (ms de la sesión) en que se puede v
 var _turn_fit_key := ""
 var dbg_emotes := 0              # prueba: reacciones recibidas y mostradas
 
+var _fx: PlusVfx                 # efectos propios de cada carta (V-04) y animación de robo (V-07)
+var _aura: DeckAura              # humo, temblor y luz roja del mazo según el riesgo (V-05)
+var _deck_step := DeckAura.STEP_BASE   # altura entre los modelos del mazo (crece con las cartas reales)
+var _deck_body: MeshInstance3D   # relleno entre los modelos del mazo cuando hay más cartas que modelos
+var _mood := AvatarMood.new()    # expresiones de los avatares (V-08)
+var _draw_anim := false          # el próximo `_sync_hand` trae una carta que acabo de robar: vuela del mazo a la cámara
+var _post_fx: Array[Callable] = []   # efectos que necesitan los nodos ya sincronizados (se lanzan al final de `_refresh`)
+var _fx_prompt := ""             # decisión abierta en la última vista (lanza Cava Más Hondo / Alterar el Futuro al abrirse)
+var _fx_prompt_ready := false
+
 
 func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
 	session = p_session
@@ -220,6 +230,13 @@ func _ready() -> void:
 	add_child(_dir_ring)
 	_stage = PlayStage.new()
 	add_child(_stage)
+	_fx = PlusVfx.new().setup(self)
+	add_child(_fx)
+	_aura = DeckAura.new().setup(DECK_POS)
+	_aura.turn_light = _turn_light
+	_aura.base_color = _turn_light.light_color
+	_aura.cards = _deck_cards
+	add_child(_aura)
 	_rot_label = Label3D.new()
 	_rot_label.font = UIKit.TITLE_FONT
 	_rot_label.font_size = 80
@@ -254,6 +271,48 @@ func debug_stage() -> PlayStage:
 	return _stage
 
 
+func debug_fx() -> PlusVfx:
+	return _fx
+
+
+func debug_aura() -> DeckAura:
+	return _aura
+
+
+func debug_mood() -> AvatarMood:
+	return _mood
+
+
+func debug_avatar(id: String) -> Sprite3D:
+	return _seats[id].avatar if _seats.has(id) else null
+
+
+func debug_deck_models() -> int:
+	return _deck_cards.size()
+
+
+## Altura de la carta de arriba del mazo sobre la mesa.
+func debug_deck_height() -> float:
+	return _deck_cards.back().position.y - DECK_POS.y if not _deck_cards.is_empty() else 0.0
+
+
+## Estado de las cartas de la mano: id -> {edge, dim, type, drawing}.
+func debug_hand_marks() -> Dictionary:
+	var out := {}
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		out[id] = {"edge": n.has_edge(), "dim": n.dim_amount(), "type": n.type, "drawing": n.has_meta("drawing"), "body": n.is_body_visible()}
+	return out
+
+
+func debug_hand_card(id: String) -> Card3D:
+	return _hand.get(id)
+
+
+func debug_draw_anim_pending() -> bool:
+	return _draw_anim
+
+
 func debug_grave(id: String) -> SeatGrave:
 	return _seats[id].grave if _seats.has(id) else null
 
@@ -271,10 +330,16 @@ func _process(delta: float) -> void:
 	if _drop_ring.visible:
 		var pulse := 0.5 + 0.5 * sin(_time * 7.0)
 		_drop_mat.albedo_color = Color(0.71, 0.95, 0.23, 0.55 + 0.35 * pulse) if _carry_over else Color(1, 1, 1, 0.18 + 0.12 * pulse)
+	_mood.tick(delta)
 	for id: String in _seats:
 		var av: Sprite3D = _seats[id].avatar
 		var is_cur: bool = not _v.is_empty() and _v.cur == id
-		av.scale = Vector3.ONE * (1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0))
+		var base := 1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0)
+		var gr: SeatGrave = _seats[id].grave
+		var m := _mood.sample(id) if gr.state != "dead" else AvatarMood.NEUTRAL
+		av.scale = Vector3(base * m.sx, base * m.sy, base)
+		if gr.state != "dead" and gr.busy == 0:
+			av.position = gr.home + Vector3(m.dx, m.dy, 0.0)      # V-08: la pose se suma a la posición de siempre
 	_place_strip()
 	var now := session.now()
 	_tick_emotes(now)
@@ -368,6 +433,10 @@ func _refresh() -> void:
 	_sync_float()
 	_sync_discard()
 	_sync_dir()
+	_fx_prompt_check()
+	for f: Callable in _post_fx:
+		f.call()
+	_post_fx.clear()
 	var pr0: Variant = _v.prompt
 	var alter_now: bool = pr0 != null and pr0.mine and pr0.type == "alter"
 	if alter_now and not _alter_live:
@@ -407,7 +476,7 @@ func _idle() -> bool:
 
 
 func _deck_top() -> Vector3:
-	return DECK_POS + Vector3(0, 0.03 + _deck_cards.size() * 0.007, 0)
+	return DECK_POS + Vector3(0, 0.03 + _deck_cards.size() * _deck_step, 0)
 
 
 ## Punto de donde sale una carta robada del FONDO: de debajo del mazo, asomando por un lado.
@@ -421,14 +490,41 @@ func _sync_deck() -> void:
 		_deck_cards.pop_back().queue_free()
 	while _deck_cards.size() < want:
 		var c := Card3D.new().setup("back", false)
-		c.position = DECK_POS + Vector3(0, 0.01 + _deck_cards.size() * 0.007, 0)
+		c.position = DECK_POS + Vector3(0, 0.01 + _deck_cards.size() * _deck_step, 0)
 		c.rotation_degrees.y = randf_range(-3.0, 3.0)
 		c.tapped.connect(_on_deck_tapped)
 		add_child(c)
 		_deck_cards.append(c)
+	_fit_deck_height()
 	_deck_label.text = str(_v.draw)
 	_deck_label.position = _deck_top() + Vector3(0, 0.3, 0)
 	_deck_label.visible = _v.draw > 0
+
+
+## V-05: hay como mucho 14 modelos, pero la altura de la pila crece con las cartas reales; el hueco entre modelos se rellena.
+func _fit_deck_height() -> void:
+	var step := DeckAura.step_for(int(_v.draw), _deck_cards.size())
+	if not is_equal_approx(step, _deck_step):
+		_deck_step = step
+		_aura.cancel_tremble()
+		for i in _deck_cards.size():
+			_deck_cards[i].position.y = DECK_POS.y + 0.01 + i * _deck_step
+	var gap := _deck_step - DeckAura.STEP_BASE
+	if gap > 0.0004 and not _deck_cards.is_empty():
+		if _deck_body == null:
+			_deck_body = MeshInstance3D.new()
+			_deck_body.mesh = BoxMesh.new()
+			var m := StandardMaterial3D.new()
+			m.albedo_color = Color(0.86, 0.83, 0.74)
+			m.roughness = 0.9
+			_deck_body.material_override = m
+			add_child(_deck_body)
+		var h := _deck_step * (_deck_cards.size() - 1)
+		(_deck_body.mesh as BoxMesh).size = Vector3(0.6, maxf(0.002, h), 0.86)
+		_deck_body.position = DECK_POS + Vector3(0, 0.01 + h / 2.0, 0)
+		_deck_body.visible = true
+	elif _deck_body != null:
+		_deck_body.visible = false
 
 
 # ---------------------------------------------------------------- tiempo de turno (UX-07)
@@ -527,7 +623,7 @@ func _sync_rot() -> void:
 	_rot_depth = d
 	var vis := _deck_cards.size()
 	var idx := vis - 1 if n <= 1 else roundi(float(n - 1 - d) / float(n - 1) * float(maxi(0, vis - 1)))
-	var pos := DECK_POS + Vector3(0.2, 0.012 + idx * 0.007, 0.02)
+	var pos := DECK_POS + Vector3(0.2, 0.012 + idx * _deck_step, 0.02)
 	if not is_instance_valid(_rot_card):
 		_rot_card = Card3D.new().setup("rotten", true)
 		_rot_card.position = pos + Vector3(0.0, 0.25, 0.0)
@@ -671,6 +767,12 @@ func _sync_hand() -> void:
 			n.global_position = _deck_bottom_out() if _bottom_draw else _deck_top()
 			n.scale = Vector3.ONE * 0.6
 			_hand[c.id] = n
+			if _draw_anim and _v.over == null:
+				# V-07: la carta vuela del mazo a la cámara, se voltea, se queda un instante y entra; la real espera oculta
+				# (sigue siendo tocable: solo se oculta el modelo)
+				n.set_body_visible(false)
+				n.set_meta("drawing", true)
+				_fx.draw_fly(c.type, n.global_position, n, _draw_done.bind(n))
 			_bottom_draw = false
 	for id: String in _hand.keys():
 		if ids.has(id):
@@ -678,6 +780,8 @@ func _sync_hand() -> void:
 		var n: Card3D = _hand[id]
 		_hand.erase(id)
 		n.set_glow(0.0)
+		n.set_edge(false)
+		n.set_dim(0.0)
 		n.move_under(self)
 		if discard_ids.has(id):
 			_discard_nodes[id] = n          # la jugué: _sync_discard la lleva a la pila
@@ -711,6 +815,59 @@ func _sync_hand() -> void:
 		n.set_glow(0.16 if selected else (0.1 if hovered else (0.5 if lit else 0.0)))
 		var grow := 1.08 if selected else (1.05 if hovered else 1.0)
 		n.fly_to(pos, Vector3(0, -ang, 0), 0.12 if hovered else 0.3, hand_scale * grow)
+	_draw_anim = false
+	_mark_hand_state()
+
+
+## V-07: las jugables ahora mismo llevan un borde luminoso suave y las demás se oscurecen un 15 %. Solo toca el borde y el
+## velo de cada carta: la selección, el arrastre, el brillo de los Nop y la puntería usan otros recursos.
+func _mark_hand_state() -> void:
+	var combo := _combo_ids()
+	var live: bool = _v.over == null and _me().get("alive", false)
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		if n.has_meta("drawing"):
+			n.set_edge(false)
+			continue
+		var ok: bool = live and (_v.playable.has(id) or combo.has(id))
+		n.set_edge(ok)
+		n.set_dim(0.0 if (ok or not live) else 0.15)
+
+
+## Cartas que forman una pareja o trío posible ahora mismo (el motor solo marca como jugables las sueltas).
+func _combo_ids() -> Dictionary:
+	var out := {}
+	if _v.over != null or not (_my_turn() and _idle()):
+		return out
+	if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive and p.count > 0):
+		return out
+	var by_type := {}
+	var clones: Array = []
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			clones.append(c.id)
+		elif CardDB.defs.get(c.type, {}).get("cat", false):
+			if not by_type.has(c.type):
+				by_type[c.type] = []
+			(by_type[c.type] as Array).append(c.id)
+	var any := false
+	for t: String in by_type:
+		if (by_type[t] as Array).size() + clones.size() >= 2:
+			any = true
+			for id: String in by_type[t]:
+				out[id] = true
+	if any:
+		for id: String in clones:
+			out[id] = true
+	return out
+
+
+func _draw_done(n: Card3D) -> void:
+	if not is_instance_valid(n):
+		return
+	n.remove_meta("drawing")
+	n.set_body_visible(true)
+	_mark_hand_state()
 
 
 ## Calidad baja (la fija TableWorld.apply_quality bajando la escala 3D): efectos simplificados.
@@ -869,6 +1026,145 @@ func _ghost(from: Vector3, to: Vector3) -> void:
 	c.scale = Vector3.ONE * 0.45
 	var tw := c.fly_to(to, Vector3(0, randf_range(-0.4, 0.4), 0), 0.4, 0.42)
 	tw.chain().tween_callback(c.queue_free)
+
+
+# ---------------------------------------------------------------- efectos propios de cada carta (V-04) y expresiones (V-08)
+
+## Dónde está la lápida de un muerto (o su asiento si aún vive; mi sitio si soy yo).
+func _grave_or_seat(id: Variant) -> Vector3:
+	if _seats.has(id):
+		var gr: SeatGrave = _seats[id].grave
+		return gr.position if gr.state == "dead" or gr.has_tomb() else _seats[id].pos
+	return _pos_of(id)
+
+
+## Id del jugador cuyo nombre abre el texto («Bigotes juega…»); gana el nombre más largo.
+func _id_by_prefix(text: String) -> String:
+	var best := ""
+	var best_len := 0
+	for p: Dictionary in _v.players:
+		var nm := str(p.name)
+		if text.begins_with(nm + " ") and nm.length() > best_len:
+			best = str(p.id)
+			best_len = nm.length()
+	return best
+
+
+func _id_by_name(nm: String) -> String:
+	for p: Dictionary in _v.players:
+		if str(p.name) == nm:
+			return str(p.id)
+	return ""
+
+
+## Carta que me llega con un robo o un regalo (el evento `got` que sigue a `steal`/`gave`), para voltearla al llegar a mi mano.
+func _flip_face(e: Dictionary) -> String:
+	if e.has("card"):
+		return str(e.card)
+	for x: Dictionary in _v.events:
+		if x.seq > e.seq and x.type == "got" and x.has("card"):
+			return str(x.card)
+	return ""
+
+
+## Efectos que dependen de la carta que se juega (no de su resolución).
+func _fx_play(e: Dictionary) -> void:
+	var eff := str(e.get("eff", ""))
+	var by := str(e.player)
+	if (eff == "see_future" or eff == "alter_future") and by != _v.you:
+		_fx.future([])                       # quien no juega la carta ve dorsos
+	var scan: Array = []
+	var d: Array = _v.discard
+	for i in range(d.size() - 1, maxi(-1, d.size() - 4), -1):
+		if d[i].by == by and d[i].type == "clone":
+			scan.append(d[i].id)
+	if not scan.is_empty():
+		_post_fx.append(_scan_clones.bind(scan))
+
+
+func _scan_clones(ids: Array) -> void:
+	for id: String in ids:
+		var n: Card3D = _discard_nodes.get(id)
+		if n != null and not n.has_meta("scanned"):
+			n.set_meta("scanned", true)
+			_fx.clone_scan(n)
+
+
+## Efectos que salen de las líneas de texto públicas del motor (Ojo de Cuervo, Saltar, Entierro, Ladrón de Tumbas).
+func _fx_info(text: String) -> void:
+	if text.contains(" mira la mano de "):
+		var by := _id_by_prefix(text)
+		var tg := _id_by_name(text.get_slice(" mira la mano de ", 1).trim_suffix("."))
+		if by != "" and tg != "":
+			_fx.crow(_pos_of(by), _pos_of(tg))
+	elif text.contains(" termina su turno sin robar") or text.contains(" termina TODOS sus turnos"):
+		var by := _id_by_prefix(text)
+		if by == "":
+			return
+		_mood.trigger(by, "jump")          # V-08: salto del avatar
+		var to: Variant = _pos_of(_v.cur) if _v.cur != by else null
+		_fx.skip(_pos_of(by), to, text.contains("TODOS"))
+	elif text.contains(" entierra una carta"):
+		_fx.dig("bury")
+	elif text.contains(" entrega una carta al mazo"):
+		var by := _id_by_prefix(text)
+		if _seats.has(by):
+			_fx.grave_hands(_seats[by].grave)
+
+
+func _fx_haunt(by: String, target: String) -> void:
+	var tex: Texture2D = _seats[by].avatar.texture if _seats.has(by) else UIKit.avatar(_avatar_index(by))
+	var from := _pos_of(by) + Vector3(0, 0.4, 0)
+	if _seats.has(by) and (_seats[by].grave as SeatGrave).state == "dead":
+		from = (_seats[by].grave as SeatGrave).ghost_pos()
+	_fx.haunt(from, _pos_of(target), tex)
+	if target != _v.you:
+		_mood.trigger(target, "scare")
+
+
+## Decisiones que abren un efecto: Cava Más Hondo (la carta que se baja) y Alterar el Futuro (las 3 de arriba se levantan).
+func _fx_prompt_check() -> void:
+	var pr: Variant = _v.prompt
+	var key := "" if pr == null else "%s|%s" % [pr.type, str(pr.get("player", ""))]
+	var first := not _fx_prompt_ready
+	_fx_prompt_ready = true
+	if key == _fx_prompt:
+		return
+	_fx_prompt = key
+	if first or pr == null:
+		return
+	match str(pr.type):
+		"dig":
+			_fx.dig("dig")
+		"alter":
+			_fx.future((pr.cards as Array).duplicate() if pr.mine and pr.get("cards") != null else [])
+
+
+## Cortes del Ataque Dirigido: tres tajos paralelos que van del atacante al asiento del objetivo.
+func _slashes_at(by: Variant, target: Variant) -> void:
+	var a := world.camera.unproject_position(_pos_of(by) + Vector3(0, 0.3, 0))
+	var b := world.camera.unproject_position(_pos_of(target) + Vector3(0, 0.3, 0))
+	var dist := a.distance_to(b)
+	if dist < 40.0:
+		_slashes()
+		return
+	var rot := (b - a).angle()
+	var perp := Vector2(-sin(rot), cos(rot))
+	for i in 3:
+		var r := ColorRect.new()
+		r.color = Color(1, 1, 1, 0.92)
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.size = Vector2(dist * 1.25 + 160.0, 16)
+		r.pivot_offset = Vector2(0, 8)
+		r.position = a + perp * (i - 1) * 70.0 - r.pivot_offset - (b - a).normalized() * 40.0
+		r.rotation = rot
+		r.scale = Vector2(0.0, 1.0)
+		_fx_root.add_child(r)
+		var t := r.create_tween()
+		t.tween_interval(0.05 * i)
+		t.tween_property(r, "scale:x", 1.0, 0.12)
+		t.tween_property(r, "modulate:a", 0.0, 0.28)
+		t.tween_callback(r.queue_free)
 
 
 # ---------------------------------------------------------------- efectos en secuencia
@@ -1087,8 +1383,11 @@ func _process_events() -> void:
 			"play":
 				_snd("card")
 				_last_eff = str(e.get("eff", ""))
+				_fx_play(e)
 			"draw":
 				_snd("draw", -3.0)
+				if e.player == me:
+					_draw_anim = true          # V-07: la carta que entra en la mano sale del mazo hacia la cámara
 				if e.get("bottom", false):
 					_snd("bottom")
 					_fx_bottom_draw(e.player)
@@ -1099,6 +1398,8 @@ func _process_events() -> void:
 					_toast("Se acabó el tiempo: robas una carta." if e.player == me else "Se acabó el tiempo: %s roba." % _pname(e.player), true)
 					dbg_timeouts += 1
 			"turn":
+				if e.player != me and _player(e.player).get("alive", false):
+					_mood.trigger(str(e.player), "nod")      # V-08: cabeceo al empezar su turno
 				if e.player == me and _v.over == null:
 					_popup("¡TU TURNO!", UIKit.C.toxic)
 					_snd("turn")
@@ -1109,7 +1410,11 @@ func _process_events() -> void:
 				world.flash(UIKit.C.toxic if e.yup else UIKit.C.red, 0.22, 0.3)
 			"attack":
 				_snd("targeted" if _last_eff == "targeted_attack" else "attack")
-				_slashes()
+				if _last_eff == "targeted_attack":
+					_fx.targeted(_pos_of(e.target))                 # V-04: los cortes miran al asiento del objetivo
+					_slashes_at(e.player, e.target)
+				else:
+					_slashes()
 				world.shake(0.4)
 				if e.target == me:
 					_popup("¡TE ATACAN! ×%d" % int(e.n), UIKit.C.red)
@@ -1117,24 +1422,25 @@ func _process_events() -> void:
 					Input.vibrate_handheld(150)
 			"shuffle":
 				_snd("shuffle")
-				_jiggle_deck()
+				_fx.shuffle()                      # V-04: espiral del mazo (sustituye al temblor)
 			"reverse":
 				_snd("reverse")
+				_fx.reverse(int(e.get("dir", 1)))
+				_dir_ring.kick()
 				world.flash(Color("49e0e6"), 0.25, 0.4)
 				world.shake(0.25)
 				_popup("¡MARCHA ATRÁS!", Color("49e0e6"))
 			"apocalypse":
 				_snd("apocalypse")
-				world.flash(UIKit.C.red, 0.55, 0.7)
+				world.flash(Color(0.85, 0.04, 0.04), 0.5, 2.0)      # V-04: el cielo se pone rojo 2 s
 				world.shake(0.9)
 				Input.vibrate_handheld(200)
-				_jiggle_deck()
+				_fx.apocalypse(int(e.get("n", 3)))
 				_popup("¡APOCALIPSIS!", UIKit.C.red)
 				_toast(e.text, true)
 			"swap":
 				_snd("swap")
-				_ghost(_pos_of(e.player), _pos_of(e.target))
-				_ghost(_pos_of(e.target), _pos_of(e.player))
+				_fx.swirl(_grave_or_seat(e.target), _pos_of(e.player))       # V-04: dos remolinos de cartas que se cruzan
 				world.flash(Color("8a5cff"), 0.2, 0.35)
 				_popup("¡TRUEQUE!", Color("c9a6ff"))
 				_known_hands.erase(e.player)      # lo visto con Ojo de Cuervo ya no vale
@@ -1143,6 +1449,7 @@ func _process_events() -> void:
 				_snd("haunt")
 				# La carta descartada vuela de la víctima a la pila: lo hace _sync_discard (el descarte lleva `by` = víctima)
 				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
+				_fx_haunt(str(e.player), str(e.target))
 				world.flash(Color("8a5cff"), 0.2, 0.35)
 				if e.target == me:
 					_popup("¡TE ESPANTAN!", UIKit.C.red)
@@ -1155,22 +1462,27 @@ func _process_events() -> void:
 				_modal = {"type": "peek", "target": e.target, "cards": e.cards}
 			"buried":
 				_snd("bury")
-				_jiggle_deck()
 				_toast(e.text)
 			"info":
+				_fx_info(str(e.get("text", "")))
 				if str(e.get("text", "")).contains(" mira la mano de "):
 					_snd("crow")                # Ojo de Cuervo: lo oyen todos (lo ve solo quien juega)
 					if str(e.get("text", "")).ends_with("mira la mano de %s." % str(_me().get("name", "?"))):
 						_toast(e.text, true)      # a quien miran se le avisa
 			"steal":
 				_snd("steal")
-				_ghost(_pos_of(e.target), _pos_of(e.player))
+				_fx.steal(_pos_of(e.target), _pos_of(e.player), _flip_face(e) if e.player == me else "")
 				if e.target == me and e.has("card"):
 					_toast(e.text, true)
 			"gave":
 				_snd("steal", -4.0)
-				_ghost(_pos_of(e.player), _pos_of(e.target))
+				if not _player(e.target).get("alive", true):
+					_fx.feed(_pos_of(e.player), _grave_or_seat(e.target))      # V-04: Alimenta a los Muertos, en círculo hacia la lápida
+				else:
+					_fx.steal(_pos_of(e.player), _pos_of(e.target), _flip_face(e) if e.target == me else "")
 			"boom":
+				if e.player != me:
+					_mood.trigger(str(e.player), "scare")      # V-08: susto al revelarse un explosivo de otro
 				_rot_death = bool(e.get("rotten", false))
 				_enqueue(_fx_reveal.bind("rotten" if _rot_death else "exploding"))
 			"died":
@@ -1195,6 +1507,8 @@ func _process_events() -> void:
 					_snd("sudden")
 				_toast(str(e.text), true)
 			"zombie":
+				if e.player != me:
+					_mood.trigger(str(e.player), "cheer")      # V-08: celebra haberse salvado
 				_snd("zombie")
 				Vfx.zombie_rise(self, _ek.global_position if _ek else DISCARD_POS + Vector3(0, 0.15, 0))
 				world.flash(UIKit.C.toxic, 0.14)
@@ -1218,6 +1532,8 @@ func _process_events() -> void:
 				if e.target == me:
 					_popup("¡REVIVISTE!", UIKit.C.toxic)
 			"future":
+				if not _alter_live:
+					_fx.future((e.cards as Array).duplicate())       # V-04: las 3 de arriba se levantan (las veo solo yo)
 				if _alter_live:
 					_toast("Nuevo orden: " + ", ".join(PackedStringArray((e.cards as Array).map(func(t: String) -> String: return CardDB.display_name(t)))) + ".")
 				else:
@@ -1813,6 +2129,9 @@ func _update_hud() -> void:
 	_opps.set_pickable(_aim_kind != "")
 	_opps.update(v, session.level_of, session.trait_of)
 	_risk.update(v)
+	_aura.low = _low()
+	_aura.set_risk(int(_risk.debug_risk().pct))
+	_fx.low = _low()
 	_mem_strip.update(_memory.strip(v))
 
 	# Barra del jugador: solo donde sobra espacio bajo la mesa

@@ -74,6 +74,11 @@ func set_dir(value: int, animate: bool = true) -> void:
 		_heads.rotation.y = _target_yaw(d)
 
 
+## V-04 (Marcha Atrás): giro extra del aro, además de la vuelta de las flechas.
+func kick(extra: float = 12.0) -> void:
+	_boost = maxf(_boost, extra)
+
+
 func _target_yaw(d: int) -> float:
 	# Girar todas las flechas 180° sobre sí mismas (cada una en su sitio) las deja apuntando al otro lado
 	return 0.0 if d > 0 else PI
