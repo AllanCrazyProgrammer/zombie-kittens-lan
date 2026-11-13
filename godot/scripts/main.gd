@@ -9,7 +9,7 @@ extends Node3D
 ##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
 ##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
-##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen); --uitest-plus-part 1|2 la divide
+##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen); --uitest-plus-part 1|2 la divide (6: solo escena y lápidas)
 ##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola (con --plus la sala es Plus y el invitado envía una reacción)
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
@@ -537,6 +537,13 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var user_args := OS.get_cmdline_user_args()
 	var pk := user_args.find("--uitest-plus-part")
 	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 6:        # solo la carta en escena y las lápidas (V-02, V-03), sobre una partida de 5
+		await _t62_start({"rivals": 4})
+		await _ui_test_escena(dir, report)
+		await _ui_test_lapidas(dir, report)
+		print("UITEST fin")
+		get_tree().quit()
+		return
 	if _plus_part == 5:        # solo las reacciones rápidas (T53)
 		await _ui_test_t53(dir, report)
 		print("UITEST fin")
@@ -783,6 +790,8 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_aim(dir, report)
 	await _ui_test_cripta(dir, report)
 	await _ui_test_memoria(dir, report)
+	await _ui_test_escena(dir, report)
+	await _ui_test_lapidas(dir, report)
 	await _ui_test_ux(dir, report)
 	await _ui_test_t53(dir, report)
 	if _plus_part != 1:
@@ -1305,6 +1314,10 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 		_session.updated.emit()
 		await _wait(0.3)
 		await _cripta_give(lm, "soul_swap")
+		# Tras el trueque el bot muerto tiene mi mano y los muertos pueden jugar cartas ⚡ y Nop: si recibe alguna,
+		# puede jugarla durante la espera y la comparación fallaría sin que el trueque esté mal. Se quitan antes.
+		var dead_playable := ["haunt", "shuffle", "feed_dead", "clairvoyance", "nope"]
+		g.P("p0").hand = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return not dead_playable.has(c.type))
 		var theirs: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
 		var mine_after: Array = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "soul_swap").map(func(c: ZKGame.Card) -> String: return c.id)
 		var seq0 := g.seq
@@ -1387,7 +1400,9 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 	await _wait(0.3)
 	# Nada atascado
 	var clean := await _cripta_close_windows()
-	_cripta_line(report, "final", "| sin ventanas abiertas=%s (ventana «%s», puntería=%s), decisión pendiente=%s" % [str(clean), _game.debug_modal_title(), str(_game.debug_aim_active()), str(g.prompt != null)], clean and (g.prompt == null or g.prompt.player != "p0"))
+	# Las decisiones de «dar carta» no tienen `player` sino `waiting`: es mía si me esperan a mí
+	var mine_pending: bool = g.prompt != null and (g.prompt.get("player", "") == "p0" or (g.prompt.has("waiting") and g.prompt.waiting.has("p0")))
+	_cripta_line(report, "final", "| sin ventanas abiertas=%s (ventana «%s», puntería=%s), decisión pendiente mía=%s" % [str(clean), _game.debug_modal_title(), str(_game.debug_aim_active()), str(mine_pending)], clean and not mine_pending)
 	g.P("p0").alive = true
 	_session.updated.emit()
 
@@ -1956,6 +1971,255 @@ func _ui_test_ux(dir: String, report: Array) -> void:
 	var sc_head: HBoxContainer = sc.get_child(0).get_child(0)
 	_ux_line(report, "resumen", "marcador de sala preparado: columnas %d (con victorias) frente a 6" % sc_head.get_child_count(), sc_head.get_child_count() == 7)
 	sc.free()
+	lm.set_process(true)
+
+
+# ---------------------------------------------------------------- carta jugada en escena y asientos de los muertos (V-02, V-03)
+
+## Cartas de la pantalla que siguen marcadas como flotantes (huérfanas si no hay jugada en la pila).
+func _stage_floating(screen: Node3D) -> int:
+	var n := 0
+	for c in screen.get_children():
+		if c is Card3D and c.has_meta("floating"):
+			n += 1
+	return n
+
+
+## Cartas con un nodo propio en la pantalla que no están ni flotando ni cerca del descarte (se quedaron por el camino).
+func _stage_stray(screen: Node3D, ids: Array) -> int:
+	var n := 0
+	for c in screen.get_children():
+		if c is Card3D and ids.has(c.card_id):
+			var p: Vector3 = c.position
+			if c.has_meta("floating") or Vector2(p.x - 0.5, p.z + 0.3).length() > 0.25 or p.y > 0.12:
+				n += 1
+	return n
+
+
+func _ui_test_escena(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/escena: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
+	var st: PlayStage = _game.debug_stage()
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	# 1. Una jugada sin objetivo: la carta flota mientras haya pila y cae al descarte al resolverse
+	var err := await _ux_play(lm, "p1", "skip")
+	var sid := int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var cards: Array = st.cards_of(sid)
+	var cn: Card3D = cards[0] if cards.size() > 0 else null
+	var near := cn != null and Vector2(cn.position.x - PlayStage.CENTER.x, cn.position.z - PlayStage.CENTER.z).length() < 0.2 and cn.position.y > 0.3 and cn.scale.x > 1.0
+	_ux_line(report, "escena", "jugada de p1 sin objetivo (err='%s'): %d jugada(s) en escena, carta flotando en el centro a escala %.2f (altura %.2f) | sin haz: %s" % [err, st.play_count(), cn.scale.x if cn else 0.0, cn.position.y if cn else 0.0, str(not st.has_beam(sid))], err == "" and st.play_count() == 1 and near and not st.has_beam(sid))
+	await _save_shot(dir + "/t40_escena_flota.png")
+	g._resolve_top(lm.now())
+	_session.updated.emit()
+	await _wait(0.9)
+	var landed := cn != null and is_instance_valid(cn) and Vector2(cn.position.x - 0.5, cn.position.z + 0.3).length() < 0.15 and cn.position.y < 0.1
+	_ux_line(report, "escena", "al resolverse: %d en escena, la carta cae al descarte=%s, flotantes huérfanas=%d" % [st.play_count(), str(landed), _stage_floating(_game)], st.play_count() == 0 and landed and _stage_floating(_game) == 0)
+	# 2. Con objetivo: haz del color de la carta de p1 a p2
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "favor", "p2")
+	sid = int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var want_col := Color(str(CardDB.defs["favor"].color)).lightened(0.2)
+	var bc: Color = st.beam_color(sid)
+	var col_ok := absf(bc.r - want_col.r) < 0.02 and absf(bc.g - want_col.g) < 0.02 and absf(bc.b - want_col.b) < 0.02
+	_ux_line(report, "escena", "Favor de p1 contra p2 (err='%s'): haz presente=%s, color de la carta=%s, partes=%d" % [err, str(st.has_beam(sid)), str(col_ok), st.beam_parts(sid)], err == "" and st.has_beam(sid) and col_ok)
+	await _save_shot(dir + "/t40_escena_haz.png")
+	# 3. Anulada por un Nop: se parte en dos con sello; un segundo Nop la restaura
+	var nope1 := ""
+	for c: ZKGame.Card in g.P("p2").hand:
+		if c.type == "nope":
+			nope1 = c.id
+	var e1 := g.act("p2", {"a": "play", "cards": [nope1]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.8)
+	_ux_line(report, "escena", "Nop de p2 (err='%s'): partida=%s, mitades=%d, sello NOP=%s, nopes=%d" % [e1, str(st.is_broken(sid)), st.half_count(), str(st.has_stamp(sid)), int(g.stack[0].nopes)], e1 == "" and st.is_broken(sid) and st.half_count() == 2 and st.has_stamp(sid))
+	await _save_shot(dir + "/t40_escena_anulada.png")
+	var nope2 := _ux_give(g, "p3", "nope")
+	var e2 := g.act("p3", {"a": "play", "cards": [nope2]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.9)
+	_ux_line(report, "escena", "segundo Nop de p3 (err='%s'): recompuesta=%s, mitades=%d, sello=%s, restauraciones=%d" % [e2, str(not st.is_broken(sid)), st.half_count(), str(st.has_stamp(sid)), st.dbg_restores], e2 == "" and not st.is_broken(sid) and st.half_count() == 0 and not st.has_stamp(sid) and st.dbg_restores >= 1)
+	# La vuelve a anular y se resuelve anulada: las mitades caen con la carta y no queda nada flotando
+	var nope3 := _ux_give(g, "p4", "nope")
+	g.act("p4", {"a": "play", "cards": [nope3]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.6)
+	var broken_again := st.is_broken(sid)
+	g._resolve_top(lm.now())
+	_session.updated.emit()
+	await _wait(1.2)
+	_ux_line(report, "escena", "anulada y resuelta: estaba partida=%s, ahora %d en escena, flotantes=%d, mitades=%d" % [str(broken_again), st.play_count(), _stage_floating(_game), st.half_count()], broken_again and st.play_count() == 0 and _stage_floating(_game) == 0 and st.half_count() == 0)
+	# 4. Ráfaga: tres jugadas seguidas, sin esperar a que se vean, y sin cartas huérfanas
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+	var burst_ids: Array = []
+	for who: String in ["p1", "p2", "p3"]:
+		g.cur = g.players.find(g.P(who))
+		g.turns_left = 1
+		g.attacked = false
+		var cid := _ux_give(g, who, "skip")
+		burst_ids.append(cid)
+		g.act(who, {"a": "play", "cards": [cid]}, lm.now())
+		_session.updated.emit()
+		await get_tree().process_frame
+		g._resolve_top(lm.now())
+		_session.updated.emit()
+		await get_tree().process_frame
+	var mid_count: int = st.play_count()
+	await _wait(1.4)
+	_ux_line(report, "escena", "ráfaga de 3 jugadas: en escena %d (tras 2 cuadros: %d), flotantes huérfanas=%d, cartas fuera de sitio=%d" % [st.play_count(), mid_count, _stage_floating(_game), _stage_stray(_game, burst_ids)], st.play_count() == 0 and _stage_floating(_game) == 0 and _stage_stray(_game, burst_ids) == 0)
+	# 5. Una pareja (dos cartas en abanico) y la pila que se vacía de golpe (como al terminar la partida)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	g.cur = g.players.find(g.P("p1"))
+	g.turns_left = 1
+	var pa := _ux_give(g, "p1", "cat_a")
+	var pb := _ux_give(g, "p1", "cat_a")
+	var e3 := g.act("p1", {"a": "play", "cards": [pa, pb], "target": "p2"}, lm.now())
+	_session.updated.emit()
+	await _wait(0.8)
+	var sid2 := int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var pair: Array = st.cards_of(sid2)
+	var spread_ok := pair.size() == 2 and absf((pair[0] as Card3D).position.x - (pair[1] as Card3D).position.x) > 0.2
+	_ux_line(report, "escena", "pareja de p1 contra p2 (err='%s'): %d cartas en abanico=%s, haz=%s" % [e3, pair.size(), str(spread_ok), str(st.has_beam(sid2))], e3 == "" and spread_ok and st.has_beam(sid2))
+	g.stack.clear()
+	_session.updated.emit()
+	await _wait(1.2)
+	_ux_line(report, "escena", "pila vaciada de golpe: en escena %d, flotantes=%d" % [st.play_count(), _stage_floating(_game)], st.play_count() == 0 and _stage_floating(_game) == 0)
+	# 6. Calidad baja: haz simplificado (un solo tubo, sin halo) y rotura con mitades y sello
+	_world.apply_quality("low")
+	await _wait(0.2)
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "favor", "p2")
+	sid = int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var low_beam: int = st.beam_parts(sid)
+	var low_halo := st.has_halo(sid)
+	var nl := ""
+	for c: ZKGame.Card in g.P("p2").hand:
+		if c.type == "nope":
+			nl = c.id
+	g.act("p2", {"a": "play", "cards": [nl]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.7)
+	_ux_line(report, "escena", "calidad baja: haz de %d parte(s), halo=%s, rotura con %d mitades y sello=%s" % [low_beam, str(low_halo), st.half_count(), str(st.has_stamp(sid))], err == "" and low_beam == 1 and not low_halo and st.half_count() == 2 and st.has_stamp(sid))
+	g.stack.clear()
+	_session.updated.emit()
+	await _wait(0.6)
+	_world.apply_quality(quality)
+	await _wait(0.2)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+	lm.set_process(true)
+
+
+func _ui_test_lapidas(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/lapidas: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	_ux_reset(g, 0)
+	g.cur = g.players.find(g.P("p1"))
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	# 1. p3 explota; p4 se pudre
+	var p3: ZKGame.Player = g.P("p3")
+	var p4: ZKGame.Player = g.P("p4")
+	p3.alive = false
+	p3.hand.clear()
+	g.emit("boom", {"player": "p3", "text": "¡%s sacó un GATITO EXPLOSIVO!" % p3.name})
+	g.emit("died", {"player": "p3", "text": "💥 %s explotó y está MUERTO (por ahora)." % p3.name})
+	_session.updated.emit()
+	await _wait(0.3)
+	var gr3: SeatGrave = _game.debug_grave("p3")
+	var mid_tomb := gr3.has_tomb()
+	await _wait(4.2)
+	var card3 := gr3.card_node()
+	_ux_line(report, "lapidas", "p3 explota: antes de acabar la explosión sin lápida=%s | ahora lápida=%s, rótulo «%s» (esperado «%s»), carta delante=%s, fantasma alfa %.2f a %.2f sobre la lápida" % [str(not mid_tomb), str(gr3.has_tomb()), gr3.label_text(), str(p3.name), card3.type if card3 else "-", gr3.ghost_alpha(), gr3.avatar.position.y - gr3.position.y], not mid_tomb and gr3.has_tomb() and gr3.label_text() == p3.name and card3 != null and card3.type == "exploding" and gr3.ghost_alpha() > 0.3 and gr3.ghost_alpha() < 0.8 and gr3.avatar.position.y - gr3.position.y > 0.3 and gr3.busy == 0 and gr3.pending == 0)
+	_ux_line(report, "lapidas", "sonido de lápida: %s | lápida con sombra en calidad %s: %s" % [str(_game.debug_sounds().has("tomb")), quality, str(gr3.tomb_casts_shadow())], _game.debug_sounds().has("tomb"))
+	p4.alive = false
+	p4.hand.clear()
+	g.emit("boom", {"player": "p4", "rotten": true, "text": "☣ %s robó el Gatito Putrefacto boca arriba y está MUERTO." % p4.name})
+	g.emit("died", {"player": "p4", "text": "☣ %s se pudrió y está MUERTO (por ahora)." % p4.name})
+	_session.updated.emit()
+	await _wait(4.2)
+	var gr4: SeatGrave = _game.debug_grave("p4")
+	var card4 := gr4.card_node()
+	_ux_line(report, "lapidas", "p4 se pudre: lápida=%s, rótulo «%s», carta delante=%s" % [str(gr4.has_tomb()), gr4.label_text(), card4.type if card4 else "-"], gr4.has_tomb() and gr4.label_text() == p4.name and card4 != null and card4.type == "rotten")
+	# p3 puede seguir jugando ⚡: un Nop suyo no rompe nada y el fantasma sigue ahí
+	await _save_shot(dir + "/t40_lapidas_muertos.png")
+	# 2. Pantalla nueva sobre una partida con dos muertos: ya aparecen con su lápida, sin animación
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await get_tree().process_frame
+	var n3: SeatGrave = g2.debug_grave("p3")
+	var n4: SeatGrave = g2.debug_grave("p4")
+	var instant: bool = n3 != null and n3.has_tomb() and is_equal_approx(n3.tomb_y(), 0.0) and n3.busy == 0 and n3.pending == 0 and n3.card_node() != null and n3.card_node().type == "exploding" and n3.label_text() == p3.name and n4.has_tomb() and n4.card_node() != null and n4.card_node().type == "rotten"
+	_ux_line(report, "lapidas", "pantalla nueva con 2 muertos, al primer cuadro: lápidas ya subidas=%s, cartas de muerte=%s/%s, fantasma alfa %.2f, %d eventos antiguos sin efectos" % [str(instant), n3.card_node().type if n3.card_node() else "-", n4.card_node().type if n4.card_node() else "-", n3.ghost_alpha(), g2.replay_skipped], instant and g2.replay_skipped > 0 and n3.ghost_alpha() > 0.3)
+	g2.queue_free()
+	await _wait(0.3)
+	# 3. p4 revive
+	p4.alive = true
+	g.emit("revived", {"player": "p1", "target": "p4", "text": "🧟 %s revive a %s. ¡Vuelve al juego!" % [g.P("p1").name, p4.name]})
+	_session.updated.emit()
+	await _wait(0.9)
+	await _save_shot(dir + "/t40_lapidas_revive.png")
+	await _wait(2.6)
+	var tn: Color = gr4.tint()
+	var green := tn.g > tn.r + 0.1 and tn.g > tn.b + 0.1 and tn.a > 0.95
+	_ux_line(report, "lapidas", "p4 revive: sin lápida=%s, sin carta=%s, estado %s, tinte verdoso=%s (%.2f,%.2f,%.2f), avatar de vuelta en su sitio=%s, p3 sigue con lápida=%s" % [str(not gr4.has_tomb()), str(gr4.card_node() == null), gr4.state, str(green), tn.r, tn.g, tn.b, str(gr4.avatar.position.distance_to(gr4.home) < 0.05), str(gr3.has_tomb())], not gr4.has_tomb() and gr4.card_node() == null and gr4.state == "revived" and green and gr4.avatar.position.distance_to(gr4.home) < 0.05 and gr3.has_tomb())
+	await _save_shot(dir + "/t40_lapidas_mesa.png")
+	# 4. El tinte se conserva: una pantalla nueva sobre la partida lo muestra desde el primer cuadro
+	var g3 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g3)
+	await get_tree().process_frame
+	var r4: SeatGrave = g3.debug_grave("p4")
+	_ux_line(report, "lapidas", "pantalla nueva tras el revivir: p4 con tinte verdoso=%s, sin lápida=%s" % [str(r4.tint().g > r4.tint().r + 0.1), str(not r4.has_tomb())], r4.tint().g > r4.tint().r + 0.1 and not r4.has_tomb())
+	g3.queue_free()
+	await _wait(0.2)
+	# 5. Calidad baja: las lápidas no proyectan sombra
+	_world.apply_quality("low")
+	var g4 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g4)
+	await _wait(0.3)
+	var l3: SeatGrave = g4.debug_grave("p3")
+	_ux_line(report, "lapidas", "calidad baja: lápida de p3 presente=%s, proyecta sombra=%s | en alta proyectaba=%s" % [str(l3.has_tomb()), str(l3.tomb_casts_shadow()), str(gr3.tomb_casts_shadow() or quality == "low")], l3.has_tomb() and not l3.tomb_casts_shadow())
+	g4.queue_free()
+	await _wait(0.2)
+	_world.apply_quality(quality)
+	# Yo mismo muerto: no hay asiento propio; el rótulo y el tinte de siempre
+	g.P("p0").alive = false
+	_session.updated.emit()
+	await _wait(0.5)
+	var me_dead: bool = _game.debug_status().contains("muerto")
+	_ux_line(report, "lapidas", "yo muerto: la zona propia lo indica=%s, sin asiento propio=%s" % [str(me_dead), str(_game.debug_grave("p0") == null)], _game.debug_grave("p0") == null)
+	# Se deja todo como estaba
+	for pl in g.players:
+		pl.alive = true
+	g.P("p0").alive = true
+	g.stack.clear()
+	g.prompt = null
+	_session.updated.emit()
+	await _wait(0.6)
 	lm.set_process(true)
 
 

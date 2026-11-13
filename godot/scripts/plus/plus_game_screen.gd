@@ -114,6 +114,11 @@ var _slot_pickers: Array[DeckSlotPicker] = []   # todos los selectores abiertos 
 var _peek_grid: CardPickGrid     # ventana de Ojo de Cuervo abierta
 var _bottom_draw := false        # el próximo robo sale de DEBAJO del mazo
 var _dir_ring: DirIndicator      # flecha de sentido de juego sobre el tapete (V-06)
+var _stage: PlayStage            # cartas jugadas flotando sobre el centro mientras esperan un Nop (V-02)
+var _float_quiet := true         # la primera vista coloca las jugadas ya en la pila sin animar
+var _discard_first := true
+var _revived := {}               # id -> true: jugadores que han revivido (tinte verdoso el resto de la partida) (V-03)
+var _death_type := {}            # id -> "exploding" | "rotten": la carta de muerte que queda delante de su lápida
 var _dir_label: Label            # «↺ INVERTIDO» junto al distintivo PLUS (solo con el sentido invertido)
 var _memory := DeckMemory.new()  # lo que sé de posiciones concretas del mazo (UX-02)
 var _mem_strip: DeckMemoryStrip  # tira con las próximas cartas conocidas, junto al mazo
@@ -213,6 +218,8 @@ func _ready() -> void:
 	_dir_ring = DirIndicator.new()
 	_dir_ring.position = Vector3(0, 0.016, -0.2)
 	add_child(_dir_ring)
+	_stage = PlayStage.new()
+	add_child(_stage)
 	_rot_label = Label3D.new()
 	_rot_label.font = UIKit.TITLE_FONT
 	_rot_label.font_size = 80
@@ -243,6 +250,14 @@ func _snd(sound: String, volume_db: float = 0.0, pitch_var: float = 0.05) -> voi
 
 
 ## Prueba: sonidos pedidos desde que se vació el registro.
+func debug_stage() -> PlayStage:
+	return _stage
+
+
+func debug_grave(id: String) -> SeatGrave:
+	return _seats[id].grave if _seats.has(id) else null
+
+
 func debug_sounds(clear: bool = false) -> Array[String]:
 	var out := _sfx_log.duplicate()
 	if clear:
@@ -341,12 +356,16 @@ func _refresh() -> void:
 		_exit_aim(false)
 	if _modal.get("type", "") in ["discard", "memory"] and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
 		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
+	for e: Dictionary in _v.events:
+		if e.seq > _seq:
+			_track_life(e)        # quién murió de qué y quién revivió, antes de dibujar los asientos
 	_sync_seats()
 	_process_events()
 	_anchor_turn()
 	_sync_deck()
 	_sync_rot()
 	_sync_hand()
+	_sync_float()
 	_sync_discard()
 	_sync_dir()
 	var pr0: Variant = _v.prompt
@@ -694,30 +713,90 @@ func _sync_hand() -> void:
 		n.fly_to(pos, Vector3(0, -ang, 0), 0.12 if hovered else 0.3, hand_scale * grow)
 
 
+## Calidad baja (la fija TableWorld.apply_quality bajando la escala 3D): efectos simplificados.
+func _low() -> bool:
+	return get_viewport().scaling_3d_scale < 0.99
+
+
+func _cards_in(s: Dictionary) -> int:
+	return 2 if s.eff == "combo2" else (3 if s.eff == "combo3" else 1)
+
+
+## V-02: cada jugada nueva de la pila se queda flotando con sus cartas; al salir de la pila vuelven al descarte.
+func _sync_float() -> void:
+	_stage.low = _low()
+	var quiet := _float_quiet
+	_float_quiet = false
+	var held := _stage.held_ids()
+	var disc: Array = _v.discard
+	var stack: Array = _v.stack
+	for i in range(stack.size() - 1, -1, -1):          # de la más reciente a la más antigua
+		var s: Dictionary = stack[i]
+		if _stage.has_play(int(s.id)):
+			continue
+		var found: Array = []
+		for j in range(disc.size() - 1, -1, -1):
+			var d: Dictionary = disc[j]
+			if d.by == s.by and d.type != "nope" and not held.has(d.id):
+				found.push_front(d)
+				if found.size() == _cards_in(s):
+					break
+		if found.is_empty():
+			continue
+		var nodes: Array = []
+		for d: Dictionary in found:
+			held[d.id] = true
+			nodes.append(_discard_node(d))
+		var col := Color(str(CardDB.defs.get(found[0].type, {}).get("color", "#ffffff")))
+		var tgt: Variant = _pos_of(s.target) if s.target != null else null
+		_stage.add_play(int(s.id), nodes, col, _pos_of(s.by), tgt, quiet)
+	_stage.sync(stack)
+
+
+func _discard_node(d: Dictionary) -> Card3D:
+	var n: Card3D = _discard_nodes.get(d.id)
+	if n == null:
+		# Jugada de un rival: la carta llega desde el otro lado de la mesa
+		n = Card3D.new().setup(d.type, true)
+		n.card_id = d.id
+		n.tapped.connect(_on_card_tapped)
+		add_child(n)
+		n.position = _pos_of(d.by) + Vector3(0, 0.25, 0)
+		n.scale = Vector3.ONE * 0.5
+		_discard_nodes[d.id] = n
+	return n
+
+
 func _sync_discard() -> void:
 	var all: Array = _v.discard
 	var last: Array = all.slice(maxi(0, all.size() - 3))
-	var keep := {}
+	var held := _stage.held_ids()
+	var keep := held.duplicate()
+	var now := Time.get_ticks_msec()
 	for i in last.size():
 		var d: Dictionary = last[i]
 		keep[d.id] = true
-		var n: Card3D = _discard_nodes.get(d.id)
-		if n == null:
-			# Jugada de un rival: la carta llega desde el otro lado de la mesa
-			n = Card3D.new().setup(d.type, true)
-			n.card_id = d.id
-			n.tapped.connect(_on_card_tapped)
-			add_child(n)
-			n.position = _pos_of(d.by) + Vector3(0, 0.25, 0)
-			n.scale = Vector3.ONE * 0.5
-			_discard_nodes[d.id] = n
+		var n := _discard_node(d)
 		if not n.has_meta("yaw"):
 			n.set_meta("yaw", deg_to_rad(randf_range(-16.0, 16.0)))
+			if d.type == "nope" and _stage.play_count() > 0 and not _discard_first:
+				# Un Nop vuela un instante hacia la carta que anula antes de caer al descarte
+				n.set_meta("hold_until", now + 560)
+				n.fly_to(_stage.nop_target(), Vector3(PlayStage.TILT, 0, 0), 0.28, 0.8)
+				get_tree().create_timer(0.6).timeout.connect(_sync_discard)
+		if held.has(d.id) or int(n.get_meta("hold_until", 0)) > now:
+			continue
 		n.fly_to(DISCARD_POS + Vector3(0, 0.012 + i * 0.008, 0), Vector3(0, n.get_meta("yaw"), 0), 0.34, HAND_SCALE)
+	_discard_first = false
 	for id: String in _discard_nodes.keys():
 		if not keep.has(id):
-			_discard_nodes[id].queue_free()
+			var gone: Card3D = _discard_nodes[id]
 			_discard_nodes.erase(id)
+			if gone.has_meta("rel"):
+				# Una carta de un combo que ya no cabe en la pila visible: cae y desaparece
+				gone.fly_to(DISCARD_POS + Vector3(0, 0.012, 0), Vector3(0, gone.get_meta("yaw", 0.0), 0), 0.3, HAND_SCALE).chain().tween_callback(gone.queue_free)
+			else:
+				gone.queue_free()
 
 
 func _avatar_index(id: Variant) -> int:
@@ -754,10 +833,16 @@ func _sync_seats() -> void:
 			av.shaded = false
 			av.position = dir * 2.02 + Vector3(0, 0.36, 0.05)
 			add_child(av)
-			_seats[p.id] = {"pos": root.position, "root": root, "avatar": av, "cards": []}
+			var gr := SeatGrave.new().setup(av, av.position, root.position - dir * 0.14, -a, str(p.name))
+			add_child(gr)
+			_seats[p.id] = {"pos": root.position, "root": root, "avatar": av, "cards": [], "grave": gr}
 		var seat: Dictionary = _seats[p.id]
-		seat.avatar.modulate = Color.WHITE if p.alive else Color(0.5, 0.5, 0.62)
-		seat.avatar.rotation.z = 0.0 if p.alive else 0.5
+		# V-03: vivo, muerto (lápida y fantasma) o revivido (tinte verdoso). Los cambios con animación llegan por eventos.
+		var grave: SeatGrave = seat.grave
+		grave.low = _low()
+		grave.pname = str(p.name)
+		if not _change_pending(p.id):
+			grave.snap_to("dead" if not p.alive else ("revived" if _revived.get(p.id, false) else "alive"), _death_type.get(p.id, "exploding"))
 		var cards: Array = seat.cards
 		var want := mini(int(p.count), 7)
 		while cards.size() > want:
@@ -867,6 +952,36 @@ func _fx_die(player_id: String, mine: bool, rotten: bool = false) -> void:
 	_snd("tomb")
 
 
+## V-03: tras la explosión, el avatar se hunde y sube la lápida con su carta de muerte y el fantasma.
+func _fx_tomb(player_id: String) -> void:
+	if _seats.has(player_id):
+		(_seats[player_id].grave as SeatGrave).play_die(_death_type.get(player_id, "exploding"))
+
+
+## V-03: la lápida se parte, sale una mano verde y el avatar vuelve con tinte verdoso.
+func _fx_grave_revive(player_id: String) -> void:
+	if _seats.has(player_id):
+		(_seats[player_id].grave as SeatGrave).play_revive()
+
+
+## ¿Hay un `died`/`revived` de este jugador por procesar con animación? (entonces no se encaja su asiento a la fuerza)
+func _change_pending(id: String) -> bool:
+	if _first_view:
+		return false
+	for e: Dictionary in _v.events:
+		if e.seq > _seq and ((e.type == "died" and e.player == id) or (e.type == "revived" and e.target == id)):
+			return true
+	return false
+
+
+## Quién ha muerto de qué y quién ha revivido, también al reproducir en silencio los eventos antiguos.
+func _track_life(e: Dictionary) -> void:
+	if e.type == "died":
+		_death_type[e.player] = "rotten" if str(e.get("text", "")).contains("pudri") else "exploding"
+	elif e.type == "revived":
+		_revived[e.target] = true
+
+
 func _fx_over(won: bool) -> void:
 	_snd("win" if won else "lose", 0.0, 0.0)
 	if won:
@@ -962,6 +1077,7 @@ func _process_events() -> void:
 			_log_last = e.text
 		_record(e)
 		_stats.feed(e, _v.players)
+		_track_life(e)
 		if quiet:
 			replay_skipped += 1
 			continue
@@ -1060,6 +1176,9 @@ func _process_events() -> void:
 			"died":
 				_enqueue(_fx_die.bind(e.player, e.player == me, _rot_death))
 				_rot_death = false
+				if _seats.has(e.player):
+					(_seats[e.player].grave as SeatGrave).pending += 1
+					_enqueue(_fx_tomb.bind(e.player))
 			"rot_found":
 				_snd("rotten")
 				_popup("¡PUTREFACTO!", Color("9be21c"))
@@ -1093,6 +1212,9 @@ func _process_events() -> void:
 			"revived":
 				_snd("revive")
 				Vfx.zombie_rise(self, _pos_of(e.target) + Vector3(0, 0.2, 0))
+				if _seats.has(e.target):
+					(_seats[e.target].grave as SeatGrave).pending += 1
+					_enqueue(_fx_grave_revive.bind(e.target))
 				if e.target == me:
 					_popup("¡REVIVISTE!", UIKit.C.toxic)
 			"future":

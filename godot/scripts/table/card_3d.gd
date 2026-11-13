@@ -115,3 +115,17 @@ func _find_mesh(n: Node) -> MeshInstance3D:
 func _on_input(_cam: Node, event: InputEvent, _pos: Vector3, _normal: Vector3, _shape: int) -> void:
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		tapped.emit(self)
+
+
+## Aditivo (Plus): una carta que flota o se rompe no debe recibir toques ni tapar lo que tiene detrás.
+func set_pickable(on: bool) -> void:
+	for c in get_children():
+		if c is Area3D:
+			(c as Area3D).input_ray_pickable = on
+			(c as Area3D).monitorable = on
+
+
+## Aditivo (Plus): oculta solo el modelo de la carta (sus hijos, como las mitades de una carta rota, siguen visibles).
+func set_body_visible(on: bool) -> void:
+	if _body:
+		_body.visible = on
