@@ -168,3 +168,54 @@ Modelos: **H** = Haiku, **S** = Sonnet, **F** = Fable 5.2.
 | Haiku | 8 | Comandos, datos, textos y cambios de una pieza |
 | Sonnet | 39 | Implementación, pruebas, refactor |
 | Fable 5.2 | 10 | 3 de diseño (T01, T35, T60), 6 revisiones de fase y la verificación final |
+
+## Verificación final (T91)
+
+Estado de la rama `zk-plus` en la versión 3.0.0, comparado punto por punto con
+[ESPECIFICACION-MEJORAS.md](ESPECIFICACION-MEJORAS.md).
+
+### Garantía del modo Clásico
+
+- `game_screen.gd`, `web/www/*` y `tests/traces.json` son idénticos a `main`.
+- Las 120 partidas de referencia siguen idénticas al motor original paso a paso, y la «guardia del
+  clásico» (40 partidas grabadas antes de tocar el motor) sigue idéntica en acciones, eventos y vistas.
+- Los archivos compartidos solo recibieron cambios aditivos detrás de `plus`.
+- La prueba de toques del Clásico llega al final; las salas clásicas no comprueban versión de protocolo.
+
+### Hecho
+
+| Apartado | Estado |
+| --- | --- |
+| §3 La Cripta, cartas 1–9 | Motor, IA, interfaz, arte, efectos y sonido |
+| §3 Gatito Putrefacto | Hecho como **regla opcional** (ver desviaciones) |
+| §4 M-01 a M-06 | Pack, tiempo por turno, Nop sin pistas, mano corta, muerte súbita, marcador de sala |
+| §5 UX-01 a UX-15 | Todos |
+| §6 V-01 a V-09, A-01, A-02 | Todos, incluidos tapetes alternativos |
+| §7 IA-01 a IA-05 | Todos; los bots no hacen trampa (prueba de manos permutadas) |
+| §8 N-01 a N-04 | Protocolo 3, ajustes de sala, reacciones y marcador, acciones nuevas |
+| §9 Pruebas | Suite de reglas (~38 s), prueba de toques de Plus (213 comprobaciones), modo `--balance` |
+| D-01 a D-21 | Resueltos en Plus; D-20 queda sin corregir en el Clásico (archivo congelado) |
+
+### Desviaciones respecto a la especificación
+
+| Punto | Especificado | Hecho | Motivo |
+| --- | --- | --- | --- |
+| §3.1 copias y §3.4 | Copias de la tabla original; si se alarga, mano 6 | Mano 8 con el pack y 1 copia de Ataque Dirigido, Marcha Atrás, Robar del Fondo, Entierro y Espanto | Las simulaciones mostraron que reducir la mano alarga la partida |
+| §3.2 Putrefacto | Siempre sustituye a un explosivo con 3+ jugadores | Regla opcional, apagada por defecto | Cambia mucho la tensión y quita ventaja al bot difícil |
+| T04 | Partir `game_screen.gd` | Pantalla Plus separada; lo nuevo en componentes propios | Las tareas de mesa ya iban en serie; partir el archivo solo añadía riesgo |
+| UX-08 | Emojis | Palabras dentro del globo (JAJA, ¡NO!…) | Los emojis dependen de la fuente de Android |
+| N-05 | Estado < 8 KB | Peor caso medido: 7,3 KB clásico, 9,1 KB Plus (en JSON) | ENet fiable fragmenta y la red real va en binario; la prueba de red Plus funciona |
+
+### Pendiente o no verificable aquí
+
+- **Duración con 3 jugadores y el pack:** +24 % a +37 % frente al Clásico (objetivo +20 %). Cumple con
+  2, 4 y 5 jugadores. La única variante que cumplía quitaba Marcha Atrás y Ataque Dirigido.
+- **Putrefacto activo:** el bot difícil casi no supera al normal (48 % frente a 47 % con 3 jugadores).
+- **D-20 en el Clásico:** al reabrir la pantalla en una partida avanzada se reproducen eventos antiguos.
+- **Nunca probado en un teléfono:** tacto real, rendimiento en Android (R-7), vibración, sala Plus entre
+  dos teléfonos, cliente 2.x entrando en sala clásica.
+- **Audio:** comprobado solo con métricas (pico, volumen, bucle); nadie lo ha oído.
+- **Prueba de toques de Plus:** dura de 7 a 9 minutos y juega una partida real con bots; necesita
+  `alarm 660` y, en esta máquina, `--rendering-driver vulkan --rendering-method mobile`.
+- **Efectos por texto:** algunos efectos de carta se disparan reconociendo el texto del aviso del motor;
+  si cambia esa redacción, el efecto dejaría de salir.
