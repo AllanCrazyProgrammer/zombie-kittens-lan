@@ -13,6 +13,7 @@ const GRACE := 2.5                 # segundos de margen antes de retirar a la fu
 const UP := Vector3.UP
 
 var low := false                   # calidad baja
+var reduced := false               # «Reducir movimiento»: versiones breves y quietas (un resplandor que se apaga, sin trayectorias)
 var scr                            # la pantalla Plus (posiciones de asientos, mazo, lápidas)
 var dbg_launched := {}             # tipo -> veces lanzado
 var dbg_forced := 0                # efectos que hubo que retirar a la fuerza (debe ser 0)
@@ -102,6 +103,17 @@ func _spawn(kind: String, life: float, parent: Node = null) -> Node3D:
 	t.tween_interval(life)
 	t.tween_callback(r.queue_free)
 	return r
+
+
+## Versión reducida de cualquier efecto: un resplandor quieto que se apaga en 0,45 s (no se mueve ni cambia de tamaño).
+func calm(kind: String, at: Vector3, color: Color, size: float = 0.9) -> void:
+	var r := _spawn(kind, 0.5)
+	if r == null:
+		return
+	var g := _glow(color, size, 0.55)
+	g.position = at + Vector3(0, 0.12, 0)
+	r.add_child(g)
+	g.create_tween().tween_property(g.mesh.material, "albedo_color:a", 0.0, 0.45)
 
 
 static func _bez(a: Vector3, m: Vector3, b: Vector3, t: float) -> Vector3:
@@ -218,6 +230,9 @@ func _deck_top() -> Vector3:
 
 ## Las 3 cartas de arriba se levantan con brillo morado. `faces`: tipos (de arriba abajo) si quien mira las ve, o vacío = dorsos.
 func future(faces: Array) -> void:
+	if reduced:
+		calm("future", _deck_top(), Color(0.72, 0.3, 1.0), 1.2)
+		return
 	var r := _spawn("future", 1.2)
 	if r == null:
 		return
@@ -254,6 +269,9 @@ func _spiral(t: float, items: Array, base: Vector3) -> void:
 
 ## Las cartas del mazo se abren en espiral y vuelven.
 func shuffle() -> void:
+	if reduced:
+		calm("shuffle", _deck_top(), Color(0.35, 0.95, 0.85), 1.0)
+		return
 	var r := _spawn("shuffle", 1.05)
 	if r == null:
 		return
@@ -274,6 +292,9 @@ func shuffle() -> void:
 
 ## Estela azul del que salta hacia el siguiente; `big` (Súper Salto) lleva dos estelas y un anillo.
 func skip(from_pos: Vector3, to_pos: Variant, big: bool = false) -> void:
+	if reduced:
+		calm("super_skip" if big else "skip", from_pos, Color(0.3, 0.62, 1.0))
+		return
 	var r := _spawn("super_skip" if big else "skip", 1.1)
 	if r == null:
 		return
@@ -292,6 +313,9 @@ func skip(from_pos: Vector3, to_pos: Variant, big: bool = false) -> void:
 
 ## `face`: tipo de la carta si quien la recibe la ve (se voltea al llegar); vacío = no se ve.
 func steal(from_pos: Vector3, to_pos: Vector3, face: String = "") -> void:
+	if reduced:
+		calm("steal", to_pos, Color(1.0, 0.45, 0.7))
+		return
 	var r := _spawn("steal", 1.0)
 	if r == null:
 		return
@@ -332,6 +356,9 @@ func _feed_step(t: float, items: Array, from_pos: Vector3, grave_pos: Vector3) -
 
 ## Las cartas vuelan en círculo hacia la lápida del muerto.
 func feed(from_pos: Vector3, grave_pos: Vector3) -> void:
+	if reduced:
+		calm("feed", grave_pos, Color(0.65, 0.95, 0.25))
+		return
 	var r := _spawn("feed", 1.1)
 	if r == null:
 		return
@@ -353,6 +380,9 @@ func feed(from_pos: Vector3, grave_pos: Vector3) -> void:
 # ------------------------------------------------------------------ Cava Más Hondo / Entierro
 
 func dig(kind: String = "dig") -> void:
+	if reduced:
+		calm(kind, _deck_top(), Color(0.5, 0.33, 0.16))
+		return
 	var r := _spawn(kind, 1.2)
 	if r == null:
 		return
@@ -438,6 +468,9 @@ func _sphere(radius: float) -> SphereMesh:
 func grave_hands(grave: SeatGrave) -> void:
 	if grave == null:
 		return
+	if reduced:
+		calm("grave_robber", grave.position, Color(0.55, 0.9, 0.3))
+		return
 	var r := _spawn("grave_robber", 1.2)
 	if r == null:
 		return
@@ -471,13 +504,14 @@ func clone_scan(card: Node3D) -> void:
 	if r == null:
 		return
 	var cyan := Color(0.3, 0.95, 1.0)
-	var pm := PlaneMesh.new()
-	pm.size = Vector2(0.72, 0.07)
-	var bar := _mesh(pm, _unshaded(Color(cyan.r, cyan.g, cyan.b, 0.95)), Vector3(0, 0.008, -0.46))
-	r.add_child(bar)
-	var bt := bar.create_tween().set_trans(Tween.TRANS_SINE)
-	bt.tween_property(bar, "position:z", 0.46, 0.4)
-	bt.tween_property(bar, "position:z", -0.46, 0.4)
+	if not reduced:
+		var pm := PlaneMesh.new()
+		pm.size = Vector2(0.72, 0.07)
+		var bar := _mesh(pm, _unshaded(Color(cyan.r, cyan.g, cyan.b, 0.95)), Vector3(0, 0.008, -0.46))
+		r.add_child(bar)
+		var bt := bar.create_tween().set_trans(Tween.TRANS_SINE)
+		bt.tween_property(bar, "position:z", 0.46, 0.4)
+		bt.tween_property(bar, "position:z", -0.46, 0.4)
 	var wp := PlaneMesh.new()
 	wp.size = Vector2(0.66, 0.92)
 	var wm := _unshaded(Color(cyan.r, cyan.g, cyan.b, 0.0))
@@ -492,6 +526,9 @@ func clone_scan(card: Node3D) -> void:
 
 ## Anillo rojo y destello sobre el asiento del objetivo (los cortes en pantalla los lanza la pantalla, orientados al objetivo).
 func targeted(target_pos: Vector3) -> void:
+	if reduced:
+		calm("targeted", target_pos, Color(1.0, 0.25, 0.15))
+		return
 	var r := _spawn("targeted", 0.8)
 	if r == null:
 		return
@@ -510,6 +547,9 @@ func targeted(target_pos: Vector3) -> void:
 
 ## Un aro de flechas de color turquesa da una vuelta rápida en el nuevo sentido por encima del aro fijo del tapete.
 func reverse(new_dir: int) -> void:
+	if reduced:
+		calm("reverse", Vector3(0, 0.05, -0.2), Color(0.2, 0.95, 0.9), 1.6)
+		return
 	var r := _spawn("reverse", 1.0)
 	if r == null:
 		return
@@ -543,33 +583,91 @@ func reverse(new_dir: int) -> void:
 
 # ------------------------------------------------------------------ Ojo de Cuervo
 
+const CROW_SCALE := 1.35
+const CROW_RIM := Color(0.86, 0.8, 1.0)        # contorno claro: destaca sobre el tapete verde oscuro
+
+## Ala derecha vista desde arriba (x hacia fuera, z negativo = delante): borde de ataque liso y dedos de plumas atrás.
+const WING_PTS := [Vector2(0.0, -0.07), Vector2(0.14, -0.11), Vector2(0.30, -0.10), Vector2(0.45, 0.0), Vector2(0.38, 0.03),
+		Vector2(0.40, 0.10), Vector2(0.31, 0.06), Vector2(0.30, 0.14), Vector2(0.22, 0.08), Vector2(0.19, 0.16),
+		Vector2(0.11, 0.09), Vector2(0.0, 0.12)]
+const TAIL_PTS := [Vector2(-0.03, 0.14), Vector2(0.03, 0.14), Vector2(0.09, 0.36), Vector2(0.045, 0.33), Vector2(0.0, 0.39),
+		Vector2(-0.045, 0.33), Vector2(-0.09, 0.36)]
+
+
+## Polígono plano (en XZ, a altura `y`) con la misma cara por los dos lados.
+func _poly_mesh(pts: PackedVector2Array, y: float, mat: Material) -> MeshInstance3D:
+	var idx := Geometry2D.triangulate_polygon(pts)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_normal(UP)
+	for i in idx:
+		st.add_vertex(Vector3(pts[i].x, y, pts[i].y))
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+
+func _flat_pair(pts: Array, mirror: bool, black: Material, rim: Material) -> Node3D:
+	var poly := PackedVector2Array()
+	for p: Vector2 in pts:
+		poly.append(Vector2(-p.x if mirror else p.x, p.y))
+	if mirror:
+		poly.reverse()
+	var holder := Node3D.new()
+	var grown := Geometry2D.offset_polygon(poly, 0.022)
+	if grown.size() > 0:
+		holder.add_child(_poly_mesh(grown[0], -0.004, rim))
+	holder.add_child(_poly_mesh(poly, 0.0, black))
+	return holder
+
+
+## Cuervo visto desde arriba: cuerpo ovalado, cabeza con pico y ojos claros, cola en abanico y dos alas con dedos de plumas
+## (que baten), todo con un contorno claro y un halo suave detrás para que se lea sobre el tapete.
 func _crow_model() -> Node3D:
 	var crow := Node3D.new()
 	var black := _solid(Color(0.05, 0.05, 0.09), 0.5)
 	black.emission_enabled = true
-	black.emission = Color(0.16, 0.14, 0.34)
+	black.emission = Color(0.2, 0.17, 0.4)
+	black.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var rim := _unshaded(Color(CROW_RIM.r, CROW_RIM.g, CROW_RIM.b, 0.95), false)
+	var rim_hull := _unshaded(Color(CROW_RIM.r, CROW_RIM.g, CROW_RIM.b, 0.95), false)
+	rim_hull.cull_mode = BaseMaterial3D.CULL_FRONT
 	var body := _mesh(_sphere(0.5), black)
-	body.scale = Vector3(0.07, 0.055, 0.13)
+	body.scale = Vector3(0.15, 0.1, 0.34)
 	crow.add_child(body)
-	var head := _mesh(_sphere(0.5), black, Vector3(0, 0.025, -0.1))
-	head.scale = Vector3(0.05, 0.05, 0.06)
+	var body_rim := _mesh(_sphere(0.5), rim_hull)
+	body_rim.scale = Vector3(0.19, 0.14, 0.38)
+	crow.add_child(body_rim)
+	var head := _mesh(_sphere(0.5), black, Vector3(0, 0.025, -0.21))
+	head.scale = Vector3(0.11, 0.1, 0.12)
 	crow.add_child(head)
-	var beak := _mesh(_cyl(0.0, 0.014, 0.06), _solid(Color(0.85, 0.6, 0.15), 0.5), Vector3(0, 0.022, -0.155))
+	var head_rim := _mesh(_sphere(0.5), rim_hull, Vector3(0, 0.025, -0.21))
+	head_rim.scale = Vector3(0.15, 0.14, 0.16)
+	crow.add_child(head_rim)
+	var beak := _mesh(_cyl(0.0, 0.03, 0.12), _solid(Color(0.95, 0.62, 0.1), 0.4, Color(0.6, 0.35, 0.0)), Vector3(0, 0.02, -0.34))
 	beak.rotation.x = -PI / 2.0
 	crow.add_child(beak)
-	var tail := _mesh(_box(Vector3(0.05, 0.004, 0.08)), black, Vector3(0, 0, 0.13))
+	for sx in [-1.0, 1.0]:
+		var eye := _mesh(_sphere(0.022), _unshaded(Color(1.0, 0.97, 0.8), false), Vector3(sx * 0.045, 0.07, -0.235))
+		crow.add_child(eye)
+		var pupil := _mesh(_sphere(0.011), _unshaded(Color(0.05, 0.02, 0.1), false), Vector3(sx * 0.045, 0.082, -0.248))
+		crow.add_child(pupil)
+	var tail := _flat_pair(TAIL_PTS, false, black, rim)
+	tail.position = Vector3(0, 0.0, 0.1)
 	crow.add_child(tail)
-	var eye := _glow(Color(1.0, 0.2, 0.15), 0.035, 1.0)
-	eye.position = Vector3(0, 0.035, -0.13)
-	crow.add_child(eye)
 	for s in [-1.0, 1.0]:
 		var pivot := Node3D.new()
 		pivot.name = "Wing_L" if s < 0 else "Wing_R"
-		pivot.position = Vector3(s * 0.035, 0.01, 0)
-		var wing := _mesh(_box(Vector3(0.2, 0.004, 0.1)), black, Vector3(s * 0.1, 0, 0))
-		pivot.add_child(wing)
+		pivot.position = Vector3(s * 0.05, 0.03, 0.0)
+		pivot.add_child(_flat_pair(WING_PTS, s < 0, black, rim))
 		crow.add_child(pivot)
-	crow.scale = Vector3.ONE * 2.6
+	if not low:
+		var halo := _glow(Color(0.72, 0.6, 1.0), 1.3, 0.3)
+		halo.position = Vector3(0, -0.05, 0.05)
+		crow.add_child(halo)
+	crow.scale = Vector3.ONE * CROW_SCALE
 	return crow
 
 
@@ -578,14 +676,17 @@ func _crow_step(t: float, crow: Node3D, a: Vector3, m: Vector3, b: Vector3) -> v
 	var ahead := _bez(a, m, b, minf(1.0, t + 0.03)) - _bez(a, m, b, maxf(0.0, t - 0.03))
 	crow.position = p
 	if ahead.length() > 0.001:
-		crow.basis = Basis.looking_at(ahead.normalized(), UP).scaled(Vector3.ONE * 2.6)
-	var flap := sin(t * 46.0) * 0.8
+		crow.basis = Basis.looking_at(ahead.normalized(), UP).scaled(Vector3.ONE * CROW_SCALE)
+	var flap := sin(t * 30.0) * 0.75
 	(crow.get_node("Wing_L") as Node3D).rotation.z = -flap
 	(crow.get_node("Wing_R") as Node3D).rotation.z = flap
 
 
 ## Un cuervo cruza del jugador al objetivo.
 func crow(from_pos: Vector3, to_pos: Vector3) -> void:
+	if reduced:
+		calm("crow", to_pos, Color(0.7, 0.4, 1.0))
+		return
 	var r := _spawn("crow", 1.15)
 	if r == null:
 		return
@@ -622,6 +723,9 @@ func _swirl_step(t: float, g1: Array, g2: Array, a: Vector3, b: Vector3) -> void
 
 ## Dos remolinos de cartas se cruzan entre la lápida y el jugador.
 func swirl(a: Vector3, b: Vector3) -> void:
+	if reduced:
+		calm("swirl", b, Color(0.8, 0.5, 1.0))
+		return
 	var r := _spawn("swirl", 1.15)
 	if r == null:
 		return
@@ -649,6 +753,9 @@ func _haunt_step(t: float, sp: Sprite3D, a: Vector3, b: Vector3, beyond: Vector3
 
 ## El fantasma del muerto atraviesa al objetivo.
 func haunt(from_pos: Vector3, to_pos: Vector3, tex: Texture2D) -> void:
+	if reduced:
+		calm("haunt", to_pos, Color(0.6, 0.4, 1.0))
+		return
 	var r := _spawn("haunt", 1.1)
 	if r == null:
 		return
@@ -679,6 +786,9 @@ func haunt(from_pos: Vector3, to_pos: Vector3, tex: Texture2D) -> void:
 
 ## Los explosivos emergen del mazo y se apilan arriba (el cielo rojo de 2 s lo pone la pantalla con `world.flash`).
 func apocalypse(n: int) -> void:
+	if reduced:
+		calm("apocalypse", _deck_top(), Color(1.0, 0.15, 0.1), 1.6)
+		return
 	var r := _spawn("apocalypse", 1.2)
 	if r == null:
 		return
@@ -712,6 +822,9 @@ const DRAW_VIEW := Vector3(0.0, 0.95, 1.75)
 ## La carta robada vuela del mazo hacia la cámara, se voltea, se queda 0,4 s en grande y entra en la mano.
 ## `hand_card` es la carta real (con el modelo oculto mientras tanto) y `done` se llama al terminar.
 func draw_fly(type: String, from_global: Vector3, hand_card: Card3D, done: Callable) -> void:
+	if reduced:
+		done.call()
+		return
 	var r := _spawn("draw", 1.9)
 	if r == null:
 		done.call()

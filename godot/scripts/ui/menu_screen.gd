@@ -321,6 +321,8 @@ func _build_settings() -> void:
 	var q := _quality()
 	_add("Gráficos: " + {"high": "calidad alta", "medium": "calidad media", "low": "calidad baja"}[q], "normal", _next_quality, 40)
 	_note({"high": "Todos los efectos: sombras, brillo y suavizado de bordes.", "medium": "Menos sombras y sin suavizado. Buen equilibrio si el juego va lento.", "low": "Sin sombras ni brillo y menor resolución. Para teléfonos modestos o para ahorrar batería."}[q], 28)
+	if plus:
+		_plus_settings()
 	var info: String = {
 		"idle": "", "checking": "Buscando actualizaciones…",
 		"latest": "Tienes la versión más reciente (%s)." % Updater.installed_version(),
@@ -336,6 +338,27 @@ func _build_settings() -> void:
 		_note(info, 28, UIKit.C.toxic if Updater.state == "available" else UIKit.C.dim)
 	_note("Versión instalada: %s" % Updater.installed_version(), 24)
 	_add("Volver", "ghost", _go.bind("home"), 38)
+
+
+## Ajustes de accesibilidad y ambiente de Plus (UX-13, V-09): solo se muestran con el modo Plus elegido.
+func _plus_settings() -> void:
+	var a := UIKit.hbox(12)
+	_box.add_child(a)
+	_add("Texto: grande" if PlusSettings.text_large() else "Texto: normal", "normal", func() -> void:
+		PlusSettings.set_text_large(not PlusSettings.text_large())
+		_build(), 34, a)
+	_add("Vibración: sí" if PlusSettings.vibration_on() else "Vibración: no", "normal", func() -> void:
+		PlusSettings.set_vibration(not PlusSettings.vibration_on())
+		_build(), 34, a)
+	var b := UIKit.hbox(12)
+	_box.add_child(b)
+	_add("Reducir movimiento: sí" if PlusSettings.reduce_motion() else "Reducir movimiento: no", "normal", func() -> void:
+		PlusSettings.set_reduce_motion(not PlusSettings.reduce_motion())
+		_build(), 34, b)
+	_add("Tapete: " + str(PlusSettings.MAT_NAMES[PlusSettings.mat()]), "normal", func() -> void:
+		PlusSettings.next_mat()
+		_build(), 34, b)
+	_note("Reducir movimiento quita sacudidas, cámara lenta, destellos y efectos de movimiento.", 26)
 
 
 func _on_host() -> void:

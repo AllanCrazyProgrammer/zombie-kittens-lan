@@ -13,6 +13,7 @@ const STEP_BASE := 0.007            # separación entre modelos con 14 cartas o 
 const MODELS := 14
 
 var low := false
+var reduced := false                # «Reducir movimiento»: el mazo no tiembla
 var risk := 0                       # % de riesgo de robar (0..100)
 var turn_light: OmniLight3D         # la luz de turno de la pantalla (se tiñe)
 var base_color := Color.WHITE       # su color normal
@@ -72,21 +73,22 @@ func tint_amount() -> float:
 func _make_smoke() -> void:
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	pm.emission_box_extents = Vector3(0.22, 0.01, 0.3)
-	pm.direction = Vector3(0, 1, 0)
-	pm.spread = 18.0
-	pm.initial_velocity_min = 0.06
-	pm.initial_velocity_max = 0.14
-	pm.gravity = Vector3(0, 0.03, 0)
+	pm.emission_box_extents = Vector3(0.3, 0.01, 0.16)
+	pm.direction = Vector3(0, 1, -0.55)           # sube y se va hacia el fondo: no tapa el contador (que está delante)
+	pm.spread = 22.0
+	pm.initial_velocity_min = 0.1
+	pm.initial_velocity_max = 0.2
+	pm.gravity = Vector3(0, 0.04, 0)
 	pm.damping_min = 0.1
 	pm.damping_max = 0.2
-	pm.scale_min = 0.7
-	pm.scale_max = 1.5
+	pm.scale_min = 0.9
+	pm.scale_max = 1.8
 	pm.turbulence_enabled = true
-	pm.turbulence_noise_strength = 0.3
-	pm.color_ramp = Vfx._ramp([Color(0.55, 0.62, 0.5, 0.0), Color(0.55, 0.62, 0.5, 0.2), Color(0.35, 0.4, 0.35, 0.0)])
-	_smoke = Vfx._emitter(14, 2.6, Vfx._quad(false, 0.42), pm, false)
-	_smoke.position = Vector3(0, 0.12, 0)
+	pm.turbulence_noise_strength = 0.35
+	# Aditivo y verdoso: sobre el tapete oscuro se lee como una niebla venenosa y no se pierde
+	pm.color_ramp = Vfx._ramp([Color(0.45, 0.85, 0.4, 0.0), Color(0.42, 0.85, 0.38, 0.24), Color(0.25, 0.55, 0.3, 0.0)])
+	_smoke = Vfx._emitter(24, 2.6, Vfx._quad(true, 0.46), pm, false)
+	_smoke.position = Vector3(0, 0.12, -0.2)
 	_smoke.visibility_aabb = AABB(Vector3(-1, -0.3, -1), Vector3(2, 2, 2))
 	_smoke.emitting = false
 	add_child(_smoke)
@@ -118,7 +120,8 @@ func _process(delta: float) -> void:
 		_next_shake -= delta
 		if _next_shake <= 0.0:
 			_next_shake = randf_range(2.6, 4.2)
-			tremble()
+			if not reduced:
+				tremble()
 	else:
 		_next_shake = minf(_next_shake, 2.5)
 

@@ -65,6 +65,7 @@ func _ready() -> void:
 	Net.failed.connect(_on_net_failed)
 	Net.server_lost.connect(_on_net_lost)
 
+	_t70_restore_stale()      # una prueba de Plus interrumpida pudo dejar ajustes cambiados: se devuelven antes de leer nada
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS)
 	_token = cfg.get_value("net", "token", "")
@@ -529,6 +530,9 @@ var _plus_part := 0
 func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var report: Array = []
 	_t53_restore_stale()      # si una ejecución anterior se interrumpió a medias, devuelve el ajuste de reacciones
+	_t70_restore_stale()
+	if plus_mode:
+		_t70_begin()
 	await _wait(1.2)
 	_menu.set_plus(plus_mode, false)     # sin guardar: la prueba no cambia los ajustes del usuario
 	await _wait(0.3)
@@ -537,40 +541,51 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var user_args := OS.get_cmdline_user_args()
 	var pk := user_args.find("--uitest-plus-part")
 	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 9:        # solo el cuervo y el humo del mazo (capturas)
+		await _t62_start({"rivals": 4, "seed": 61})
+		await _t70_visuales(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 8:        # solo orden de la mano, accesibilidad, consejos y ambiente (T70)
+		await _ui_test_t70(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
 	if _plus_part == 7:        # solo la mesa viva (V-04, V-05, V-07, V-08), sobre una partida de 5
 		await _t62_start({"rivals": 4})
 		await _ui_test_mesa_viva(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	if _plus_part == 6:        # solo la carta en escena y las lápidas (V-02, V-03), sobre una partida de 5
 		await _t62_start({"rivals": 4})
 		await _ui_test_escena(dir, report)
 		await _ui_test_lapidas(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	if _plus_part == 5:        # solo las reacciones rápidas (T53)
 		await _ui_test_t53(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	if _plus_part == 3:        # solo los menús de Plus (para iterar rápido)
 		await _ui_test_t62_menus(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	if _plus_part == 4:        # sonido + menús (depuración)
 		await _ui_test_t62_sonido(dir, report)
 		print("UITEST tras sonido")
 		await _ui_test_t62_menus(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	if _plus_part == 2:
 		await _ui_test_t62(dir, report)
 		print("UITEST fin")
-		get_tree().quit()
+		_ui_quit()
 		return
 	await _save_shot(dir + "/t1_menu.png")
 	await _tap_control(_find_button(self, "UN JUGADOR"))
@@ -748,7 +763,7 @@ func _ui_test(dir: String, plus_mode: bool = false) -> void:
 			await _wait(0.5)
 			_say(report, "de vuelta en el menú: %s" % str(_menu != null and _game == null))
 	print("UITEST fin")
-	get_tree().quit()
+	_ui_quit()
 
 
 ## Comprobaciones de Plus: ventana de descarte (UX-03), texto del Clon (UX-03) y cuadrícula del trío (UX-04).
@@ -801,6 +816,7 @@ func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void
 	await _ui_test_mesa_viva(dir, report)
 	await _ui_test_ux(dir, report)
 	await _ui_test_t53(dir, report)
+	await _ui_test_t70(dir, report)
 	if _plus_part != 1:
 		await _ui_test_t62(dir, report)
 
@@ -953,10 +969,27 @@ func _cripta_my_turn(lm: LocalMatch, alive: bool = true, attempt: int = 0) -> bo
 				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
 	for _i in 60:
 		if lm.game.over != null:
-			return false
+			break
 		if lm.game.stack.is_empty() and lm.game.prompt == null:
 			break
 		await _wait(0.5)
+	if lm.game.over != null:
+		# La partida es real y los bots pueden terminarla a mitad del recorrido: se reanima a todos (sus cartas de muerte
+		# vuelven al fondo del mazo, así no se pierde ni se duplica ninguna) para que los pasos siguientes puedan probarse.
+		var g: ZKGame = lm.game
+		for pl in g.players:
+			if pl.ek != null:
+				pl.ek.up = false
+				g.draw.insert(0, pl.ek)
+				pl.ek = null
+			pl.alive = true
+		g.stack.clear()
+		g.prompt = null
+		g.over = null
+		print("UITEST Plus/cripta: AVISO, la partida terminó a mitad del recorrido; se reanima a todos para seguir")
+		_session.updated.emit()
+		await _wait(0.4)
+		await _cripta_close_windows()
 	lm.game.P("p0").alive = alive
 	lm.game.cur = 0 if alive else 1
 	lm.game.turns_left = 1
@@ -1325,6 +1358,11 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 		# puede jugarla durante la espera y la comparación fallaría sin que el trueque esté mal. Se quitan antes.
 		var dead_playable := ["haunt", "shuffle", "feed_dead", "clairvoyance", "nope"]
 		g.P("p0").hand = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return not dead_playable.has(c.type))
+		# Fuera de turno, los bots pueden cambiar las manos implicadas mientras se resuelve: Alimenta a los Muertos
+		# (añade cartas al muerto) y Espanto de otro muerto contra mí (me quita una antes del trueque). Se quitan.
+		for pl in g.players:
+			if pl.id != "p0":
+				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "feed_dead" and c.type != "haunt")
 		var theirs: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
 		var mine_after: Array = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "soul_swap").map(func(c: ZKGame.Card) -> String: return c.id)
 		var seq0 := g.seq
@@ -1343,7 +1381,21 @@ func _ui_test_cripta(dir: String, report: Array) -> void:
 			var c2: Array = mine_after.duplicate()
 			c1.sort()
 			c2.sort()
-			_cripta_line(report, "soul_swap", "con %s muerto | mi mano %d cartas = la suya de antes=%s | la suya = la mía de antes=%s | vista=%d cartas" % [dead_id, my_ids.size(), str(a == b), str(c1 == c2), view_ids.size()], a == b and c1 == c2 and view_ids.size() == my_ids.size())
+			var diag := ""
+			if c1 != c2:
+				var extra: Array = c1.filter(func(x: String) -> bool: return not c2.has(x))
+				var missing: Array = c2.filter(func(x: String) -> bool: return not c1.has(x))
+				var kinds := func(ids: Array) -> Array: return ids.map(func(x: String) -> String:
+					for d: Dictionary in g.discard:
+						if d.card.id == x:
+							return "%s(descarte, by %s)" % [d.card.type, d.by]
+					for pl in g.players:
+						for c in pl.hand:
+							if c.id == x:
+								return "%s(mano %s)" % [c.type, pl.id]
+					return x)
+				diag = " | de más en su mano %s, faltan %s | eventos tras el trueque %s" % [str(kinds.call(extra)), str(kinds.call(missing)), str(g.events.filter(func(e: Dictionary) -> bool: return e.seq > seq0).map(func(e: Dictionary) -> String: return e.type))]
+			_cripta_line(report, "soul_swap", "con %s muerto | mi mano %d cartas = la suya de antes=%s | la suya = la mía de antes=%s | vista=%d cartas%s" % [dead_id, my_ids.size(), str(a == b), str(c1 == c2), view_ids.size(), diag], a == b and c1 == c2 and view_ids.size() == my_ids.size())
 			done = true
 			break
 		_say(report, "Plus/cripta: soul_swap ANULADA por Nop; se reintenta")
@@ -2862,7 +2914,10 @@ func _mv_avatares(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void
 # ---------------------------------------------------------------- tiempo de turno, Gatito Putrefacto, enlaces, sonido y menús de Plus (T52, T62, T45)
 
 ## Empieza una partida Plus de un jugador con estas opciones y deja el motor quieto (los bots no actúan).
-func _t62_start(extra: Dictionary) -> LocalMatch:
+func _t62_start(extra: Dictionary, reset_tips: bool = true) -> LocalMatch:
+	if reset_tips:        # los consejos vistos se guardan en el archivo (UX-14): cada partida de prueba empieza sin ninguno y sin ser «la primera»
+		PlusSettings.save_tips_seen({})
+		PlusSettings.set_first_game_done(true)
 	var o := {"rivals": 2, "level": "normal", "deck_mode": "official", "name": "Prueba", "avatar": 0, "plus": true, "packs": ["crypt"], "rules": {}, "seed": 11}
 	o.merge(extra, true)
 	_start_solo(o)
@@ -2908,6 +2963,7 @@ func _ui_test_t62(dir: String, report: Array) -> void:
 	if f:
 		f.store_string(cfg_text)
 		f.close()
+	PlusSettings.reload()
 
 
 ## UX-07: barra de tiempo, fase roja, tic/alarma y robo automático con su aviso.
@@ -3469,3 +3525,569 @@ func _ui_test_t53(dir: String, report: Array) -> void:
 	_t53_line(report, "ajuste del usuario restaurado (marca de prueba borrada: %s)" % str(not cfg.has_section_key("plus", "emotes_test_backup")), not cfg.has_section_key("plus", "emotes_test_backup"))
 	await _wait(2.8)
 
+
+
+# ---------------------------------------------------------------- T70: orden de la mano, accesibilidad, consejos y ambiente (UX-11, UX-13, UX-14, V-09)
+
+const T70_BACKUP := "user://settings.cfg.t70bak"
+
+
+## Copia de seguridad de TODO el archivo de ajustes antes de que la prueba de Plus lo toque. Si ya había una (ejecución anterior
+## interrumpida) no se pisa: `_t70_restore_stale` la devuelve primero.
+func _t70_begin() -> void:
+	if FileAccess.file_exists(T70_BACKUP):
+		return
+	var f := FileAccess.open(T70_BACKUP, FileAccess.WRITE)
+	if f:
+		f.store_string(FileAccess.get_file_as_string(SETTINGS))
+		f.close()
+
+
+## Devuelve los ajustes del usuario desde la copia (si existe) y la borra. Se llama al arrancar la aplicación y al terminar la prueba.
+func _t70_restore_stale() -> void:
+	if not FileAccess.file_exists(T70_BACKUP):
+		return
+	var txt := FileAccess.get_file_as_string(T70_BACKUP)
+	var f := FileAccess.open(SETTINGS, FileAccess.WRITE)
+	if f:
+		f.store_string(txt)
+		f.close()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(T70_BACKUP))
+	PlusSettings.reload()
+
+
+func _ui_quit() -> void:
+	_t70_restore_stale()
+	get_tree().quit()
+
+
+func _t70_line(report: Array, area: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/%s: %s | %s" % [area, detail, "OK" if ok else "ERROR"])
+
+
+## Cambia la mano de p0 por estas cartas (sin pila ni decisión) y deja que la pantalla la dibuje.
+func _t70_hand(lm: LocalMatch, types: Array) -> Array:
+	var g := lm.game
+	g.stack.clear()
+	g.prompt = null
+	g.over = null
+	for pl in g.players:
+		pl.alive = true
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.P("p0").hand.clear()
+	var ids: Array = []
+	for t: String in types:
+		ids.append(_ux_give(g, "p0", t))
+	_session.updated.emit()
+	await _wait(0.7)
+	return ids
+
+
+## Controles visibles (rótulos, botones y paneles) de este árbol que se salen de la pantalla.
+func _t70_outside(root: Node, skip: Array = []) -> Array:
+	var out: Array = []
+	var screen := Rect2(Vector2.ZERO, get_viewport().get_visible_rect().size).grow(1.0)
+	_t70_scan(root, screen, out, skip)
+	return out
+
+
+func _t70_scan(n: Node, screen: Rect2, out: Array, skip: Array) -> void:
+	if skip.has(n):
+		return
+	if n is CanvasItem and not (n as CanvasItem).is_visible_in_tree():
+		return
+	if n is Label or n is Button or n is PanelContainer:
+		var r := (n as Control).get_global_rect()
+		if r.size.x > 1.0 and r.size.y > 1.0 and not screen.encloses(r):
+			out.append("%s«%s» %s" % [n.get_class(), (n.text if n is Label or n is Button else ""), str(r)])
+	for c in n.get_children():
+		_t70_scan(c, screen, out, skip)
+
+
+## Sobre el menú de pausa: pulsa un botón por su texto y devuelve si existía.
+func _t70_menu_tap(text: String, close_after: bool = true) -> bool:
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	var b := _find_button(self, text)
+	var found := b != null
+	if b:
+		await _tap_control(b)
+		await _wait(0.4)
+	if close_after:
+		var back := _find_button(self, "Seguir jugando")
+		if back:
+			await _tap_control(back)
+			await _wait(0.4)
+	return found
+
+
+func _ui_test_t70(dir: String, report: Array) -> void:
+	_t70_begin()
+	PlusSettings.reload()
+	await _ui_test_t70_orden(dir, report)
+	await _ui_test_t70_accesibilidad(dir, report)
+	await _ui_test_t70_consejos(dir, report)
+	await _ui_test_t70_ambiente(dir, report)
+	# Devuelve los ajustes del usuario (y deja el estado «sin consejos pendientes» para el resto de la prueba)
+	_t70_restore_stale()
+	_t70_begin()
+	PlusSettings.save_tips_seen({})
+	PlusSettings.set_first_game_done(true)
+	var cfg := ConfigFile.new()
+	cfg.load(T70_BACKUP)
+	_t70_line(report, "ajustes", "copia de seguridad hecha (existe=%s); se devuelve al terminar la prueba" % str(FileAccess.file_exists(T70_BACKUP)), FileAccess.file_exists(T70_BACKUP))
+
+
+# ---------------- UX-11
+
+func _ui_test_t70_orden(dir: String, report: Array) -> void:
+	PlusSettings.set_hand_order("tipo")
+	var lm := await _t62_start({"rivals": 3, "seed": 31})
+	var types := ["cat_a", "cat_b", "shuffle", "favor", "nope", "cat_a", "zombie", "attack", "cat_b", "clairvoyance", "cat_c"]
+	await _t70_hand(lm, types)
+	var by_type: Array = _game.debug_hand_order().map(func(d: Dictionary) -> String: return d.type)
+	var want_type: Array = HandOrder.sorted(lm.game.P("p0").hand.map(func(c: ZKGame.Card) -> Dictionary: return {"id": c.id, "type": c.type}), CardDB.types_for(["crypt"]), "tipo").map(func(d: Dictionary) -> String: return d.type)
+	_t70_line(report, "orden", "«por tipo» (por defecto) deja el orden de siempre: %s" % ", ".join(PackedStringArray(by_type)), by_type == want_type and by_type[0] == "zombie" and by_type[1] == "nope" and by_type.slice(-5) == ["cat_a", "cat_a", "cat_b", "cat_b", "cat_c"] and by_type.find("shuffle") < by_type.find("favor") and by_type.find("favor") < by_type.find("clairvoyance"))
+	# Marcas sin Clon: pareja de cat_a y de cat_b (×2); cat_c suelta sin marca
+	var marks: Dictionary = _game.debug_hand_mark_texts()
+	var n2 := 0
+	var bad_mark := false
+	for c: Dictionary in _game.debug_hand_order():
+		var m: String = marks.get(c.id, "")
+		if m == "×2":
+			n2 += 1
+			bad_mark = bad_mark or not (c.type in ["cat_a", "cat_b"])
+		elif m != "":
+			bad_mark = true
+		elif c.type in ["cat_a", "cat_b"]:
+			bad_mark = true
+	_t70_line(report, "orden", "marcas ×2 visibles sin seleccionar en las 4 cartas de pareja (hay %d), ninguna en las sueltas ni en otras clases" % n2, n2 == 4 and not bad_mark)
+	# Cambiar a «por uso» desde el menú de pausa
+	var tapped := await _t70_menu_tap("Mano: por tipo")
+	var cfg_val := PlusSettings.hand_order()
+	await _wait(0.5)
+	var by_use: Array = _game.debug_hand_order().map(func(d: Dictionary) -> String: return d.type)
+	var left2: Array = by_use.slice(0, 2)
+	var tail: Array = by_use.slice(2)
+	var ok_use: bool = tapped and cfg_val == "uso" and left2 == ["zombie", "nope"] and tail == ["attack", "favor", "shuffle", "clairvoyance", "cat_a", "cat_a", "cat_b", "cat_b", "cat_c"] and by_use != by_type
+	_t70_line(report, "orden", "«por uso» (guardado=%s): %s" % [cfg_val, ", ".join(PackedStringArray(by_use))], ok_use)
+	_t70_line(report, "orden", "el menú ofrece ahora «Mano: por uso» (conmutable de vuelta)", _find_button(self, "MENÚ") != null and await _t70_menu_tap("Mano: por uso", false) and PlusSettings.hand_order() == "tipo")
+	var back := _find_button(self, "Seguir jugando")
+	if back:
+		await _tap_control(back)
+		await _wait(0.3)
+	# otra vez «por uso» para la captura; con el Clon como comodín: ×3 para las parejas y ×2 para cat_c
+	PlusSettings.set_hand_order("uso")
+	await _t70_hand(lm, types + ["clone"])
+	marks = _game.debug_hand_mark_texts()
+	var counts := {"×2": [], "×3": []}
+	for c: Dictionary in _game.debug_hand_order():
+		if marks.get(c.id, "") != "":
+			(counts[marks[c.id]] as Array).append(c.type)
+	var t3: Array = counts["×3"]
+	var t2: Array = counts["×2"]
+	t3.sort()
+	_t70_line(report, "orden", "con un Clon de comodín: ×3 en %s, ×2 en %s" % [str(t3), str(t2)], t3 == ["cat_a", "cat_a", "cat_b", "cat_b", "clone"] and t2 == ["cat_c"])
+	_game.debug_clear_selection()
+	await _save_shot(dir + "/t70_mano_uso.png")
+	PlusSettings.set_hand_order("tipo")
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- UX-13
+
+func _ui_test_t70_accesibilidad(dir: String, report: Array) -> void:
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_vibration(true)
+	PlusSettings.set_reduce_motion(false)
+	var lm := await _t62_start({"rivals": 4, "seed": 41})
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	await _t70_hand(lm, ["cat_a", "cat_a", "nope", "zombie", "attack", "shuffle", "bury"])
+	var hist := _find_button(self, "HISTORIAL")
+	var s_hist0: int = hist.get_theme_font_size("font_size")
+	var status: Label = _game._status
+	var s_status0: int = status.get_theme_font_size("font_size")
+	# --- texto grande
+	var tapped := await _t70_menu_tap("Texto: normal")
+	await _wait(0.5)
+	var f := PlusSettings.text_factor()
+	hist = _find_button(self, "HISTORIAL")
+	var s_hist1: int = hist.get_theme_font_size("font_size")
+	var s_status1: int = status.get_theme_font_size("font_size")
+	_t70_line(report, "accesibilidad", "texto grande: guardado=%s factor %.1f, HISTORIAL %d→%d, estado %d→%d" % [str(PlusSettings.text_large()), f, s_hist0, s_hist1, s_status0, s_status1], tapped and PlusSettings.text_large() and absf(f - 1.2) < 0.001 and s_hist1 == roundi(s_hist0 * 1.2) and s_status1 == roundi(s_status0 * 1.2))
+	# Todos los textos de la pantalla crecen ~1,2 (se compara con su tamaño base)
+	var n_ctrl := 0
+	var n_bad := 0
+	var stack: Array = [_game.debug_hud_root()]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.append(c)
+		if (n is Label or n is Button) and (n as Control).is_visible_in_tree() and not n.has_meta("zk_fixed") and n != _game._turn and not _game._fx_root.is_ancestor_of(n) and not _game._emote_layer.is_ancestor_of(n):
+			n_ctrl += 1
+			if (n as Control).get_theme_font_size("font_size") != roundi(PlusText.base_of(n as Control) * 1.2):
+				n_bad += 1
+	_t70_line(report, "accesibilidad", "%d textos de la interfaz escalados a 1,2 (%d sin escalar)" % [n_ctrl, n_bad], n_ctrl >= 6 and n_bad == 0)
+	# Nada se sale de la pantalla (1080×1920): barra superior con 5 jugadores y turno doble, zona inferior, y cada ventana
+	g.dir = -1
+	g.cur = 4
+	g.turns_left = 2
+	_session.updated.emit()
+	await _wait(0.5)
+	var out1 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	_t70_line(report, "accesibilidad", "texto grande, pantalla de partida (5 jugadores): %d controles fuera de 1080×1920 %s" % [out1.size(), str(out1.slice(0, 3))], out1.is_empty())
+	var clipped: Array = _game.debug_chips_clipped()
+	_t70_line(report, "accesibilidad", "texto grande, fichas de los 4 rivales: %d textos recortados %s" % [clipped.size(), str(clipped.slice(0, 3))], clipped.is_empty())
+	await _save_shot(dir + "/t70_texto_grande.png")
+	g.dir = 1
+	await _t70_hand(lm, ["cat_a", "cat_a", "nope", "zombie", "attack", "shuffle", "bury"])
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.5)
+	var out2 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	_t70_line(report, "accesibilidad", "texto grande, menú de pausa: %d controles fuera de la pantalla %s" % [out2.size(), str(out2.slice(0, 3))], out2.is_empty())
+	await _save_shot(dir + "/t70_texto_grande_menu.png")
+	var seguir := _find_button(self, "Seguir jugando")
+	if seguir:
+		await _tap_control(seguir)
+		await _wait(0.3)
+	await _tap_control(_find_button(self, "HISTORIAL"))
+	await _wait(0.5)
+	var out3 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	await _save_shot(dir + "/t70_texto_grande_historial.png")
+	var close := _find_button(self, "Cerrar")
+	if close:
+		await _tap_control(close)
+		await _wait(0.3)
+	for i in 4:
+		lm.game.discard.append({"card": ZKGame.Card.new("zq%d" % i, ["skip", "attack", "cat_a", "shuffle"][i], false), "by": "p1"})
+	_session.updated.emit()
+	await _wait(0.4)
+	_game._open_discard()
+	await _wait(0.5)
+	var out4 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	var close2 := _find_button(self, "Cerrar")
+	if close2:
+		await _tap_control(close2)
+		await _wait(0.3)
+	_t70_line(report, "accesibilidad", "texto grande, ventanas Historial y Descarte: %d + %d controles fuera %s %s" % [out3.size(), out4.size(), str(out3.slice(0, 2)), str(out4.slice(0, 2))], out3.is_empty() and out4.is_empty())
+	# Selección de una carta con texto grande: panel de información
+	var c0: Card3D = _game.debug_playable_card()
+	if c0 != null:
+		await _tap_3d(c0, Vector3(-0.24, 0, -0.3))
+		await _wait(0.5)
+		var out5 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+		_t70_line(report, "accesibilidad", "texto grande, carta seleccionada con su botón: %d controles fuera %s" % [out5.size(), str(out5.slice(0, 2))], out5.is_empty())
+		await _save_shot(dir + "/t70_texto_grande_seleccion.png")
+		_game.debug_clear_selection()
+	# Vuelve a normal
+	await _t70_menu_tap("Texto: grande")
+	await _wait(0.4)
+	_t70_line(report, "accesibilidad", "volver a texto normal: HISTORIAL %d, guardado=%s" % [_find_button(self, "HISTORIAL").get_theme_font_size("font_size"), str(not PlusSettings.text_large())], _find_button(self, "HISTORIAL").get_theme_font_size("font_size") == s_hist0 and not PlusSettings.text_large())
+	# --- vibración
+	g.stack.clear()
+	g.prompt = null
+	var vib_events := func() -> void:
+		g.emit("turn", {"player": "p0"})
+		g.emit("attack", {"player": "p1", "target": "p0", "n": 2, "text": "x"})
+		g.emit("apocalypse", {"n": 1, "text": "¡Apocalipsis!"})
+		g.emit("haunt", {"player": "p1", "target": "p0", "card": "skip", "text": "Espanto"})
+		g.emit("rot_found", {"player": "p1", "text": "X encontró al Putrefacto"})
+		_session.updated.emit()
+	var r0 := PlusSettings.vibe_requests
+	var fi0 := PlusSettings.vibe_fired
+	vib_events.call()
+	await _wait(0.6)
+	var r1 := PlusSettings.vibe_requests
+	var fi1 := PlusSettings.vibe_fired
+	_t70_line(report, "accesibilidad", "vibración «sí»: %d peticiones, %d enviadas" % [r1 - r0, fi1 - fi0], r1 - r0 >= 4 and fi1 - fi0 == r1 - r0)
+	var tapped_v := await _t70_menu_tap("Vibración: sí")
+	vib_events.call()
+	await _wait(0.6)
+	var r2 := PlusSettings.vibe_requests
+	var fi2 := PlusSettings.vibe_fired
+	_t70_line(report, "accesibilidad", "vibración «no» (guardado=%s): %d peticiones al punto único, %d enviadas al dispositivo" % [str(not PlusSettings.vibration_on()), r2 - r1, fi2 - fi1], tapped_v and not PlusSettings.vibration_on() and r2 - r1 >= 4 and fi2 - fi1 == 0)
+	await _t70_menu_tap("Vibración: no")
+	# --- reducir movimiento: primero la comprobación de control (con movimiento sí hay sacudidas, destellos y cámara lenta)
+	var burst := func(lmx: LocalMatch) -> Dictionary:
+		var gx := lmx.game
+		var res := {"ts": 0, "forced": 0}
+		var w: TableWorld = _world
+		var sh0 := w.shake_calls
+		var fl0 := w.flash_calls
+		_ux_reset(gx, 0)
+		gx.cur = 0
+		gx.turns_left = 1
+		gx.emit("boom", {"player": "p1", "text": "¡Bigotes sacó un GATITO EXPLOSIVO!"})
+		gx.emit("died", {"player": "p1", "text": "💥 Bigotes explotó y está MUERTO (por ahora)."})
+		gx.emit("apocalypse", {"n": 3, "text": "¡Apocalipsis!"})
+		gx.emit("play", {"player": "p2", "eff": "attack", "text": "x"})
+		gx.emit("attack", {"player": "p2", "target": "p0", "n": 2, "text": "x"})
+		gx.emit("nope", {"player": "p2", "yup": false, "text": "NOP"})
+		gx.emit("reverse", {"dir": -1, "text": "Marcha atrás"})
+		gx.emit("swap", {"player": "p2", "target": "p3", "text": "Trueque"})
+		gx.emit("rot_found", {"player": "p2", "text": "X encontró al Putrefacto"})
+		gx.emit("zombie", {"player": "p2", "text": "Zombi"})
+		_session.updated.emit()
+		for kind: String in ["future", "shuffle", "skip", "super_skip", "steal", "dig", "bury", "feed", "grave_robber", "targeted", "reverse", "crow", "swirl", "haunt", "apocalypse", "clone"]:
+			_game.debug_fx().demo(kind)
+		_game.debug_aura().dbg_forced = 80
+		var t0 := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - t0 < 4600:      # 4,6 s mirando el reloj del juego en cada cuadro
+			await get_tree().process_frame
+			if not is_equal_approx(Engine.time_scale, 1.0):
+				res.ts += 1
+		res["shakes"] = w.shake_calls - sh0
+		res["flashes"] = w.flash_calls - fl0
+		res["tremors"] = _game.debug_aura().dbg_tremors
+		res["forced"] = _game.debug_fx().dbg_forced
+		_game.debug_aura().dbg_forced = -1
+		return res
+	_game.debug_aura().dbg_tremors = 0
+	var ctl: Dictionary = await burst.call(lm)
+	_t70_line(report, "accesibilidad", "control con movimiento: %d sacudidas, %d destellos a pantalla completa, %d cuadros con cámara lenta, %d temblores del mazo" % [ctl.shakes, ctl.flashes, ctl.ts, ctl.tremors], ctl.shakes > 0 and ctl.flashes > 0 and ctl.ts > 0 and ctl.tremors > 0)
+	await _wait(1.0)
+	var tapped_r := await _t70_menu_tap("Reducir movimiento: no")
+	await _wait(0.3)
+	_game.debug_aura().dbg_tremors = 0
+	var calm: Dictionary = await burst.call(lm)
+	await _save_shot(dir + "/t70_reducir_movimiento.png")
+	_t70_line(report, "accesibilidad", "«Reducir movimiento» (guardado=%s) en una ráfaga con explosión y Apocalipsis: %d sacudidas, %d destellos a pantalla completa, %d cuadros con time_scale≠1, %d temblores del mazo, efectos retirados a la fuerza %d" % [str(PlusSettings.reduce_motion()), calm.shakes, calm.flashes, calm.ts, calm.tremors, calm.forced], tapped_r and PlusSettings.reduce_motion() and calm.shakes == 0 and calm.flashes == 0 and calm.ts == 0 and calm.tremors == 0 and calm.forced == 0 and _game.dbg_shakes_blocked > 0 and _game.dbg_flashes_blocked > 0)
+	var kinds: Array = _game.debug_fx().dbg_launched.keys()
+	_t70_line(report, "accesibilidad", "con «Reducir movimiento» los efectos de carta siguen avisando (versión breve y quieta): lanzados %d tipos, vivos ahora %d, raíces colgando %d" % [kinds.size(), _game.debug_fx().live_count(), _game.debug_fx().roots()], kinds.size() >= 14)
+	await _wait(1.2)
+	_t70_line(report, "accesibilidad", "tras la ráfaga no queda ningún efecto colgando (raíces %d)" % _game.debug_fx().roots(), _game.debug_fx().roots() == 0)
+	await _t70_menu_tap("Reducir movimiento: sí")
+	_t70_line(report, "accesibilidad", "«Reducir movimiento: no» otra vez (guardado=%s)" % str(not PlusSettings.reduce_motion()), not PlusSettings.reduce_motion())
+	# --- no depender solo del color: icono de jugable junto al borde, y «⚡ YA» en la cara de las cartas ⚡
+	await _t70_hand(lm, ["attack", "nope", "shuffle", "cat_a", "haunt", "skip"])
+	var with_edge := 0
+	var with_icon := 0
+	for id: String in _game.debug_hand_marks():
+		var n: Card3D = _game.debug_hand_card(id)
+		if n.has_edge():
+			with_edge += 1
+			if n.has_play_icon():
+				with_icon += 1
+	var now_cards := ["nope", "shuffle", "clairvoyance", "feed_dead", "haunt"].filter(func(t: String) -> bool: return CardDB.defs.get(t, {}).get("now", false))
+	_t70_line(report, "accesibilidad", "las cartas jugables llevan icono ▶ además del borde (%d con borde, %d con icono); cartas ⚡ en los datos: %s" % [with_edge, with_icon, str(now_cards)], with_edge >= 2 and with_icon == with_edge and now_cards.size() == 5)
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- UX-14
+
+func _ui_test_t70_consejos(dir: String, report: Array) -> void:
+	PlusSettings.save_tips_seen({})
+	PlusSettings.set_first_game_done(false)
+	var lm := await _t62_start({"rivals": 3, "seed": 51}, false)
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	_game._tip = ""                   # la mano repartida pudo traer ya una carta de La Cripta: se parte de cero
+	_game._tips_seen.clear()
+	PlusSettings.save_tips_seen({})
+	await _t70_hand(lm, ["bury", "skip", "cat_a"])
+	var tip1: String = _game.debug_tip()
+	var txt1: String = _game.debug_info_text()
+	var def_short: String = str(CardDB.defs["bury"].short)
+	_t70_line(report, "consejos", "primera partida Plus (sin tutorial): consejo de la carta nueva «%s», con su descripción corta y cuándo conviene: «%s»" % [tip1, txt1.left(120).replace("\n", " ")], tip1 == "card_bury" and txt1.contains(def_short) and txt1.contains("Úsala"))
+	await _save_shot(dir + "/t70_consejo_carta.png")
+	await _tap_control(_find_button(self, "Entendido"))
+	await _wait(0.4)
+	_t70_line(report, "consejos", "tras «Entendido» se guarda en [plus] tips_seen: %s; sin consejo viejo del tutorial (tip='%s')" % [str(PlusSettings.tips_seen().keys()), _game.debug_tip()], PlusSettings.tips_seen().has("card_bury") and _game.debug_tip() == "")
+	# Descarte con 3 cartas
+	for i in 3:
+		g.discard.append({"card": ZKGame.Card.new("zt%d" % i, ["skip", "attack", "cat_b"][i], false), "by": "p1"})
+	_session.updated.emit()
+	await _wait(0.5)
+	var tip2: String = _game.debug_tip()
+	_t70_line(report, "consejos", "descarte con 3 cartas: consejo «%s»" % tip2, tip2 == "discard")
+	await _tap_control(_find_button(self, "Entendido"))
+	await _wait(0.3)
+	# Recordatorio del futuro
+	g.emit("future", {"cards": _memo_top_types(g, 3), "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "p0")
+	_session.updated.emit()
+	await _wait(0.5)
+	var tip3: String = _game.debug_tip()
+	_t70_line(report, "consejos", "aparece la tira del recordatorio: consejo «%s»" % tip3, tip3 == "future")
+	# «El futuro» (ventana) tapa el consejo: primero se cierra la ventana y luego el consejo
+	var win_ok := _find_button(_game._modal_root, "Entendido")
+	if win_ok:
+		await _tap_control(win_ok)
+		await _wait(0.3)
+	var tip_ok := _find_button(_game._info_slot, "Entendido")
+	if tip_ok:
+		await _tap_control(tip_ok)
+		await _wait(0.3)
+	var seen: Dictionary = PlusSettings.tips_seen()
+	_t70_line(report, "consejos", "guardados en el archivo: %s" % str(seen.keys()), seen.has("card_bury") and seen.has("discard") and seen.has("future"))
+	var was_done := PlusSettings.first_game_done()
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	await _tap_control(_find_button(self, "Salir de la partida"))
+	await _wait(0.3)
+	await _tap_control(_find_button(self, "Salir al menú"))
+	await _wait(0.5)
+	_t70_line(report, "consejos", "al salir de la primera partida first_game_done pasa de %s a %s" % [str(was_done), str(PlusSettings.first_game_done())], not was_done and PlusSettings.first_game_done())
+	# Pantalla nueva: se respetan los vistos, y la partida ya no es «la primera»
+	lm = await _t62_start({"rivals": 3, "seed": 52}, false)
+	g = lm.game
+	_memo_safe_top(g, 4)
+	await _t70_hand(lm, ["bury", "skip", "cat_a"])
+	var again: Dictionary = _game.debug_tips_seen()
+	_t70_line(report, "consejos", "pantalla nueva: carga los consejos vistos (%s) y no repite «bury» (tip='%s')" % [str(again.keys()), _game.debug_tip()], again.has("card_bury") and again.has("discard") and again.has("future") and _game.debug_tip() == "")
+	_game.coach = true         # el tutorial también respeta lo ya visto (también en Plus)
+	_game._update_hud()
+	await _wait(0.4)
+	var tutor: String = _game.debug_tip()
+	_t70_line(report, "consejos", "con el tutorial activo sale un consejo no visto («%s») y ninguno de los guardados" % tutor, tutor != "" and not again.has(tutor))
+	_game.coach = false
+	_game._update_hud()
+	# Otra carta de La Cripta que llega a la mano: su consejo sale aunque ya no sea la primera partida solo con el tutorial/reinicio
+	# «Volver a ver los consejos» desde el menú de pausa
+	var tapped := await _t70_menu_tap("Volver a ver los consejos", false)
+	await _wait(0.5)
+	var tip_after: String = _game.debug_tip()
+	_t70_line(report, "consejos", "«Volver a ver los consejos»: botón=%s, vistos en pantalla %d y en el archivo %d, first_game_done=%s, vuelve a salir un consejo («%s»)" % [str(tapped), _game.debug_tips_seen().size(), PlusSettings.tips_seen().size(), str(PlusSettings.first_game_done()), tip_after], tapped and _game.debug_tips_seen().size() == 0 and PlusSettings.tips_seen().size() == 0 and not PlusSettings.first_game_done() and tip_after != "")
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- V-09
+
+func _ui_test_t70_ambiente(dir: String, report: Array) -> void:
+	PlusSettings.set_reduce_motion(false)
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_mat("verde")
+	_world.apply_quality("high")
+	var lm := await _t62_start({"rivals": 4, "seed": 61})
+	var amb: PlusAmbient = _game.debug_ambient()
+	var moon_a := amb.moon_index
+	_t70_line(report, "ambiente", "niebla baja: %d capas (calidad alta); luna %d color %s" % [amb.fog_layers(), amb.moon_index, str(_world.moon_color())], amb.fog_layers() == 3 and _world.moon_color().is_equal_approx(PlusAmbient.MOONS[moon_a][0]))
+	await _wait(1.0)
+	await _save_shot(dir + "/t70_ambiente_niebla.png")
+	# Calidad baja: sin niebla
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(0.4)
+	_t70_line(report, "ambiente", "calidad baja: %d capas de niebla" % amb.fog_layers(), amb.fog_layers() == 0)
+	_world.apply_quality("high")
+	_session.updated.emit()
+	await _wait(0.4)
+	_t70_line(report, "ambiente", "calidad alta otra vez: %d capas" % amb.fog_layers(), amb.fog_layers() == 3)
+	# Relámpago: con riesgo ≤ 50 % no cae
+	var sky0: float = _world.sky_energy()
+	amb.dbg_risk = 30
+	var b0 := amb.dbg_bolts
+	await _wait(5.5)
+	_t70_line(report, "ambiente", "riesgo 30 %%: %d relámpagos en 5,5 s" % (amb.dbg_bolts - b0), amb.dbg_bolts == b0)
+	# «Reducir movimiento»: con riesgo alto tampoco
+	await _t70_menu_tap("Reducir movimiento: no")
+	amb.dbg_risk = 70
+	var fog_static: float = amb.fog_speed()
+	await _wait(6.0)
+	_t70_line(report, "ambiente", "«Reducir movimiento» y riesgo 70 %%: %d relámpagos en 6 s, niebla quieta (velocidad %.3f)" % [amb.dbg_bolts - b0, fog_static], amb.dbg_bolts == b0 and fog_static == 0.0 and not amb.bolt())
+	await _t70_menu_tap("Reducir movimiento: sí")
+	# Con riesgo alto y movimiento: cae uno, y no más de uno cada ~12 s
+	var t_start := Time.get_ticks_msec()
+	var first_ms := -1
+	for _i in 160:
+		await _wait(0.05)
+		if amb.dbg_bolts > b0 and first_ms < 0:
+			first_ms = Time.get_ticks_msec() - t_start
+			break
+	var sky_peak: float = 0.0
+	for _i in 12:
+		sky_peak = maxf(sky_peak, _world.sky_energy())
+		await get_tree().process_frame
+	_t70_line(report, "ambiente", "riesgo 70 %%: relámpago a los %.1f s (cielo %.2f → pico %.2f)" % [first_ms / 1000.0, sky0, sky_peak], first_ms > 0 and amb.dbg_bolts == b0 + 1)
+	await _wait(9.0)
+	_t70_line(report, "ambiente", "9 s después sigue habiendo un solo relámpago (separación mínima de 12 s): %d" % (amb.dbg_bolts - b0), amb.dbg_bolts == b0 + 1)
+	amb.dbg_risk = -1
+	# Captura a mitad de relámpago
+	amb.bolt()
+	await _wait(0.07)
+	var sky_now: float = _world.sky_energy()
+	await _save_shot(dir + "/t70_ambiente_relampago.png")
+	_t70_line(report, "ambiente", "captura a mitad de relámpago: cielo %.2f (normal %.2f)" % [sky_now, sky0], sky_now > sky0 + 0.15)
+	await _wait(1.0)
+	_t70_line(report, "ambiente", "el cielo vuelve a su valor (%.2f)" % _world.sky_energy(), absf(_world.sky_energy() - sky0) < 0.01)
+	await _t70_visuales(dir, report)
+	# Luna distinta en la partida siguiente
+	_close_session()
+	await _wait(0.3)
+	_t70_line(report, "ambiente", "al salir, la luna y el tapete vuelven a los de siempre (luna %s, tapete %s)" % [str(_world.moon_color()), str(_world.felt_color())], _world.moon_color().is_equal_approx(TableWorld.MOON_DEFAULT_COLOR) and _world.felt_color().is_equal_approx(TableWorld.FELT_DEFAULT))
+	lm = await _t62_start({"rivals": 2, "seed": 62})
+	var moon_b: int = _game.debug_ambient().moon_index
+	_t70_line(report, "ambiente", "partida siguiente: luna %d (antes %d), distinta=%s" % [moon_b, moon_a, str(moon_b != moon_a)], moon_b != moon_a and _world.moon_color().is_equal_approx(PlusAmbient.MOONS[moon_b][0]))
+	_close_session()
+	await _wait(0.3)
+	# Tapete alternativo elegible en Ajustes (solo en Plus) y Ajustes clásicos sin cambios
+	_show_menu()
+	await _wait(0.5)
+	_menu.set_plus(false, false)
+	_menu.show_page("settings")
+	await _wait(0.4)
+	var classic_has := _find_button(self, "Texto: normal") != null or _find_button(self, "Tapete: verde") != null or _find_button(self, "Reducir movimiento: no") != null
+	await _save_shot(dir + "/t70_ajustes_clasico.png")
+	_t70_line(report, "ambiente", "Ajustes en modo clásico: sin opciones de Plus (%s)" % str(not classic_has), not classic_has)
+	_menu.set_plus(true, false)
+	_menu.show_page("settings")
+	await _wait(0.4)
+	var plus_has := _find_button(self, "Texto: normal") != null and _find_button(self, "Vibración: sí") != null and _find_button(self, "Reducir movimiento: no") != null and _find_button(self, "Tapete: verde") != null
+	await _save_shot(dir + "/t70_ajustes_plus.png")
+	_t70_line(report, "ambiente", "Ajustes en modo Plus: texto, vibración, reducir movimiento y tapete (%s)" % str(plus_has), plus_has)
+	var out_s := _t70_outside(_menu)
+	_t70_line(report, "ambiente", "Ajustes Plus caben en pantalla: %d fuera" % out_s.size(), out_s.is_empty())
+	await _menu_tap("Tapete: verde")
+	var mat1 := PlusSettings.mat()
+	var label_next := _find_button(self, "Tapete: burdeos") != null
+	await _menu_tap("Texto: normal")
+	await _menu_tap("Vibración: sí")
+	await _menu_tap("Reducir movimiento: no")
+	var settings_ok: bool = PlusSettings.text_large() and not PlusSettings.vibration_on() and PlusSettings.reduce_motion() and mat1 == "burdeos" and label_next
+	_t70_line(report, "ambiente", "los botones de Ajustes guardan (texto grande=%s, vibración=%s, reducir=%s, tapete=%s)" % [str(PlusSettings.text_large()), str(PlusSettings.vibration_on()), str(PlusSettings.reduce_motion()), mat1], settings_ok)
+	await _save_shot(dir + "/t70_ajustes_plus_cambiados.png")
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_vibration(true)
+	PlusSettings.set_reduce_motion(false)
+	lm = await _t62_start({"rivals": 3, "seed": 63})
+	await _wait(0.8)
+	var felt: Color = _world.felt_color()
+	await _save_shot(dir + "/t70_tapete_burdeos.png")
+	_t70_line(report, "ambiente", "partida con tapete burdeos: color %s" % str(felt), felt.is_equal_approx(PlusAmbient.MATS["burdeos"]))
+	_start_solo(_last_opts)        # revancha: la pantalla nueva nace antes de que muera la vieja y no debe perder el tapete ni la luna
+	await _wait(1.5)
+	var felt2: Color = _world.felt_color()
+	var moon2: Color = _world.moon_color()
+	_t70_line(report, "ambiente", "revancha: tapete %s, luna %s (no la de siempre: %s)" % [str(felt2), str(moon2), str(not moon2.is_equal_approx(TableWorld.MOON_DEFAULT_COLOR))], felt2.is_equal_approx(PlusAmbient.MATS["burdeos"]) and moon2.is_equal_approx(PlusAmbient.MOONS[_game.debug_ambient().moon_index][0]))
+	_close_session()
+	await _wait(0.3)
+	PlusSettings.set_mat("verde")
+	_show_menu()
+	await _wait(0.3)
+
+
+## Retoques visuales: el cuervo de Ojo de Cuervo a mitad de vuelo y el humo del mazo con riesgo alto.
+func _t70_visuales(dir: String, report: Array) -> void:
+	# Retoques visuales: el cuervo de Ojo de Cuervo y el humo del mazo con riesgo alto
+	var fx: PlusVfx = _game.debug_fx()
+	var seat_ids: Array = _game._seats.keys()
+	fx.crow(_game._pos_of(seat_ids[1]), _game._pos_of("p0"))        # de un rival hacia mi sitio: cruza la mesa
+	await _wait(0.4)
+	await _save_shot(dir + "/t70_cuervo.png")
+	await _wait(0.2)
+	await _save_shot(dir + "/t70_cuervo2.png")
+	var wings := fx.find_children("Wing_*", "Node3D", true, false)
+	var crow_node: Node3D = fx.find_child("Fx_crow", true, false) as Node3D
+	var crow_parts := crow_node.get_child(0).get_child_count() if crow_node != null and crow_node.get_child_count() > 0 else 0
+	_t70_line(report, "ambiente", "cuervo a mitad de vuelo: efecto vivo=%s, %d alas que baten, %d piezas (cuerpo, cabeza, pico, ojos, cola)" % [str(fx.is_live("crow")), wings.size(), crow_parts], fx.is_live("crow") and wings.size() == 2 and crow_parts >= 10)
+	await _wait(1.0)
+	_game.debug_aura().dbg_forced = 70
+	await _wait(3.5)
+	await _save_shot(dir + "/t70_humo_mazo.png")
+	_t70_line(report, "ambiente", "humo del mazo con riesgo 70 %%: emitiendo=%s" % str(_game.debug_aura().smoking()), _game.debug_aura().smoking())
+	_game.debug_aura().dbg_forced = -1

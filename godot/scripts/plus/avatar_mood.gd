@@ -13,6 +13,7 @@ const DURATIONS := {"scare": 0.85, "cheer": 0.75, "nod": 0.5, "jump": 0.6}
 var _t0 := {}              # id -> {kind, at}
 var dbg_count := {}        # tipo de pose -> veces lanzada (prueba)
 var _now := 0.0
+var reduced := false       # «Reducir movimiento»: los avatares no hacen poses
 
 
 ## Avanza el reloj interno.
@@ -24,7 +25,7 @@ func tick(delta: float) -> void:
 
 
 func trigger(id: String, kind: String) -> void:
-	if not DURATIONS.has(kind):
+	if reduced or not DURATIONS.has(kind):
 		return
 	_t0[id] = {"kind": kind, "at": _now}
 	dbg_count[kind] = int(dbg_count.get(kind, 0)) + 1

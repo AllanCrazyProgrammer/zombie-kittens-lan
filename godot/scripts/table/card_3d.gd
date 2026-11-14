@@ -128,9 +128,14 @@ func set_pickable(on: bool) -> void:
 
 
 ## Aditivo (Plus): oculta solo el modelo de la carta (sus hijos, como las mitades de una carta rota, siguen visibles).
+## La marca y el icono de jugable (UX-11/UX-13) se ocultan con él.
 func set_body_visible(on: bool) -> void:
 	if _body:
 		_body.visible = on
+	if _mark != null and is_instance_valid(_mark):
+		_mark.visible = on and _mark.text != ""
+	if _icon != null and is_instance_valid(_icon):
+		_icon.visible = on and _icon_on
 
 
 # ------------------------------------------------------------------ Plus (V-07): jugable / no jugable
@@ -210,3 +215,86 @@ func dim_amount() -> float:
 
 func is_body_visible() -> bool:
 	return _body != null and _body.visible
+
+
+# ------------------------------------------------------------------ Plus (UX-11 / UX-13): marca de pareja y icono de jugable
+
+var _mark: Label3D
+var _icon: MeshInstance3D
+var _icon_on := false
+
+
+## Aditivo (Plus): marca pequeña en la esquina superior izquierda («×2», «×3»); "" la quita.
+func set_mark(text: String) -> void:
+	if text == "":
+		if _mark != null and is_instance_valid(_mark):
+			_mark.text = ""
+			_mark.visible = false
+		return
+	if _mark == null or not is_instance_valid(_mark):
+		_mark = Label3D.new()
+		_mark.font = UIKit.TITLE_FONT
+		_mark.font_size = 96
+		_mark.pixel_size = 0.0021
+		_mark.outline_size = 30
+		_mark.modulate = Color("ffd23a")
+		_mark.outline_modulate = Color(0.08, 0.04, 0.16)
+		_mark.rotation_degrees = Vector3(-90, 0, 0)         # tumbado sobre la cara de la carta
+		_mark.position = Vector3(-0.2, 0.011, -0.37)
+		_mark.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(_mark)
+	_mark.text = text
+	_mark.visible = _body == null or _body.visible
+
+
+func mark_visible() -> bool:
+	return _mark != null and is_instance_valid(_mark) and _mark.visible and _mark.is_inside_tree() and _mark.text != ""
+
+
+func mark_text() -> String:
+	return _mark.text if _mark != null and is_instance_valid(_mark) else ""
+
+
+## Aditivo (Plus): triángulo «▶» en la esquina inferior izquierda de las cartas jugables (no depender solo del color del borde).
+func set_play_icon(on: bool) -> void:
+	_icon_on = on
+	if not on:
+		if _icon != null and is_instance_valid(_icon):
+			_icon.visible = false
+		return
+	if _icon == null or not is_instance_valid(_icon):
+		var mb := StandardMaterial3D.new()
+		mb.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mb.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mb.albedo_color = Color(0.08, 0.04, 0.16)
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		m.albedo_color = Color(0.71, 0.95, 0.23)
+		_icon = MeshInstance3D.new()
+		_icon.mesh = _triangle(0.115)
+		_icon.material_override = mb
+		_icon.position = Vector3(-0.2, 0.0105, 0.37)
+		_icon.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var fill := MeshInstance3D.new()
+		fill.mesh = _triangle(0.075)
+		fill.material_override = m
+		fill.position = Vector3(0.006, 0.0015, 0)
+		fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_icon.add_child(fill)
+		add_child(_icon)
+	_icon.visible = _body == null or _body.visible
+
+
+## Triángulo «▶» plano sobre la carta (vértice hacia +x), de lado ~`h`.
+static func _triangle(h: float) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_normal(Vector3.UP)
+	for v: Vector3 in [Vector3(-h * 0.5, 0, -h * 0.5), Vector3(h * 0.7, 0, 0), Vector3(-h * 0.5, 0, h * 0.5)]:
+		st.add_vertex(v)
+	return st.commit()
+
+
+func has_play_icon() -> bool:
+	return _icon != null and is_instance_valid(_icon) and _icon.visible

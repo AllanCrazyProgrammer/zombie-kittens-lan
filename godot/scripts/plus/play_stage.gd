@@ -35,6 +35,7 @@ void fragment() {
 static var _half_shader: Shader
 
 var low := false                     # calidad baja: sin partículas ni brillos
+var reduced := false                 # «Reducir movimiento»: sin pulsos, chispas ni destellos; la rotura y la restauración no se animan
 var _plays: Dictionary = {}          # id de la jugada -> {cards, color, broken, by, target, beam, halo, stamp, halves, tweens}
 var _sparks: Array = []
 var _unbreaks: Array = []        # cartas rotas que ya caen al descarte: al posarse vuelven enteras
@@ -150,7 +151,7 @@ func add_play(sid: int, cards: Array, color: Color, from_pos: Vector3, target_po
 	for c: Card3D in cards:
 		c.set_meta("floating", sid)
 		c.set_pickable(false)
-	if not low and not quiet:
+	if not low and not quiet and not reduced:
 		_glow_pulse(play)
 	if target_pos != null:
 		_build_beam(play, from_pos, target_pos)
@@ -249,6 +250,7 @@ func layout(quiet: bool = false) -> void:
 # ------------------------------------------------------------------ anulación y restauración
 
 func _set_nopes(play: Dictionary, nopes: int, animate: bool) -> void:
+	animate = animate and not reduced
 	var want := nopes % 2 == 1
 	if want == play.broken:
 		return
@@ -499,7 +501,7 @@ func _build_beam(play: Dictionary, from_pos: Vector3, to_pos: Vector3) -> void:
 	var core := _tube(a, b, 0.012 if not low else 0.016, Color(col.r, col.g, col.b, 0.95 if not low else 0.85), 4 if low else 6, 10 if low else 20)
 	add_child(core)
 	play.beam = core
-	if low:
+	if low or reduced:
 		return          # calidad baja: un solo tubo plano, sin brillo ni chispas
 	var glow := _tube(a, b, 0.05, Color(col.r, col.g, col.b, 0.2), 6, 20)
 	core.add_child(glow)

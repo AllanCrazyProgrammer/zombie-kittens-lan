@@ -10,6 +10,7 @@ const ARROWS := 6
 const SPIN := 0.22           # rad/s
 
 var dir := 1
+var reduced := false         # «Reducir movimiento»: el aro no gira
 var _ring: Node3D            # gira sin parar
 var _heads: Node3D           # flechas: se giran 180° al invertir el sentido
 var _mat: StandardMaterial3D
@@ -76,6 +77,8 @@ func set_dir(value: int, animate: bool = true) -> void:
 
 ## V-04 (Marcha Atrás): giro extra del aro, además de la vuelta de las flechas.
 func kick(extra: float = 12.0) -> void:
+	if reduced:
+		return
 	_boost = maxf(_boost, extra)
 
 
@@ -88,5 +91,6 @@ func _process(delta: float) -> void:
 	_time += delta
 	_boost = maxf(0.0, _boost - delta * 9.0)
 	# Visto desde arriba, el sentido horario es un giro negativo alrededor de Y
-	_ring.rotation.y -= (SPIN + _boost) * dir * delta
+	if not reduced:
+		_ring.rotation.y -= (SPIN + _boost) * dir * delta
 	_mat.albedo_color.a = 0.42 + 0.14 * sin(_time * 2.2)

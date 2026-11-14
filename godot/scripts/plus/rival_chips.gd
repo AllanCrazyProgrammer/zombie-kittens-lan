@@ -17,6 +17,7 @@ var _target := ""         # objetivo de la jugada en curso (para pulsar solo al 
 var _time := 0.0
 var _aim := {}            # modo puntería: id -> válido (vacío = apagado)
 var _bar_state := {}      # id -> estado de color de la barra de turno (para no repintar cada cuadro)
+var text_factor := 1.0    # «Texto: grande» (UX-13): 1,2. Las fichas ajustan sus textos al hueco en vez de salirse
 
 
 func _init() -> void:
@@ -119,6 +120,48 @@ func _target_of(view: Dictionary) -> String:
 	return str(t.get("target", "")) if t is Dictionary and t.get("target") != null else ""
 
 
+## UX-13: cambia el tamaño del texto de las fichas. Con texto grande el avatar se achica para dejar sitio a las letras.
+func set_text_factor(f: float) -> void:
+	if is_equal_approx(f, text_factor):
+		return
+	text_factor = f
+	for id: String in _chips:
+		var c: Dictionary = _chips[id]
+		var pic: Control = c.pic
+		pic.custom_minimum_size = Vector2(48, 62) if (f > 1.01 or c.small) else Vector2(84, 108)
+		for key: String in ["name", "info", "state"]:
+			_fit_label(c[key])
+
+
+## Tamaño de un rótulo de ficha: el base × factor, reducido (sin bajar del base) hasta que quepa en su ancho.
+func _fit_label(l: Label) -> void:
+	var base := int(l.get_meta("zk_base", l.get_theme_font_size("font_size")))
+	var sz := roundi(float(base) * text_factor)
+	var avail := l.size.x
+	if avail > 8.0 and text_factor > 1.01:
+		var f: Font = l.get_theme_font("font")
+		while sz > base and f.get_string_size(l.text, HORIZONTAL_ALIGNMENT_LEFT, -1, sz).x > avail:
+			sz -= 1
+	if l.get_theme_font_size("font_size") != sz:
+		l.add_theme_font_size_override("font_size", sz)
+
+
+## Prueba: rótulos de ficha cuyo texto no cabe en su ancho aunque (con el tamaño base) sí habría cabido.
+func debug_clipped() -> Array:
+	var out: Array = []
+	for id: String in _chips:
+		for key: String in ["name", "info", "state"]:
+			var l: Label = _chips[id][key]
+			if l.is_visible_in_tree() and l.size.x > 8.0:
+				var f: Font = l.get_theme_font("font")
+				var base := int(l.get_meta("zk_base", 30))
+				var w_now := f.get_string_size(l.text, HORIZONTAL_ALIGNMENT_LEFT, -1, l.get_theme_font_size("font_size")).x
+				var w_base := f.get_string_size(l.text, HORIZONTAL_ALIGNMENT_LEFT, -1, base).x
+				if w_now > l.size.x + 1.0 and w_base <= l.size.x + 1.0:
+					out.append("%s/%s «%s» %d pt, %.0f > %.0f" % [id, key, l.text, l.get_theme_font_size("font_size"), w_now, l.size.x])
+	return out
+
+
 func _rebuild(rivals: Array, n: int) -> void:
 	for c in get_children():
 		remove_child(c)
@@ -135,7 +178,7 @@ func _rebuild(rivals: Array, n: int) -> void:
 		chip.gui_input.connect(_on_chip_input.bind(p.id))
 		var ch := UIKit.hbox(6)
 		chip.add_child(ch)
-		var pic := UIKit.avatar_icon(int(p.get("avatar", 0)), Vector2(48, 62) if small else Vector2(84, 108))
+		var pic := UIKit.avatar_icon(int(p.get("avatar", 0)), Vector2(48, 62) if (small or text_factor > 1.01) else Vector2(84, 108))
 		ch.add_child(pic)
 		var cv := UIKit.vbox(0)
 		cv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -143,15 +186,27 @@ func _rebuild(rivals: Array, n: int) -> void:
 		var name_l := UIKit.label(p.name, 36 if small else 44, UIKit.C.ink, true)
 		name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		name_l.clip_text = true
+		name_l.set_meta("zk_fixed", true)       # PlusText no lo toca: la ficha lo ajusta ella
+		name_l.set_meta("zk_base", 36 if small else 44)
+		name_l.resized.connect(_fit_label.bind(name_l))
 		cv.add_child(name_l)
 		var info_l := UIKit.label("", 28 if small else 32, UIKit.C.dim)
 		info_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		info_l.clip_text = true
+		info_l.set_meta("zk_fixed", true)
+		info_l.set_meta("zk_base", 28 if small else 32)
+		info_l.resized.connect(_fit_label.bind(info_l))
 		cv.add_child(info_l)
 		var state_l := UIKit.label("", 26 if small else 30, UIKit.C.dim)
 		state_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		state_l.clip_text = true
+		state_l.set_meta("zk_fixed", true)
+		state_l.set_meta("zk_base", 26 if small else 30)
+		state_l.resized.connect(_fit_label.bind(state_l))
 		cv.add_child(state_l)
+		_fit_label(name_l)
+		_fit_label(info_l)
+		_fit_label(state_l)
 		var bar := UIKit.timer_bar()
 		bar.custom_minimum_size = Vector2(0, 10)
 		bar.visible = false
@@ -177,6 +232,8 @@ func _fill(c: Dictionary, p: Dictionary, view: Dictionary, level_of: Callable, i
 	if multi:
 		info += "  ⚔×%d" % int(view.turnsLeft)
 	c.info.text = info
+	_fit_label(c.name)
+	_fit_label(c.info)
 	c.info.add_theme_color_override("font_color", UIKit.C.gold if multi else UIKit.C.dim)
 	var state: String
 	var color: Color = UIKit.C.dim
@@ -203,7 +260,8 @@ func _fill(c: Dictionary, p: Dictionary, view: Dictionary, level_of: Callable, i
 	var sfs := 26 if c.small else 30
 	if state.length() > 12:
 		sfs = 20 if c.small else 24    # «Difícil · Agresivo» es largo: letra algo menor para que quepa
-	c.state.add_theme_font_size_override("font_size", sfs)
+	c.state.set_meta("zk_base", sfs)
+	_fit_label(c.state)
 	c.state.add_theme_color_override("font_color", color)
 	if is_target and p.id != _target:
 		_pulse(c.panel)

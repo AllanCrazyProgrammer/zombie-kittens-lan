@@ -241,7 +241,7 @@ func play_die(p_type: String) -> void:
 	var lt := _label.create_tween()
 	lt.tween_interval(0.45)
 	lt.tween_property(_label, "modulate:a", 1.0, 0.3)
-	if not low:
+	if not low and not PlusSettings.reduce_motion():
 		_dust()
 	await get_tree().create_timer(0.35).timeout
 	if not is_inside_tree():
@@ -293,10 +293,11 @@ func play_revive() -> void:
 			gm.albedo_color = Color(0.4, 1.0, 0.2, 0.0)
 			(m as GeometryInstance3D).material_overlay = gm
 			glow_mats.append(gm)
-	var shake := _tomb.create_tween()
-	for i in 6:
-		shake.tween_property(_tomb, "rotation:z", 0.06 * (1.0 if i % 2 == 0 else -1.0), 0.05)
-	shake.tween_property(_tomb, "rotation:z", 0.0, 0.05)
+	if not PlusSettings.reduce_motion():       # el temblor de la lápida es movimiento de más
+		var shake := _tomb.create_tween()
+		for i in 6:
+			shake.tween_property(_tomb, "rotation:z", 0.06 * (1.0 if i % 2 == 0 else -1.0), 0.05)
+		shake.tween_property(_tomb, "rotation:z", 0.0, 0.05)
 	for gm: StandardMaterial3D in glow_mats:
 		var g := _tomb.create_tween()
 		g.tween_property(gm, "albedo_color:a", 0.5, 0.35)
