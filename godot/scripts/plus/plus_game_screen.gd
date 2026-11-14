@@ -1,0 +1,3618 @@
+class_name PlusGameScreen
+extends Node3D
+## Pantalla de juego de Zombie Kittens PLUS. Empezó como copia de game_screen.gd (clásica, congelada) y evoluciona por separado.
+## Pantalla de juego: sincroniza la mesa 3D (mano, mazo, descarte) y los controles con el estado de la partida.
+## No contiene reglas: lee `session.view()` y envía acciones con `session.act()`.
+
+signal exit_requested
+signal rematch_requested
+signal lobby_requested
+
+const DECK_POS := Vector3(-0.5, 0, -0.3)
+const DISCARD_POS := Vector3(0.5, 0, -0.3)
+const HAND_STEP := 0.012
+const HAND_SCALE := 0.86
+## Media altura de una carta (del centro al borde superior)
+const SIZE_Z := 0.441
+
+var session: GameSession
+var world: TableWorld
+var _v: Dictionary = {}
+var _sel: Array[String] = []
+var _hand := {}            # id -> Card3D
+var _discard_nodes := {}   # id -> Card3D
+var _deck_cards: Array[Card3D] = []
+var _deck_label: Label3D
+var _hand_root: Node3D
+var _hand_pivot: Node3D
+var _seq := 0
+var _modal := {}           # ventana propia de la interfaz (elegir objetivo, ver el futuro...)
+var _ins: Array[int] = [0, 0]
+var _give_sel := ""
+var _log_last := ""
+## Historial de la partida: [{text, kind, player, target, mine, cards}] (kind: "turn" separador, "me" privado, "" normal). El más nuevo al final.
+var _history: Array[Dictionary] = []
+const HISTORY_MAX := 300
+var _time := 0.0
+var _timers: Array = []    # [barra, fin_ms, total_ms]
+var _modal_title := ""
+var _seats := {}           # id del rival -> {pos, root, avatar, cards}
+var _turn_light: OmniLight3D
+var _ek: Card3D            # el Gatito Explosivo recién sacado, mientras se decide su destino
+var _fxq: Array[Callable] = []
+var _fx_running := false
+var _me_bar: HBoxContainer
+## Tutorial: muestra consejos según lo que pasa en la partida (cada uno, una sola vez)
+var coach := false
+var _tip := ""
+var _tips_seen := {}
+const TIPS := {
+	"intro": "¡Bienvenido! El objetivo es NO sacar el Gatito Explosivo. Gana el último gato con vida.",
+	"hand": "Estas son tus cartas. Toca una para levantarla y leer qué hace.",
+	"rivals": "Arriba ves a tus rivales y cuántas cartas tienen. El contador amarillo son las cartas que quedan en el mazo.",
+	"turn": "Es tu turno. Puedes jugar las cartas que quieras (o ninguna). Para terminar, roba una carta tocando el mazo.",
+	"selected": "Si la carta se puede jugar ahora, aparece el botón JUGAR. Toca otra carta igual para armar una pareja y robarle una carta a un rival.",
+	"window": "Cuando alguien juega una carta hay unos segundos para anularla con un Nop. La barra amarilla es el tiempo que queda.",
+	"nope": "¡Tienes un Nop! Toca ¡NOP! para anular esta jugada, o «Dejar pasar» si no te importa.",
+	"risk": "El riesgo de explotar ya es alto. Antes de robar, considera usar Saltar, Ataque o Ver el Futuro.",
+	"aim": "Toca al rival que quieres elegir: los resaltados son válidos. Toca CANCELAR para volver sin jugar la carta.",
+	"rot": "☣ El Gatito Putrefacto está boca ARRIBA en el mazo (mira el rótulo verde). Quien lo robe así, muere: ni el Zombi lo salva. Usa Saltar, Ataque o Barajar si te toca robarlo.",
+	"dead": "Explotaste, pero conservas tu mano. Aún puedes jugar Nop y cartas ⚡, y otro jugador puede revivirte con su Gatito Zombi.",
+	"future": "Junto al mazo ves las próximas cartas que conoces. Tócala para ver todo lo que sabes del mazo.",
+	"discard": "Toca la pila del descarte para ver todas las cartas jugadas, la más reciente arriba.",
+}
+## UX-14: consejos nuevos que salen también en la primera partida Plus (los demás, solo en el tutorial).
+const NEW_TIPS := ["future", "discard"]
+## Cuándo conviene cada carta de La Cripta (una frase), tras su descripción corta en el consejo de «primera vez en tu mano».
+const CRYPT_WHEN := {
+	"targeted_attack": "Úsala cuando quieras que el peligro caiga sobre un rival concreto.",
+	"reverse": "Conviene cuando el turno te iba a llegar con riesgo alto: lo devuelves al jugador anterior.",
+	"draw_bottom": "Úsala cuando sospeches que la carta de arriba es un explosivo.",
+	"crow_eye": "Úsala antes de pedir cartas, para saber qué tiene tu objetivo.",
+	"apocalypse": "Resérvala para cuando estés a salvo: el siguiente en robar corre un riesgo enorme.",
+	"alter_future": "Úsala para dejar un explosivo arriba justo antes de que robe un rival.",
+	"bury": "Úsala para mandar la carta de arriba a un sitio donde no te estorbe.",
+	"soul_swap": "Conviene cuando tu mano es floja y un muerto guarda una mejor.",
+	"haunt": "Solo si estás muerto: quita una carta al azar a un vivo antes de que la juegue.",
+	"rotten": "Cuando salga, devuélvelo boca arriba al mazo donde más daño haga.",
+}
+
+var _turn: Label
+var _turn_panel: PanelContainer
+var _opps: RivalChips
+var _risk: RiskMeter
+var _status: Label
+var _status_timer: ProgressBar
+var _buttons: HBoxContainer
+var _info_slot: VBoxContainer
+var _modal_root: Control
+var _fx_root: Control
+var _zoom: Control             # carta seleccionada, en grande, para apreciar el arte y leer el texto
+var _zoom_pic: TextureRect
+var _zoom_type := ""
+## Arrastrar el dedo por la mano: la carta bajo el dedo se resalta (y se ve en grande); al soltar, se elige
+var _hover := ""
+var _press_pos := Vector2.ZERO
+var _press_card := ""
+var _pressing := false
+var _dragging := false
+var hover_changes := 0      # para la prueba automática
+const DRAG_START_PX := 22.0
+## Llevar una carta al centro para jugarla
+var _carry := ""                 # id de la carta que el dedo lleva fuera de la mano ("" = ninguna)
+var _carry_over := false         # el dedo está sobre la zona de juego
+var _carry_prev := Vector3.ZERO
+var _sel_before: Array[String] = []
+var _drop_ring: MeshInstance3D
+var _drop_mat: StandardMaterial3D
+var drops := 0                   # para la prueba automática: cartas soltadas en el centro
+const PLAY_ZONE_CENTER := Vector3(0, 0, -0.25)
+const PLAY_ZONE_RADIUS := 1.25
+const CARRY_HEIGHT := 0.32
+var _toasts: VBoxContainer
+var _discard_list: DiscardList   # ventana «Descarte» abierta (UX-03)
+var _named_grid: CardPickGrid    # cuadrícula del trío abierta (UX-04)
+## Accesibilidad: si es true, el objetivo se elige en una lista de botones (ventana) en vez de tocando la mesa
+var aim_with_list := false
+var _aim: AimMode                # resaltado de asientos y toques sobre la mesa (UX-01)
+var _aim_kind := ""              # tipo de objetivo que se está eligiendo ("" = modo puntería apagado)
+var _aim_forced := false         # solo prueba: modo puntería sin jugada detrás
+var _aim_debug_pick := ""        # solo prueba: último rival elegido en un modo forzado
+var _last_play := {}             # última jugada enviada sin error (prueba)
+# --- La Cripta
+var _known_hands := {}           # id del rival -> {cards: [tipos], count: n}: lo visto con Ojo de Cuervo (UX-04)
+var _alter_order: Array = []     # orden elegido en la ventana de Alterar el Futuro (se conserva al reconstruirla)
+var _alter_live := false         # tengo una decisión «alter» abierta (para no abrir «El futuro» al confirmarla)
+var _arranger: FutureArranger    # ventana de Alterar el Futuro abierta
+var _slot_picker: DeckSlotPicker # selector de posición abierto (esconder el explosivo / Entierro)
+var _picker_sig := ""            # huella de la decisión con selectores de mazo abierta (no se reconstruye mientras no cambie)
+var _picker_bar: ProgressBar     # barra de tiempo de esa ventana
+var _slot_pickers: Array[DeckSlotPicker] = []   # todos los selectores abiertos (con 2 explosivos hay dos)
+var _peek_grid: CardPickGrid     # ventana de Ojo de Cuervo abierta
+var _bottom_draw := false        # el próximo robo sale de DEBAJO del mazo
+var _dir_ring: DirIndicator      # flecha de sentido de juego sobre el tapete (V-06)
+var _stage: PlayStage            # cartas jugadas flotando sobre el centro mientras esperan un Nop (V-02)
+var _float_quiet := true         # la primera vista coloca las jugadas ya en la pila sin animar
+var _discard_first := true
+var _revived := {}               # id -> true: jugadores que han revivido (tinte verdoso el resto de la partida) (V-03)
+var _death_type := {}            # id -> "exploding" | "rotten": la carta de muerte que queda delante de su lápida
+var _dir_label: Label            # «↺ INVERTIDO» junto al distintivo PLUS (solo con el sentido invertido)
+var _memory := DeckMemory.new()  # lo que sé de posiciones concretas del mazo (UX-02)
+var _mem_strip: DeckMemoryStrip  # tira con las próximas cartas conocidas, junto al mazo
+var _first_view := true          # la próxima vista es la primera de esta pantalla (UX-15)
+var _stats := MatchStats.new()   # contadores de la ventana final (UX-09), desde los eventos públicos
+var _hist_mine := false          # filtro del historial: solo lo mío (UX-12)
+var _auto_pass := NopWindow.load_auto_pass()   # «Dejar pasar lo que no me afecta» (UX-05)
+var _auto_sig := ""              # jugada sobre la que ya se pasó sola
+var _nop_lit: Array[String] = [] # Nop de la mano resaltados mientras puedo responder
+var replay_skipped := 0          # solo prueba: eventos antiguos registrados sin efectos al abrir la pantalla (UX-15)
+# --- Tiempo de turno (UX-07)
+var _turn_bar: ProgressBar       # barra del panel de turno
+var _turn_end := 0               # instante (ms de la sesión) en que se agota el turno; solo vale con _turn_total > 0
+var _turn_total := 0             # duración del turno en ms (0 = sin límite)
+var _turn_player := ""           # jugador al que corresponde _turn_end
+var _turn_blink := -1            # estado visual de la barra: 0 normal, 1 rojo, 2 rojo apagado
+var _alarm_done := false         # ya sonó la alarma de los últimos 10 s en este turno
+var _tick_sec := -1              # último segundo para el que sonó el tic
+var dbg_ticks := 0               # prueba: tics y alarmas sonados
+var dbg_alarms := 0
+var dbg_timeouts := 0            # prueba: avisos «Se acabó el tiempo»
+# --- Gatito Putrefacto
+var _rot_card: Card3D            # carta boca arriba asomando de lado en el mazo
+var _rot_glow: MeshInstance3D    # marco verde bajo esa carta
+var _rot_label: Label3D          # «☣ en N» junto al contador del mazo
+var _rot_depth := -1
+var _rot_death := false          # la próxima muerte es por el Putrefacto (tinte verde)
+# --- Sonido, avisos y música
+static var _screens := 0         # pantallas Plus vivas: la música por capas se apaga al cerrar la última
+var _last_eff := ""              # última carta jugada (para distinguir el Ataque Dirigido)
+var _sudden_snd := false         # el sonido de muerte súbita solo suena la primera vez
+var _music_key := ""
+var _sfx_log: Array[String] = [] # prueba: últimos sonidos pedidos
+var _vol_sliders := {}           # prueba: deslizadores del menú de pausa
+# --- Reacciones rápidas (UX-08)
+var _hud_root: Control           # raíz de la interfaz (para insertar el selector bajo las ventanas)
+var _emotes_on := EmoteSet.load_enabled()   # ajuste local «Reacciones: sí/no»
+var _emote_btn: Button           # botón de la barra superior
+var _emote_icon: EmoteIcon       # su dibujo y su enfriamiento
+var _emote_picker: EmotePicker   # selector abierto
+var _emote_layer: Control        # capa de los globos
+var _emote_bubbles := {}         # id del jugador -> EmoteBubble (un solo globo por jugador)
+var _emote_cd_end := 0           # instante (ms de la sesión) en que se puede volver a reaccionar
+var _turn_fit_key := ""
+var dbg_emotes := 0              # prueba: reacciones recibidas y mostradas
+
+var _fx: PlusVfx                 # efectos propios de cada carta (V-04) y animación de robo (V-07)
+var _aura: DeckAura              # humo, temblor y luz roja del mazo según el riesgo (V-05)
+var _deck_step := DeckAura.STEP_BASE   # altura entre los modelos del mazo (crece con las cartas reales)
+var _deck_body: MeshInstance3D   # relleno entre los modelos del mazo cuando hay más cartas que modelos
+var _mood := AvatarMood.new()    # expresiones de los avatares (V-08)
+var _draw_anim := false          # el próximo `_sync_hand` trae una carta que acabo de robar: vuela del mazo a la cámara
+var _post_fx: Array[Callable] = []   # efectos que necesitan los nodos ya sincronizados (se lanzan al final de `_refresh`)
+var _fx_prompt := ""             # decisión abierta en la última vista (lanza Cava Más Hondo / Alterar el Futuro al abrirse)
+var _fx_prompt_ready := false
+var _ambient: PlusAmbient        # niebla, relámpago, luna y tapete (V-09)
+var _reduced := false            # «Reducir movimiento» (UX-13)
+var _text_factor := 1.0          # «Texto: grande» = 1,2 (UX-13)
+var _tip_mode := 0               # consejos: 0 ninguno, 1 solo los nuevos (primera partida Plus), 2 todos (tutorial)
+var dbg_shakes_blocked := 0      # prueba: sacudidas pedidas y descartadas por «Reducir movimiento»
+var dbg_flashes_blocked := 0
+var dbg_slowmos := 0             # prueba: veces que se tocó Engine.time_scale
+
+
+func setup(p_session: GameSession, p_world: TableWorld) -> PlusGameScreen:
+	session = p_session
+	world = p_world
+	return self
+
+
+func _ready() -> void:
+	_reduced = PlusSettings.reduce_motion()
+	_text_factor = PlusSettings.text_factor()
+	_tips_seen = PlusSettings.tips_seen()
+	_tip_mode = 1 if not PlusSettings.first_game_done() else 0
+	_hand_root = Node3D.new()
+	_hand_root.position = Vector3(0, 0, 1.28)
+	_hand_pivot = Node3D.new()
+	_hand_pivot.rotation_degrees.x = 9.0
+	_hand_pivot.position.y = 0.05
+	_hand_root.add_child(_hand_pivot)
+	add_child(_hand_root)
+	_deck_label = Label3D.new()
+	_deck_label.font = UIKit.TITLE_FONT
+	_deck_label.font_size = 96
+	_deck_label.pixel_size = 0.0022
+	_deck_label.outline_size = 28
+	_deck_label.modulate = UIKit.C.gold
+	_deck_label.outline_modulate = UIKit.C.dark
+	_deck_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_deck_label.no_depth_test = true
+	_deck_label.render_priority = 8                  # el humo del mazo (V-05) nunca tapa el contador
+	_deck_label.outline_render_priority = 7
+	add_child(_deck_label)
+	_turn_light = OmniLight3D.new()
+	_turn_light.light_color = UIKit.C.toxic
+	_turn_light.light_energy = 2.4
+	_turn_light.omni_range = 1.6
+	_turn_light.visible = false
+	add_child(_turn_light)
+	_drop_ring = MeshInstance3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = PLAY_ZONE_RADIUS - 0.06
+	torus.outer_radius = PLAY_ZONE_RADIUS
+	torus.rings = 64
+	torus.ring_segments = 6
+	_drop_ring.mesh = torus
+	_drop_mat = StandardMaterial3D.new()
+	_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_drop_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_drop_ring.material_override = _drop_mat
+	_drop_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_drop_ring.position = PLAY_ZONE_CENTER + Vector3(0, 0.02, 0)
+	_drop_ring.scale = Vector3(1, 0.3, 1)
+	_drop_ring.visible = false
+	add_child(_drop_ring)
+	_aim = AimMode.new()
+	add_child(_aim)
+	_dir_ring = DirIndicator.new()
+	_dir_ring.position = Vector3(0, 0.016, -0.2)
+	add_child(_dir_ring)
+	_stage = PlayStage.new()
+	add_child(_stage)
+	_fx = PlusVfx.new().setup(self)
+	_fx.reduced = _reduced
+	_stage.reduced = _reduced
+	add_child(_fx)
+	_ambient = PlusAmbient.new().setup(world)
+	_ambient.low = _low()
+	_ambient.reduced = _reduced
+	add_child(_ambient)
+	_aura = DeckAura.new().setup(DECK_POS)
+	_aura.turn_light = _turn_light
+	_aura.base_color = _turn_light.light_color
+	_aura.cards = _deck_cards
+	_aura.reduced = _reduced
+	_mood.reduced = _reduced
+	_dir_ring.reduced = _reduced
+	add_child(_aura)
+	_rot_label = Label3D.new()
+	_rot_label.font = UIKit.TITLE_FONT
+	_rot_label.font_size = 80
+	_rot_label.pixel_size = 0.0022
+	_rot_label.outline_size = 24
+	_rot_label.modulate = Color("9be21c")
+	_rot_label.outline_modulate = UIKit.C.dark
+	_rot_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_rot_label.no_depth_test = true
+	_rot_label.visible = false
+	add_child(_rot_label)
+	_build_hud()
+	exit_requested.connect(_mark_first_game)         # salir de la partida también cuenta como haber jugado la primera
+	get_tree().node_added.connect(_on_node_added)
+	_apply_text_scale()
+	_screens += 1
+	Sfx.set_layers(true)       # música por capas mientras se juega en Plus
+	_opps.chip_pressed.connect(_aim_pick)
+	session.updated.connect(_refresh)
+	session.emote.connect(_on_emote)
+	session.error.connect(func(msg: String) -> void: _toast(msg, true))
+	_refresh()
+
+
+## UX-13: sacudida de cámara; con «Reducir movimiento» no se hace.
+func _shake(amount: float) -> void:
+	if _reduced:
+		dbg_shakes_blocked += 1
+		return
+	world.shake(amount)
+
+
+## UX-13: destello a pantalla completa; con «Reducir movimiento» no se hace.
+func _flash(color: Color, alpha: float = 0.7, time: float = 0.45) -> void:
+	if _reduced:
+		dbg_flashes_blocked += 1
+		return
+	world.flash(color, alpha, time)
+
+
+## UX-13: cámara lenta breve; con «Reducir movimiento» no se toca el reloj del juego.
+func _slowmo(scale: float, seconds: float) -> void:
+	if _reduced:
+		return
+	dbg_slowmos += 1
+	Engine.time_scale = scale
+	await get_tree().create_timer(seconds, true, false, true).timeout
+	Engine.time_scale = 1.0
+
+
+## Reproduce un efecto y lo anota (la prueba comprueba qué suena en cada evento).
+func _snd(sound: String, volume_db: float = 0.0, pitch_var: float = 0.05) -> void:
+	_sfx_log.append(sound)
+	if _sfx_log.size() > 60:
+		_sfx_log.pop_front()
+	Sfx.play(sound, volume_db, pitch_var)
+
+
+## Prueba: sonidos pedidos desde que se vació el registro.
+func debug_stage() -> PlayStage:
+	return _stage
+
+
+func debug_fx() -> PlusVfx:
+	return _fx
+
+
+func debug_ambient() -> PlusAmbient:
+	return _ambient
+
+
+func debug_hud_root() -> Control:
+	return _hud_root
+
+
+func debug_chips_clipped() -> Array:
+	return _opps.debug_clipped()
+
+
+func debug_tips_seen() -> Dictionary:
+	return _tips_seen
+
+
+## Tipos de la mano de izquierda a derecha, tal como se ven en el abanico.
+func debug_hand_order() -> Array:
+	var items: Array = []
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		items.append({"id": id, "type": n.type, "x": (n.get_meta("slot") as Vector3).x if n.has_meta("slot") else 0.0})
+	items.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.x < b.x)
+	return items
+
+
+## id -> texto de la marca de pareja/trío que se ve en la carta ("" = sin marca o no visible).
+func debug_hand_mark_texts() -> Dictionary:
+	var out := {}
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		out[id] = n.mark_text() if n.mark_visible() else ""
+	return out
+
+
+func debug_aura() -> DeckAura:
+	return _aura
+
+
+func debug_mood() -> AvatarMood:
+	return _mood
+
+
+func debug_avatar(id: String) -> Sprite3D:
+	return _seats[id].avatar if _seats.has(id) else null
+
+
+func debug_deck_models() -> int:
+	return _deck_cards.size()
+
+
+## Altura de la carta de arriba del mazo sobre la mesa.
+func debug_deck_height() -> float:
+	return _deck_cards.back().position.y - DECK_POS.y if not _deck_cards.is_empty() else 0.0
+
+
+## Estado de las cartas de la mano: id -> {edge, dim, type, drawing}.
+func debug_hand_marks() -> Dictionary:
+	var out := {}
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		out[id] = {"edge": n.has_edge(), "dim": n.dim_amount(), "type": n.type, "drawing": n.has_meta("drawing"), "body": n.is_body_visible()}
+	return out
+
+
+func debug_hand_card(id: String) -> Card3D:
+	return _hand.get(id)
+
+
+func debug_draw_anim_pending() -> bool:
+	return _draw_anim
+
+
+func debug_grave(id: String) -> SeatGrave:
+	return _seats[id].grave if _seats.has(id) else null
+
+
+func debug_sounds(clear: bool = false) -> Array[String]:
+	var out := _sfx_log.duplicate()
+	if clear:
+		_sfx_log.clear()
+	return out
+
+
+func _process(delta: float) -> void:
+	_time += delta
+	_hand_root.position.y = 0.0 if _reduced else sin(_time * 1.4) * 0.006
+	if _drop_ring.visible:
+		var pulse := 0.5 + 0.5 * sin(_time * 7.0)
+		_drop_mat.albedo_color = Color(0.71, 0.95, 0.23, 0.55 + 0.35 * pulse) if _carry_over else Color(1, 1, 1, 0.18 + 0.12 * pulse)
+	_mood.tick(delta)
+	for id: String in _seats:
+		var av: Sprite3D = _seats[id].avatar
+		var is_cur: bool = not _v.is_empty() and _v.cur == id
+		var base := 1.0 + (0.06 * sin(_time * 5.0) if is_cur else 0.0)
+		var gr: SeatGrave = _seats[id].grave
+		var m := _mood.sample(id) if gr.state != "dead" else AvatarMood.NEUTRAL
+		av.scale = Vector3(base * m.sx, base * m.sy, base)
+		if gr.state != "dead" and gr.busy == 0:
+			av.position = gr.home + Vector3(m.dx, m.dy, 0.0)      # V-08: la pose se suma a la posición de siempre
+	_place_strip()
+	var now := session.now()
+	_tick_emotes(now)
+	_fit_turn_label()
+	_tick_turn(now)
+	_pulse_rot()
+	for t: Array in _timers:
+		if is_instance_valid(t[0]):
+			t[0].value = clampf(float(t[1] - now) / float(maxi(1, t[2])), 0.0, 1.0) * 100.0
+
+
+## Fichas de rivales construidas hasta ahora (prueba: no cambia al seleccionar cartas).
+func debug_chip_builds() -> int:
+	return _opps.debug_chip_builds()
+
+
+## Porcentaje y tramo del medidor de riesgo: {pct, tier, name}.
+func debug_risk() -> Dictionary:
+	return _risk.debug_risk()
+
+
+## Resumen de lo que hay en pantalla (para las capturas de depuración).
+func debug_state() -> String:
+	return "%s | ventana=%s | botones=%d | sel=%d" % [_status.text.replace("\n", " ").left(60), _modal_title, _buttons.get_child_count(), _sel.size()]
+
+
+## Para la prueba automática de toques: carta de la mano que se puede jugar sola (sin elegir objetivo), o null.
+func debug_playable_card() -> Card3D:
+	for c: Dictionary in _v.hand:
+		if _v.playable.get(c.id) is int or _v.playable.get(c.id) is float:
+			if c.type != "nope":
+				return _hand.get(c.id)
+	return null
+
+
+## Para la prueba automática: dos cartas de la mano, la primera y la última del abanico.
+func debug_hand_ends() -> Array:
+	var hand := _sorted_hand()
+	return [] if hand.size() < 2 else [_hand[hand[0].id], _hand[hand[-1].id]]
+
+
+func debug_zoom_visible() -> bool:
+	return _zoom.visible
+
+
+func debug_carry() -> String:
+	return "%s sobre la zona=%s" % [_carry, str(_carry_over)]
+
+
+func debug_selection() -> Array:
+	return _sel.duplicate()
+
+
+func debug_hover() -> String:
+	return _hover
+
+
+func debug_deck_card() -> Card3D:
+	return _deck_cards.back() if _deck_cards.size() > 0 else null
+
+
+func debug_can_draw() -> bool:
+	return not _v.is_empty() and _my_turn() and _idle()
+
+
+# ================================================================ sincronización con la partida
+
+func _refresh() -> void:
+	_v = session.view()
+	var ids: Array = _v.hand.map(func(c: Dictionary) -> String: return c.id)
+	for id: String in _sel.duplicate():
+		if not ids.has(id):
+			_sel.erase(id)
+	if _give_sel != "" and not ids.has(_give_sel):
+		_give_sel = ""
+	if _modal.get("type", "") in ["target", "named"] and _sel.is_empty():
+		_modal = {}
+	if _aim_kind != "" and not _aim_still_valid():
+		_exit_aim(false)
+	if _modal.get("type", "") in ["discard", "memory"] and (_v.over != null or (_v.prompt != null and _v.prompt.mine)):
+		_modal = {}       # una decisión propia o el final de la partida pasan por delante de la lista
+	for e: Dictionary in _v.events:
+		if e.seq > _seq:
+			_track_life(e)        # quién murió de qué y quién revivió, antes de dibujar los asientos
+	_sync_seats()
+	_process_events()
+	_anchor_turn()
+	_sync_deck()
+	_sync_rot()
+	_sync_hand()
+	_sync_float()
+	_sync_discard()
+	_sync_dir()
+	_fx_prompt_check()
+	for f: Callable in _post_fx:
+		f.call()
+	_post_fx.clear()
+	var pr0: Variant = _v.prompt
+	var alter_now: bool = pr0 != null and pr0.mine and pr0.type == "alter"
+	if alter_now and not _alter_live:
+		_snd("alter")          # se abre Alterar el Futuro
+	_alter_live = alter_now
+	_update_hud()
+	_sync_music()
+	_check_auto_pass()
+
+
+func _me() -> Dictionary:
+	return _player(_v.you)
+
+
+func _player(id: Variant) -> Dictionary:
+	for p: Dictionary in _v.players:
+		if p.id == id:
+			return p
+	return {}
+
+
+func _pname(id: Variant) -> String:
+	return "Tú" if id == _v.you else _player(id).get("name", "?")
+
+
+## Nombre como complemento: "a ti" / "a Bigotes".
+func _to_name(id: Variant) -> String:
+	return "ti" if id == _v.you else _player(id).get("name", "?")
+
+
+func _my_turn() -> bool:
+	return _v.cur == _v.you and _me().alive
+
+
+func _idle() -> bool:
+	return _v.prompt == null and _v.stack.is_empty() and _v.over == null
+
+
+func _deck_top() -> Vector3:
+	return DECK_POS + Vector3(0, 0.03 + _deck_cards.size() * _deck_step, 0)
+
+
+## Punto de donde sale una carta robada del FONDO: de debajo del mazo, asomando por un lado.
+func _deck_bottom_out() -> Vector3:
+	return DECK_POS + Vector3(0.1, 0.004, 0.07)
+
+
+func _sync_deck() -> void:
+	var want := clampi(_v.draw, 0, 14)
+	while _deck_cards.size() > want:
+		_deck_cards.pop_back().queue_free()
+	while _deck_cards.size() < want:
+		var c := Card3D.new().setup("back", false)
+		c.position = DECK_POS + Vector3(0, 0.01 + _deck_cards.size() * _deck_step, 0)
+		c.rotation_degrees.y = randf_range(-3.0, 3.0)
+		c.tapped.connect(_on_deck_tapped)
+		add_child(c)
+		_deck_cards.append(c)
+	_fit_deck_height()
+	_deck_label.text = str(_v.draw)
+	_deck_label.position = _deck_top() + Vector3(0, 0.3, 0)
+	_deck_label.visible = _v.draw > 0
+
+
+## V-05: hay como mucho 14 modelos, pero la altura de la pila crece con las cartas reales; el hueco entre modelos se rellena.
+func _fit_deck_height() -> void:
+	var step := DeckAura.step_for(int(_v.draw), _deck_cards.size())
+	if not is_equal_approx(step, _deck_step):
+		_deck_step = step
+		_aura.cancel_tremble()
+		for i in _deck_cards.size():
+			_deck_cards[i].position.y = DECK_POS.y + 0.01 + i * _deck_step
+	var gap := _deck_step - DeckAura.STEP_BASE
+	if gap > 0.0004 and not _deck_cards.is_empty():
+		if _deck_body == null:
+			_deck_body = MeshInstance3D.new()
+			_deck_body.mesh = BoxMesh.new()
+			var m := StandardMaterial3D.new()
+			m.albedo_color = Color(0.86, 0.83, 0.74)
+			m.roughness = 0.9
+			_deck_body.material_override = m
+			add_child(_deck_body)
+		var h := _deck_step * (_deck_cards.size() - 1)
+		(_deck_body.mesh as BoxMesh).size = Vector3(0.6, maxf(0.002, h), 0.86)
+		_deck_body.position = DECK_POS + Vector3(0, 0.01 + h / 2.0, 0)
+		_deck_body.visible = true
+	elif _deck_body != null:
+		_deck_body.visible = false
+
+
+# ---------------------------------------------------------------- tiempo de turno (UX-07)
+
+## Fija el fin del turno a partir de la vista (solo en `_refresh`: las demás redibujadas no mueven el reloj).
+func _anchor_turn() -> void:
+	var tn: Variant = _v.get("turn")
+	if tn == null or _v.over != null:
+		_turn_total = 0
+		return
+	var cur: String = _v.cur
+	if cur != _turn_player:
+		_turn_player = cur
+		_alarm_done = false
+		_tick_sec = -1
+	_turn_total = maxi(1, int(tn.total))
+	_turn_end = session.now() + int(tn.remain)
+
+
+## Cada cuadro: avanza la barra, parpadea en rojo en los últimos 10 s y, si el turno es mío, tic cada segundo y alarma al entrar.
+func _tick_turn(now: int) -> void:
+	if _turn_bar == null:
+		return
+	if _turn_total <= 0:
+		_turn_bar.visible = false
+		if _turn_blink != -1:
+			_turn_blink = -1
+			_opps.set_turn("", 0.0)
+			_paint_turn_panel(0)
+		return
+	var remain := _turn_end - now
+	var frac := clampf(float(remain) / float(_turn_total), 0.0, 1.0)
+	_turn_bar.visible = true
+	_turn_bar.value = frac * 100.0
+	var red := 0
+	if remain <= 10000:
+		red = 1 if int(_time * 4.0) % 2 == 0 else 2
+		if _my_turn() and remain > 0:
+			if not _alarm_done:
+				_alarm_done = true
+				dbg_alarms += 1
+				_snd("alarm", -2.0, 0.0)
+				PlusSettings.vibrate(300)
+			var sec := ceili(remain / 1000.0)
+			if sec != _tick_sec:
+				_tick_sec = sec
+				dbg_ticks += 1
+				_snd("tick", -3.0, 0.0)
+	elif remain > 10500:
+		_alarm_done = false
+	_opps.set_turn("" if _my_turn() else str(_v.cur), frac, red)
+	if red != _turn_blink:
+		_turn_blink = red
+		_paint_turn_panel(red)
+
+
+## Colores de la barra y del panel de turno según el estado (0 normal, 1 rojo, 2 rojo apagado).
+func _paint_turn_panel(red: int) -> void:
+	var col: Color = UIKit.C.gold if red == 0 else (UIKit.C.red if red == 1 else Color("7a1020"))
+	_turn_bar.add_theme_stylebox_override("fill", UIKit.box(col, col, 7, 0, Vector2.ZERO))
+	if _v.is_empty():
+		return
+	var my := _my_turn()
+	var border: Color = UIKit.C.toxic if my else UIKit.C.line
+	if red == 1:
+		border = UIKit.C.red
+	_turn_panel.add_theme_stylebox_override("panel", UIKit.box(Color("4a1424") if red == 1 else UIKit.C.panel, border, 30, 5, Vector2(20, 8)))
+
+
+## Prueba: estado de la barra de turno.
+func debug_turn() -> Dictionary:
+	return {"visible": _turn_bar != null and _turn_bar.visible, "value": _turn_bar.value if _turn_bar != null else 0.0,
+		"red": _turn_blink, "total": _turn_total, "remain": _turn_end - session.now(), "ticks": dbg_ticks, "alarms": dbg_alarms,
+		"chip": _opps.debug_turn_bar(str(_v.cur)) if not _v.is_empty() else {}}
+
+
+## Prueba: acerca el fin del turno (solo la pantalla; el motor no se toca).
+func debug_set_turn_remain(ms: int) -> void:
+	if _turn_total > 0:
+		_turn_end = session.now() + ms
+
+
+# ---------------------------------------------------------------- Gatito Putrefacto en el mazo
+
+## Carta boca arriba asomando de lado del mazo, a la altura aproximada, y el rótulo «☣ en N».
+func _sync_rot() -> void:
+	var d := int(_v.get("rotDepth", -1))
+	var n := int(_v.draw)
+	if d < 0 or d >= n or _v.over != null:
+		_rot_depth = -1
+		if is_instance_valid(_rot_card):
+			_rot_card.queue_free()
+		_rot_card = null
+		_rot_label.visible = false
+		return
+	_rot_depth = d
+	var vis := _deck_cards.size()
+	var idx := vis - 1 if n <= 1 else roundi(float(n - 1 - d) / float(n - 1) * float(maxi(0, vis - 1)))
+	var pos := DECK_POS + Vector3(0.2, 0.012 + idx * _deck_step, 0.02)
+	if not is_instance_valid(_rot_card):
+		_rot_card = Card3D.new().setup("rotten", true)
+		_rot_card.position = pos + Vector3(0.0, 0.25, 0.0)
+		_rot_card.rotation.y = 0.14
+		for ch in _rot_card.get_children():
+			if ch is Area3D:
+				(ch as Area3D).input_ray_pickable = false     # no tapa el toque al mazo (robar sigue siendo tocar el mazo)
+		add_child(_rot_card)
+		_rot_glow = MeshInstance3D.new()
+		var pm := PlaneMesh.new()
+		pm.size = Vector2(0.71, 0.96)
+		_rot_glow.mesh = pm
+		var gm := StandardMaterial3D.new()
+		gm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		gm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		gm.albedo_color = Color(0.55, 0.9, 0.1, 0.9)
+		_rot_glow.material_override = gm
+		_rot_glow.position = Vector3(0, -0.0035, 0)
+		_rot_glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_rot_card.add_child(_rot_glow)
+	_rot_card.fly_to(pos, Vector3(0, 0.14, 0), 0.35)
+	_rot_label.text = "☣ ¡ARRIBA!" if d == 0 else "☣ en %d" % d
+	_rot_label.position = _deck_top() + Vector3(0.42, 0.32, 0.05)
+	_rot_label.visible = true
+
+
+## El rótulo y el marco del Putrefacto pulsan en verde enfermizo; con `rotDepth == 0` pulsan deprisa.
+func _pulse_rot() -> void:
+	if _rot_depth < 0 or not _rot_label.visible:
+		return
+	var speed := 9.0 if _rot_depth == 0 else 3.0
+	var k := 0.5 + 0.5 * sin(_time * speed)
+	_rot_label.modulate = Color("9be21c").lerp(Color("d6ff6a"), k)
+	_rot_label.scale = Vector3.ONE * (1.0 + (0.14 * k if _rot_depth == 0 else 0.04 * k))
+	if is_instance_valid(_rot_glow):
+		(_rot_glow.material_override as StandardMaterial3D).albedo_color = Color(0.45 + 0.25 * k, 0.85, 0.1, 0.55 + 0.4 * k)
+
+
+## Texto de estado de la ficha de ese rival («Difícil · Agresivo», «su turno»…) (prueba).
+func debug_chip_state(id: String) -> String:
+	return _opps.debug_state_of(id)
+
+
+## Rótulo «MUERTE SÚBITA» visible junto al medidor (prueba).
+func debug_sudden() -> bool:
+	return _risk.debug_sudden()
+
+
+## Prueba: abre el menú de pausa.
+func debug_open_menu() -> void:
+	_open_menu()
+
+
+## Prueba: texto del primer consejo del tutorial pendiente ("" si ninguno).
+func debug_tip() -> String:
+	return _tip
+
+
+## Prueba: {depth, label, visible, card} del marcador del Putrefacto.
+func debug_rot() -> Dictionary:
+	return {"depth": _rot_depth, "label": _rot_label.text if _rot_label.visible else "", "card": is_instance_valid(_rot_card)}
+
+
+# ---------------------------------------------------------------- música por capas (A-01)
+
+## Intensidad según el riesgo de robar: tensión desde 30 %, percusión desde 50 % o mientras me atacan.
+func _sync_music() -> void:
+	if _v.is_empty():
+		return
+	var drums := 0.0
+	var tension := 0.0
+	if _v.over == null:
+		var pct := float(_risk.debug_risk().pct) / 100.0
+		var attacked_me: bool = _v.cur == _v.you and bool(_v.attacked) and int(_v.turnsLeft) > 1
+		if pct >= 0.30:
+			tension = 0.5 + 0.5 * clampf((pct - 0.30) / 0.4, 0.0, 1.0)
+		if pct >= 0.50 or attacked_me:
+			drums = 0.8
+	var key := "%.2f|%.2f" % [drums, tension]
+	if key != _music_key:
+		_music_key = key
+		Sfx.set_intensity(drums, tension)
+
+
+## Pone la tira del recordatorio justo debajo del mazo (sigue su proyección en pantalla).
+func _place_strip() -> void:
+	if _mem_strip == null or not _mem_strip.visible or world == null:
+		return
+	var screen := get_viewport().get_visible_rect().size
+	var p := world.camera.unproject_position(DECK_POS + Vector3(0, 0.03, 0.4))
+	var sz := _mem_strip.get_combined_minimum_size()
+	_mem_strip.size = sz
+	_mem_strip.position = Vector2(clampf(p.x - sz.x * 0.5, 12.0, maxf(12.0, screen.x - sz.x - 12.0)), p.y + 6.0)
+
+
+## Abre la ventana con todo lo que sé del mazo (tocar la tira).
+func _open_memory() -> void:
+	if _v.is_empty() or _v.over != null or (_v.prompt != null and _v.prompt.mine):
+		return
+	_exit_aim(false)
+	_modal = {"type": "memory"}
+	_update_hud()
+
+
+## Flecha de sentido (V-06): solo con un pack activo. Refleja `view.dir`.
+func _sync_dir() -> void:
+	var on: bool = not (_v.get("packs", []) as Array).is_empty() and _v.over == null
+	var first := not _dir_ring.visible
+	_dir_ring.visible = on
+	if on:
+		_dir_ring.set_dir(int(_v.get("dir", 1)), not first)
+	if _dir_label != null:
+		_dir_label.visible = on and int(_v.get("dir", 1)) < 0
+
+
+func _sorted_hand() -> Array:
+	var order: Array = CardDB.types_for(_v.get("packs", []))   # base + cartas de los packs de la partida
+	return HandOrder.sorted(_v.hand, order, PlusSettings.hand_order())
+
+
+func _sync_hand() -> void:
+	var hand := _sorted_hand()
+	_nop_lit = NopWindow.nop_ids(_v)
+	var ids := {}
+	var discard_ids := {}
+	for d: Dictionary in _v.discard:
+		discard_ids[d.id] = true
+	for c: Dictionary in hand:
+		ids[c.id] = true
+		if not _hand.has(c.id):
+			# Carta nueva: sale del mazo y vuela a la mano
+			var n := Card3D.new().setup(c.type, true)
+			n.card_id = c.id
+			n.tapped.connect(_on_card_tapped)
+			_hand_pivot.add_child(n)
+			n.global_position = _deck_bottom_out() if _bottom_draw else _deck_top()
+			n.scale = Vector3.ONE * 0.6
+			_hand[c.id] = n
+			if _draw_anim and _v.over == null and not _reduced:
+				# V-07: la carta vuela del mazo a la cámara, se voltea, se queda un instante y entra; la real espera oculta
+				# (sigue siendo tocable: solo se oculta el modelo)
+				n.set_body_visible(false)
+				n.set_meta("drawing", true)
+				_fx.draw_fly(c.type, n.global_position, n, _draw_done.bind(n))
+			_bottom_draw = false
+	for id: String in _hand.keys():
+		if ids.has(id):
+			continue
+		var n: Card3D = _hand[id]
+		_hand.erase(id)
+		n.set_glow(0.0)
+		n.set_edge(false)
+		n.set_dim(0.0)
+		n.set_mark("")
+		n.set_play_icon(false)
+		n.move_under(self)
+		if discard_ids.has(id):
+			_discard_nodes[id] = n          # la jugué: _sync_discard la lleva a la pila
+		else:
+			# La di o me la robaron: se va flotando
+			var tw := n.fly_to(n.position + Vector3(0, 1.2, -1.6), n.rotation, 0.45, 0.3)
+			tw.chain().tween_callback(n.queue_free)
+	# Abanico: pivote común bajo la mesa, cada carta un escalón más alta que la anterior
+	var count := hand.size()
+	# Con muchas cartas el abanico se abre un poco más y las cartas se encogen para que se puedan tocar
+	var total := clampf(33.0 + (count - 7) * 2.0, 33.0, 40.0)
+	var spread := minf(9.0, total / maxf(1.0, count - 1.0))
+	var hand_scale := clampf(HAND_SCALE - (count - 7) * 0.025, 0.72, HAND_SCALE)
+	var radius := 2.3
+	for i in count:
+		var n: Card3D = _hand[hand[i].id]
+		var ang := deg_to_rad((float(i) - (count - 1) / 2.0) * spread)
+		if hand[i].id == _carry:
+			n.set_meta("slot", Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius))
+			continue
+		var pos := Vector3(sin(ang) * radius, HAND_STEP * i, radius - cos(ang) * radius)
+		n.set_meta("slot", pos)       # lugar en el abanico (sin levantar), para saber qué carta está bajo el dedo
+		var selected := _sel.has(hand[i].id)
+		var hovered: bool = _hover == hand[i].id
+		if selected:
+			pos += Vector3(0, 0.1, -0.2)
+		elif hovered:
+			pos += Vector3(0, 0.07, -0.12)
+		var lit := _nop_lit.has(hand[i].id)
+		# Los Nop brillan (sin moverse del abanico: así no tapan a sus vecinas ni cambian dónde se toca)
+		n.set_glow(0.16 if selected else (0.1 if hovered else (0.5 if lit else 0.0)))
+		var grow := 1.08 if selected else (1.05 if hovered else 1.0)
+		n.fly_to(pos, Vector3(0, -ang, 0), 0.12 if hovered else 0.3, hand_scale * grow)
+	_draw_anim = false
+	_mark_hand_state()
+
+
+## V-07: las jugables ahora mismo llevan un borde luminoso suave y las demás se oscurecen un 15 %. Solo toca el borde y el
+## velo de cada carta: la selección, el arrastre, el brillo de los Nop y la puntería usan otros recursos.
+func _mark_hand_state() -> void:
+	var combo := _combo_ids()
+	var live: bool = _v.over == null and _me().get("alive", false)
+	var marks := HandOrder.marks(_v.hand)         # UX-11: «×2» / «×3» en la esquina
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		n.set_mark("×%d" % int(marks[id]) if marks.has(id) else "")
+		if n.has_meta("drawing"):
+			n.set_edge(false)
+			n.set_play_icon(false)
+			continue
+		var ok: bool = live and (_v.playable.has(id) or combo.has(id))
+		n.set_edge(ok)
+		n.set_play_icon(ok or (live and _nop_lit.has(id)))      # UX-13: el borde no es lo único que dice «jugable»
+		n.set_dim(0.0 if (ok or not live) else 0.15)
+
+
+## Cartas que forman una pareja o trío posible ahora mismo (el motor solo marca como jugables las sueltas).
+func _combo_ids() -> Dictionary:
+	var out := {}
+	if _v.over != null or not (_my_turn() and _idle()):
+		return out
+	if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive and p.count > 0):
+		return out
+	var by_type := {}
+	var clones: Array = []
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			clones.append(c.id)
+		elif CardDB.defs.get(c.type, {}).get("cat", false):
+			if not by_type.has(c.type):
+				by_type[c.type] = []
+			(by_type[c.type] as Array).append(c.id)
+	var any := false
+	for t: String in by_type:
+		if (by_type[t] as Array).size() + clones.size() >= 2:
+			any = true
+			for id: String in by_type[t]:
+				out[id] = true
+	if any:
+		for id: String in clones:
+			out[id] = true
+	return out
+
+
+func _draw_done(n: Card3D) -> void:
+	if not is_instance_valid(n):
+		return
+	n.remove_meta("drawing")
+	n.set_body_visible(true)
+	_mark_hand_state()
+
+
+## Calidad baja (la fija TableWorld.apply_quality bajando la escala 3D): efectos simplificados.
+func _low() -> bool:
+	return get_viewport().scaling_3d_scale < 0.99
+
+
+func _cards_in(s: Dictionary) -> int:
+	return 2 if s.eff == "combo2" else (3 if s.eff == "combo3" else 1)
+
+
+## V-02: cada jugada nueva de la pila se queda flotando con sus cartas; al salir de la pila vuelven al descarte.
+func _sync_float() -> void:
+	_stage.low = _low()
+	var quiet := _float_quiet
+	_float_quiet = false
+	var held := _stage.held_ids()
+	var disc: Array = _v.discard
+	var stack: Array = _v.stack
+	for i in range(stack.size() - 1, -1, -1):          # de la más reciente a la más antigua
+		var s: Dictionary = stack[i]
+		if _stage.has_play(int(s.id)):
+			continue
+		var found: Array = []
+		for j in range(disc.size() - 1, -1, -1):
+			var d: Dictionary = disc[j]
+			if d.by == s.by and d.type != "nope" and not held.has(d.id):
+				found.push_front(d)
+				if found.size() == _cards_in(s):
+					break
+		if found.is_empty():
+			continue
+		var nodes: Array = []
+		for d: Dictionary in found:
+			held[d.id] = true
+			nodes.append(_discard_node(d))
+		var col := Color(str(CardDB.defs.get(found[0].type, {}).get("color", "#ffffff")))
+		var tgt: Variant = _pos_of(s.target) if s.target != null else null
+		_stage.add_play(int(s.id), nodes, col, _pos_of(s.by), tgt, quiet)
+	_stage.sync(stack)
+
+
+func _discard_node(d: Dictionary) -> Card3D:
+	var n: Card3D = _discard_nodes.get(d.id)
+	if n == null:
+		# Jugada de un rival: la carta llega desde el otro lado de la mesa
+		n = Card3D.new().setup(d.type, true)
+		n.card_id = d.id
+		n.tapped.connect(_on_card_tapped)
+		add_child(n)
+		n.position = _pos_of(d.by) + Vector3(0, 0.25, 0)
+		n.scale = Vector3.ONE * 0.5
+		_discard_nodes[d.id] = n
+	return n
+
+
+func _sync_discard() -> void:
+	var all: Array = _v.discard
+	var last: Array = all.slice(maxi(0, all.size() - 3))
+	var held := _stage.held_ids()
+	var keep := held.duplicate()
+	var now := Time.get_ticks_msec()
+	for i in last.size():
+		var d: Dictionary = last[i]
+		keep[d.id] = true
+		var n := _discard_node(d)
+		if not n.has_meta("yaw"):
+			n.set_meta("yaw", deg_to_rad(randf_range(-16.0, 16.0)))
+			if d.type == "nope" and _stage.play_count() > 0 and not _discard_first:
+				# Un Nop vuela un instante hacia la carta que anula antes de caer al descarte
+				n.set_meta("hold_until", now + 560)
+				n.fly_to(_stage.nop_target(), Vector3(PlayStage.TILT, 0, 0), 0.28, 0.8)
+				get_tree().create_timer(0.6).timeout.connect(_sync_discard)
+		if held.has(d.id) or int(n.get_meta("hold_until", 0)) > now:
+			continue
+		n.fly_to(DISCARD_POS + Vector3(0, 0.012 + i * 0.008, 0), Vector3(0, n.get_meta("yaw"), 0), 0.34, HAND_SCALE)
+	_discard_first = false
+	for id: String in _discard_nodes.keys():
+		if not keep.has(id):
+			var gone: Card3D = _discard_nodes[id]
+			_discard_nodes.erase(id)
+			if gone.has_meta("rel"):
+				# Una carta de un combo que ya no cabe en la pila visible: cae y desaparece
+				gone.fly_to(DISCARD_POS + Vector3(0, 0.012, 0), Vector3(0, gone.get_meta("yaw", 0.0), 0), 0.3, HAND_SCALE).chain().tween_callback(gone.queue_free)
+			else:
+				gone.queue_free()
+
+
+func _avatar_index(id: Variant) -> int:
+	return int(_player(id).get("avatar", 0))
+
+
+## Lugar de un jugador sobre la mesa (mi mano o el asiento del rival).
+func _pos_of(id: Variant) -> Vector3:
+	if _seats.has(id):
+		return _seats[id].pos
+	return Vector3(0, 0.15, 1.35)
+
+
+## Rivales sentados al otro lado de la mesa: avatar, abanico de cartas boca abajo y luz de turno.
+func _sync_seats() -> void:
+	var n: int = _v.players.size()
+	var my_idx := 0
+	for i in n:
+		if _v.players[i].id == _v.you:
+			my_idx = i
+	for k in range(1, n):
+		var p: Dictionary = _v.players[(my_idx + k) % n]
+		if not _seats.has(p.id):
+			var a := 0.0 if n == 2 else deg_to_rad(lerpf(-36.0, 36.0, float(k - 1) / float(n - 2)))
+			var dir := Vector3(sin(a), 0, -cos(a))
+			var root := Node3D.new()
+			root.position = dir * 1.42 + Vector3(0, 0.02, 0.05)
+			root.rotation.y = -a + PI
+			add_child(root)
+			var av := Sprite3D.new()
+			av.texture = UIKit.avatar(_avatar_index(p.id))
+			av.pixel_size = 0.0017
+			av.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+			av.shaded = false
+			av.position = dir * 2.02 + Vector3(0, 0.36, 0.05)
+			add_child(av)
+			var gr := SeatGrave.new().setup(av, av.position, root.position - dir * 0.14, -a, str(p.name))
+			add_child(gr)
+			_seats[p.id] = {"pos": root.position, "root": root, "avatar": av, "cards": [], "grave": gr}
+		var seat: Dictionary = _seats[p.id]
+		# V-03: vivo, muerto (lápida y fantasma) o revivido (tinte verdoso). Los cambios con animación llegan por eventos.
+		var grave: SeatGrave = seat.grave
+		grave.low = _low()
+		grave.pname = str(p.name)
+		if not _change_pending(p.id):
+			grave.snap_to("dead" if not p.alive else ("revived" if _revived.get(p.id, false) else "alive"), _death_type.get(p.id, "exploding"))
+		var cards: Array = seat.cards
+		var want := mini(int(p.count), 7)
+		while cards.size() > want:
+			cards.pop_back().queue_free()
+		while cards.size() < want:
+			var c := Card3D.new().setup("back", false)
+			c.scale = Vector3.ONE * 0.4
+			seat.root.add_child(c)
+			cards.append(c)
+		for i in cards.size():
+			var off := float(i) - (cards.size() - 1) / 2.0
+			cards[i].position = Vector3(off * 0.1, 0.006 * i, absf(off) * 0.012)
+			cards[i].rotation.y = -off * 0.09
+	_turn_light.visible = _seats.has(_v.cur) and _v.over == null
+	if _turn_light.visible:
+		_turn_light.position = _seats[_v.cur].pos + Vector3(0, 0.45, 0)
+
+
+## Carta "fantasma" que vuela de un sitio a otro (robos, regalos, robar del mazo de un rival).
+func _ghost(from: Vector3, to: Vector3) -> void:
+	if _reduced:
+		return
+	var c := Card3D.new().setup("back", false)
+	add_child(c)
+	c.position = from
+	c.scale = Vector3.ONE * 0.45
+	var tw := c.fly_to(to, Vector3(0, randf_range(-0.4, 0.4), 0), 0.4, 0.42)
+	tw.chain().tween_callback(c.queue_free)
+
+
+# ---------------------------------------------------------------- efectos propios de cada carta (V-04) y expresiones (V-08)
+
+## Dónde está la lápida de un muerto (o su asiento si aún vive; mi sitio si soy yo).
+func _grave_or_seat(id: Variant) -> Vector3:
+	if _seats.has(id):
+		var gr: SeatGrave = _seats[id].grave
+		return gr.position if gr.state == "dead" or gr.has_tomb() else _seats[id].pos
+	return _pos_of(id)
+
+
+## Id del jugador cuyo nombre abre el texto («Bigotes juega…»); gana el nombre más largo.
+func _id_by_prefix(text: String) -> String:
+	var best := ""
+	var best_len := 0
+	for p: Dictionary in _v.players:
+		var nm := str(p.name)
+		if text.begins_with(nm + " ") and nm.length() > best_len:
+			best = str(p.id)
+			best_len = nm.length()
+	return best
+
+
+func _id_by_name(nm: String) -> String:
+	for p: Dictionary in _v.players:
+		if str(p.name) == nm:
+			return str(p.id)
+	return ""
+
+
+## Carta que me llega con un robo o un regalo (el evento `got` que sigue a `steal`/`gave`), para voltearla al llegar a mi mano.
+func _flip_face(e: Dictionary) -> String:
+	if e.has("card"):
+		return str(e.card)
+	for x: Dictionary in _v.events:
+		if x.seq > e.seq and x.type == "got" and x.has("card"):
+			return str(x.card)
+	return ""
+
+
+## Efectos que dependen de la carta que se juega (no de su resolución).
+func _fx_play(e: Dictionary) -> void:
+	var eff := str(e.get("eff", ""))
+	var by := str(e.player)
+	if (eff == "see_future" or eff == "alter_future") and by != _v.you:
+		_fx.future([])                       # quien no juega la carta ve dorsos
+	var scan: Array = []
+	var d: Array = _v.discard
+	for i in range(d.size() - 1, maxi(-1, d.size() - 4), -1):
+		if d[i].by == by and d[i].type == "clone":
+			scan.append(d[i].id)
+	if not scan.is_empty():
+		_post_fx.append(_scan_clones.bind(scan))
+
+
+func _scan_clones(ids: Array) -> void:
+	for id: String in ids:
+		var n: Card3D = _discard_nodes.get(id)
+		if n != null and not n.has_meta("scanned"):
+			n.set_meta("scanned", true)
+			_fx.clone_scan(n)
+
+
+## Efectos que salen de las líneas de texto públicas del motor (Ojo de Cuervo, Saltar, Entierro, Ladrón de Tumbas).
+func _fx_info(text: String) -> void:
+	if text.contains(" mira la mano de "):
+		var by := _id_by_prefix(text)
+		var tg := _id_by_name(text.get_slice(" mira la mano de ", 1).trim_suffix("."))
+		if by != "" and tg != "":
+			_fx.crow(_pos_of(by), _pos_of(tg))
+	elif text.contains(" termina su turno sin robar") or text.contains(" termina TODOS sus turnos"):
+		var by := _id_by_prefix(text)
+		if by == "":
+			return
+		_mood.trigger(by, "jump")          # V-08: salto del avatar
+		var to: Variant = _pos_of(_v.cur) if _v.cur != by else null
+		_fx.skip(_pos_of(by), to, text.contains("TODOS"))
+	elif text.contains(" entierra una carta"):
+		_fx.dig("bury")
+	elif text.contains(" entrega una carta al mazo"):
+		var by := _id_by_prefix(text)
+		if _seats.has(by):
+			_fx.grave_hands(_seats[by].grave)
+
+
+func _fx_haunt(by: String, target: String) -> void:
+	var tex: Texture2D = _seats[by].avatar.texture if _seats.has(by) else UIKit.avatar(_avatar_index(by))
+	var from := _pos_of(by) + Vector3(0, 0.4, 0)
+	if _seats.has(by) and (_seats[by].grave as SeatGrave).state == "dead":
+		from = (_seats[by].grave as SeatGrave).ghost_pos()
+	_fx.haunt(from, _pos_of(target), tex)
+	if target != _v.you:
+		_mood.trigger(target, "scare")
+
+
+## Decisiones que abren un efecto: Cava Más Hondo (la carta que se baja) y Alterar el Futuro (las 3 de arriba se levantan).
+func _fx_prompt_check() -> void:
+	var pr: Variant = _v.prompt
+	var key := "" if pr == null else "%s|%s" % [pr.type, str(pr.get("player", ""))]
+	var first := not _fx_prompt_ready
+	_fx_prompt_ready = true
+	if key == _fx_prompt:
+		return
+	_fx_prompt = key
+	if first or pr == null:
+		return
+	match str(pr.type):
+		"dig":
+			_fx.dig("dig")
+		"alter":
+			_fx.future((pr.cards as Array).duplicate() if pr.mine and pr.get("cards") != null else [])
+
+
+## Cortes del Ataque Dirigido: tres tajos paralelos que van del atacante al asiento del objetivo.
+func _slashes_at(by: Variant, target: Variant) -> void:
+	if _reduced:
+		return
+	var a := world.camera.unproject_position(_pos_of(by) + Vector3(0, 0.3, 0))
+	var b := world.camera.unproject_position(_pos_of(target) + Vector3(0, 0.3, 0))
+	var dist := a.distance_to(b)
+	if dist < 40.0:
+		_slashes()
+		return
+	var rot := (b - a).angle()
+	var perp := Vector2(-sin(rot), cos(rot))
+	for i in 3:
+		var r := ColorRect.new()
+		r.color = Color(1, 1, 1, 0.92)
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.size = Vector2(dist * 1.25 + 160.0, 16)
+		r.pivot_offset = Vector2(0, 8)
+		r.position = a + perp * (i - 1) * 70.0 - r.pivot_offset - (b - a).normalized() * 40.0
+		r.rotation = rot
+		r.scale = Vector2(0.0, 1.0)
+		_fx_root.add_child(r)
+		var t := r.create_tween()
+		t.tween_interval(0.05 * i)
+		t.tween_property(r, "scale:x", 1.0, 0.12)
+		t.tween_property(r, "modulate:a", 0.0, 0.28)
+		t.tween_callback(r.queue_free)
+
+
+# ---------------------------------------------------------------- efectos en secuencia
+
+## Encola un efecto que debe verse completo antes del siguiente (p. ej. revelar el explosivo y luego explotar).
+func _enqueue(step: Callable) -> void:
+	_fxq.append(step)
+	if not _fx_running:
+		_run_fx()
+
+
+func _run_fx() -> void:
+	_fx_running = true
+	while not _fxq.is_empty():
+		var step: Callable = _fxq.pop_front()
+		await step.call()
+	_fx_running = false
+	_update_hud()
+
+
+## El Gatito Explosivo sale del mazo, se voltea y queda temblando frente a la cámara.
+func _fx_reveal(type: String = "exploding") -> void:
+	if _ek:
+		_ek.queue_free()
+	_ek = Card3D.new().setup(type, false)
+	add_child(_ek)
+	_ek.position = _deck_top()
+	_ek.scale = Vector3.ONE * HAND_SCALE
+	if _bottom_draw:
+		_ek.position = _deck_bottom_out()
+		_bottom_draw = false
+	_snd("rotten" if type == "rotten" else "fuse")
+	_shake(0.3)
+	_ek.fly_to(Vector3(0, 0.95, 0.3), Vector3(deg_to_rad(54.0), 0, 0), 0.45, 1.3)
+	_ek.flip()
+	await get_tree().create_timer(0.95).timeout
+
+
+## Robo del FONDO del mazo: la carta asoma por debajo y sale de ahí (no de arriba).
+func _fx_bottom_draw(player_id: String) -> void:
+	if not _deck_cards.is_empty() and not _reduced:
+		var c := _deck_cards[0]
+		var home := c.position
+		var t := c.create_tween()
+		t.tween_property(c, "position", home + Vector3(0.1, 0, 0.07), 0.14)
+		t.tween_property(c, "position", home, 0.2)
+	if player_id == _v.you:
+		_bottom_draw = true
+	else:
+		_ghost(_deck_bottom_out(), _pos_of(player_id))
+
+
+func _fx_die(player_id: String, mine: bool, rotten: bool = false) -> void:
+	var at := _pos_of(player_id) + Vector3(0, 0.25, 0)
+	if _ek:
+		at = _ek.global_position
+		_ek.queue_free()
+		_ek = null
+	if rotten:
+		# Muerte por el Putrefacto: mismo estallido, pero verde enfermizo en vez de fuego
+		if _reduced:
+			_fx.calm("boom", at, Color(0.55, 0.9, 0.15))
+		else:
+			Vfx.burst(self, at, [Color(0.85, 1, 0.5, 0.5), Color(0.55, 0.9, 0.1, 0.45), Color(0.2, 0.55, 0.05, 0.35), Color(0.0, 0.15, 0.0, 0.0)], Color(0.7, 1.0, 0.25, 1), 1.3)
+			Vfx.shockwave(self, at, Color(0.55, 0.9, 0.15))
+		_snd("rotten", 2.0, 0.0)
+		_flash(Color("9be21c"), 0.7)
+	else:
+		if _reduced:
+			_fx.calm("boom", at, Color(1.0, 0.55, 0.2))
+		else:
+			Vfx.explosion(self, at)
+			Vfx.shockwave(self, at)
+		_snd("explosion", 2.0, 0.0)
+		_flash(Color("ffd9a0"), 0.8)
+	_shake(1.0)
+	PlusSettings.vibrate(350)
+	if rotten:
+		_popup("¡TE PUDRISTE!" if mine else "¡SE PUDRIÓ!", Color("9be21c"))
+	else:
+		_popup("¡EXPLOTASTE!" if mine else "¡BOOM!", UIKit.C.red)
+	# Un instante de cámara lenta para sentir el golpe (no con «Reducir movimiento»)
+	await _slowmo(0.35, 0.16)
+	await get_tree().create_timer(0.55).timeout
+	_snd("tomb")
+
+
+## V-03: tras la explosión, el avatar se hunde y sube la lápida con su carta de muerte y el fantasma.
+func _fx_tomb(player_id: String) -> void:
+	if _seats.has(player_id):
+		(_seats[player_id].grave as SeatGrave).play_die(_death_type.get(player_id, "exploding"))
+
+
+## V-03: la lápida se parte, sale una mano verde y el avatar vuelve con tinte verdoso.
+func _fx_grave_revive(player_id: String) -> void:
+	if _seats.has(player_id):
+		(_seats[player_id].grave as SeatGrave).play_revive()
+
+
+## ¿Hay un `died`/`revived` de este jugador por procesar con animación? (entonces no se encaja su asiento a la fuerza)
+func _change_pending(id: String) -> bool:
+	if _first_view:
+		return false
+	for e: Dictionary in _v.events:
+		if e.seq > _seq and ((e.type == "died" and e.player == id) or (e.type == "revived" and e.target == id)):
+			return true
+	return false
+
+
+## Quién ha muerto de qué y quién ha revivido, también al reproducir en silencio los eventos antiguos.
+func _track_life(e: Dictionary) -> void:
+	if e.type == "died":
+		_death_type[e.player] = "rotten" if str(e.get("text", "")).contains("pudri") else "exploding"
+	elif e.type == "revived":
+		_revived[e.target] = true
+
+
+func _fx_over(won: bool) -> void:
+	_snd("win" if won else "lose", 0.0, 0.0)
+	if won:
+		_confetti()
+
+
+func _exit_tree() -> void:
+	Engine.time_scale = 1.0
+	_screens = maxi(0, _screens - 1)
+	if _screens == 0:
+		Sfx.set_intensity(0.0, 0.0)
+		Sfx.set_layers(false)
+
+
+func _slashes() -> void:
+	if _reduced:
+		return
+	var size := get_viewport().get_visible_rect().size
+	for i in 3:
+		var r := ColorRect.new()
+		r.color = Color(1, 1, 1, 0.92)
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		r.size = Vector2(size.x * 1.7, 16)
+		r.position = Vector2(-size.x * 0.35, size.y * (0.34 + 0.09 * i))
+		r.rotation = -0.38
+		r.scale = Vector2(0.0, 1.0)
+		_fx_root.add_child(r)
+		var t := r.create_tween()
+		t.tween_interval(0.05 * i)
+		t.tween_property(r, "scale:x", 1.0, 0.1)
+		t.tween_property(r, "modulate:a", 0.0, 0.28)
+		t.tween_callback(r.queue_free)
+
+
+## Zombi que sale de la tierra; con «Reducir movimiento», solo una marca breve y quieta.
+func _rise(at: Vector3) -> void:
+	if _reduced:
+		_fx.calm("rise", at, Color(0.5, 0.9, 0.25))
+	else:
+		Vfx.zombie_rise(self, at)
+
+
+func _jiggle_deck() -> void:
+	if _reduced:
+		return
+	for c in _deck_cards:
+		var home := c.position
+		var t := c.create_tween()
+		for _k in 3:
+			t.tween_property(c, "position", home + Vector3(randf_range(-0.12, 0.12), 0, randf_range(-0.08, 0.08)), 0.07)
+		t.tween_property(c, "position", home, 0.08)
+
+
+func _confetti() -> void:
+	if _reduced:
+		return
+	var size := get_viewport().get_visible_rect().size
+	var p := CPUParticles2D.new()
+	p.position = Vector2(size.x / 2.0, -20)
+	p.amount = 140
+	p.lifetime = 3.2
+	p.emission_shape = CPUParticles2D.EMISSION_SHAPE_RECTANGLE
+	p.emission_rect_extents = Vector2(size.x / 2.0, 10)
+	p.direction = Vector2(0, 1)
+	p.spread = 30.0
+	p.gravity = Vector2(0, 520)
+	p.initial_velocity_min = 120.0
+	p.initial_velocity_max = 380.0
+	p.angular_velocity_min = -360.0
+	p.angular_velocity_max = 360.0
+	p.scale_amount_min = 10.0
+	p.scale_amount_max = 18.0
+	var g := Gradient.new()
+	g.offsets = PackedFloat32Array([0.0, 0.33, 0.66, 1.0])
+	g.colors = PackedColorArray([UIKit.C.toxic, UIKit.C.gold, Color("ff7fb0"), Color("49e0e6")])
+	p.color_initial_ramp = g
+	_fx_root.add_child(p)
+	var t := p.create_tween()
+	t.tween_interval(4.5)
+	t.tween_callback(func() -> void: p.emitting = false)
+	t.tween_interval(3.5)
+	t.tween_callback(p.queue_free)
+
+
+## ¿La partida acaba de empezar? (solo hay eventos de inicio: la primera vista debe mostrarlo normal.)
+func _is_fresh_start(events: Array) -> bool:
+	for e: Dictionary in events:
+		if not (e.type in ["start", "turn"]):
+			return false
+	return true
+
+
+func _process_events() -> void:
+	var me: String = _v.you
+	_memory.feed(_v)
+	# UX-15: al abrir la pantalla en una partida ya empezada, los eventos antiguos van al historial
+	# (y al recordatorio del futuro) pero no disparan sonidos, avisos ni ventanas.
+	var quiet := false
+	if _first_view:
+		_first_view = false
+		quiet = not _is_fresh_start(_v.events)
+	for e: Dictionary in _v.events:
+		if e.seq <= _seq:
+			continue
+		_seq = e.seq
+		if e.has("text") and not e.has("to"):
+			_log_last = e.text
+		_record(e)
+		_stats.feed(e, _v.players)
+		_track_life(e)
+		if quiet:
+			replay_skipped += 1
+			continue
+		match e.type:
+			"start":
+				_snd("shuffle")
+			"play":
+				_snd("card")
+				_last_eff = str(e.get("eff", ""))
+				_fx_play(e)
+			"draw":
+				_snd("draw", -3.0)
+				if e.player == me:
+					_draw_anim = true          # V-07: la carta que entra en la mano sale del mazo hacia la cámara
+				if e.get("bottom", false):
+					_snd("bottom")
+					_fx_bottom_draw(e.player)
+				elif e.player != me:
+					_ghost(_deck_top(), _pos_of(e.player))
+				# Robó justo al agotarse su turno: lo hizo el motor por tiempo
+				if _turn_total > 0 and e.player == _turn_player and session.now() >= _turn_end - 300:
+					_toast("Se acabó el tiempo: robas una carta." if e.player == me else "Se acabó el tiempo: %s roba." % _pname(e.player), true)
+					dbg_timeouts += 1
+			"turn":
+				if e.player != me and _player(e.player).get("alive", false):
+					_mood.trigger(str(e.player), "nod")      # V-08: cabeceo al empezar su turno
+				if e.player == me and _v.over == null:
+					_popup("¡TU TURNO!", UIKit.C.toxic)
+					_snd("turn")
+					PlusSettings.vibrate(40)
+			"nope":
+				_snd("yup" if e.yup else "nope")
+				_popup("¡SIP!" if e.yup else "¡NOP!", UIKit.C.toxic if e.yup else UIKit.C.red)
+				_flash(UIKit.C.toxic if e.yup else UIKit.C.red, 0.22, 0.3)
+			"attack":
+				_snd("targeted" if _last_eff == "targeted_attack" else "attack")
+				if _last_eff == "targeted_attack":
+					_fx.targeted(_pos_of(e.target))                 # V-04: los cortes miran al asiento del objetivo
+					_slashes_at(e.player, e.target)
+				else:
+					_slashes()
+				_shake(0.4)
+				if e.target == me:
+					_popup("¡TE ATACAN! ×%d" % int(e.n), UIKit.C.red)
+					_snd("alarm")
+					PlusSettings.vibrate(150)
+			"shuffle":
+				_snd("shuffle")
+				_fx.shuffle()                      # V-04: espiral del mazo (sustituye al temblor)
+			"reverse":
+				_snd("reverse")
+				_fx.reverse(int(e.get("dir", 1)))
+				if not _reduced:
+					_dir_ring.kick()
+				_flash(Color("49e0e6"), 0.25, 0.4)
+				_shake(0.25)
+				_popup("¡MARCHA ATRÁS!", Color("49e0e6"))
+			"apocalypse":
+				_snd("apocalypse")
+				_flash(Color(0.85, 0.04, 0.04), 0.5, 2.0)      # V-04: el cielo se pone rojo 2 s
+				_shake(0.9)
+				PlusSettings.vibrate(200)
+				_fx.apocalypse(int(e.get("n", 3)))
+				_popup("¡APOCALIPSIS!", UIKit.C.red)
+				_toast(e.text, true)
+			"swap":
+				_snd("swap")
+				_fx.swirl(_grave_or_seat(e.target), _pos_of(e.player))       # V-04: dos remolinos de cartas que se cruzan
+				_flash(Color("8a5cff"), 0.2, 0.35)
+				_popup("¡TRUEQUE!", Color("c9a6ff"))
+				_known_hands.erase(e.player)      # lo visto con Ojo de Cuervo ya no vale
+				_known_hands.erase(e.target)
+			"haunt":
+				_snd("haunt")
+				# La carta descartada vuela de la víctima a la pila: lo hace _sync_discard (el descarte lleva `by` = víctima)
+				_rise(_pos_of(e.target) + Vector3(0, 0.2, 0))
+				_fx_haunt(str(e.player), str(e.target))
+				_flash(Color("8a5cff"), 0.2, 0.35)
+				if e.target == me:
+					_popup("¡TE ESPANTAN!", UIKit.C.red)
+					_toast(e.text, true)
+					PlusSettings.vibrate(120)
+				else:
+					_popup("¡ESPANTO!", Color("c9a6ff"))
+			"peek":
+				_known_hands[e.target] = {"cards": (e.cards as Array).duplicate(), "count": (e.cards as Array).size()}
+				_modal = {"type": "peek", "target": e.target, "cards": e.cards}
+			"buried":
+				_snd("bury")
+				_toast(e.text)
+			"info":
+				_fx_info(str(e.get("text", "")))
+				if str(e.get("text", "")).contains(" mira la mano de "):
+					_snd("crow")                # Ojo de Cuervo: lo oyen todos (lo ve solo quien juega)
+					if str(e.get("text", "")).ends_with("mira la mano de %s." % str(_me().get("name", "?"))):
+						_toast(e.text, true)      # a quien miran se le avisa
+			"steal":
+				_snd("steal")
+				_fx.steal(_pos_of(e.target), _pos_of(e.player), _flip_face(e) if e.player == me else "")
+				if e.target == me and e.has("card"):
+					_toast(e.text, true)
+			"gave":
+				_snd("steal", -4.0)
+				if not _player(e.target).get("alive", true):
+					_fx.feed(_pos_of(e.player), _grave_or_seat(e.target))      # V-04: Alimenta a los Muertos, en círculo hacia la lápida
+				else:
+					_fx.steal(_pos_of(e.player), _pos_of(e.target), _flip_face(e) if e.target == me else "")
+			"boom":
+				if e.player != me:
+					_mood.trigger(str(e.player), "scare")      # V-08: susto al revelarse un explosivo de otro
+				_rot_death = bool(e.get("rotten", false))
+				_enqueue(_fx_reveal.bind("rotten" if _rot_death else "exploding"))
+			"died":
+				_enqueue(_fx_die.bind(e.player, e.player == me, _rot_death))
+				_rot_death = false
+				if _seats.has(e.player):
+					(_seats[e.player].grave as SeatGrave).pending += 1
+					_enqueue(_fx_tomb.bind(e.player))
+			"rot_found":
+				_snd("rotten")
+				_popup("¡PUTREFACTO!", Color("9be21c"))
+				_flash(Color("9be21c"), 0.22, 0.4)
+				_shake(0.3)
+				PlusSettings.vibrate(60)
+			"rot_placed":
+				_snd("card")
+				_jiggle_deck()
+				_toast("☣ " + str(e.text))
+			"sudden":
+				if not _sudden_snd:
+					_sudden_snd = true
+					_snd("sudden")
+				_toast(str(e.text), true)
+			"zombie":
+				if e.player != me:
+					_mood.trigger(str(e.player), "cheer")      # V-08: celebra haberse salvado
+				_snd("zombie")
+				_rise(_ek.global_position if _ek else DISCARD_POS + Vector3(0, 0.15, 0))
+				_flash(UIKit.C.toxic, 0.14)
+				_shake(0.3)
+				_popup("¡ZOMBI!", UIKit.C.toxic)
+			"inserted":
+				if _ek:
+					# El explosivo vuelve boca abajo al mazo
+					var c := _ek
+					_ek = null
+					c.flip()
+					var tw := c.fly_to(_deck_top(), Vector3.ZERO, 0.45, HAND_SCALE)
+					tw.chain().tween_callback(c.queue_free)
+					_snd("card")
+			"revived":
+				_snd("revive")
+				_rise(_pos_of(e.target) + Vector3(0, 0.2, 0))
+				if _seats.has(e.target):
+					(_seats[e.target].grave as SeatGrave).pending += 1
+					_enqueue(_fx_grave_revive.bind(e.target))
+				if e.target == me:
+					_popup("¡REVIVISTE!", UIKit.C.toxic)
+			"future":
+				if not _alter_live:
+					_fx.future((e.cards as Array).duplicate())       # V-04: las 3 de arriba se levantan (las veo solo yo)
+				if _alter_live:
+					_toast("Nuevo orden: " + ", ".join(PackedStringArray((e.cards as Array).map(func(t: String) -> String: return CardDB.display_name(t)))) + ".")
+				else:
+					_modal = {"type": "future", "cards": e.cards}
+			"clair":
+				_modal = {"type": "clair", "positions": e.positions, "len": e.len}
+			"got", "lost":
+				_toast(e.text, e.type == "lost")
+			"over":
+				_enqueue(_fx_over.bind(e.winner == me))
+
+
+# ================================================================ entrada del jugador
+
+func _act(a: Dictionary) -> void:
+	var err := session.act(a)
+	if err != "":
+		_toast(err, true)
+	elif a.get("a", "") == "play":
+		_last_play = a.duplicate(true)
+
+
+func _on_deck_tapped(_c: Card3D) -> void:
+	if _aim_kind != "":
+		return          # eligiendo objetivo: el mazo no hace nada
+	if _my_turn() and _idle():
+		_sel.clear()
+		_act({"a": "draw"})
+
+
+# ---------------------------------------------------------------- arrastrar el dedo por la mano
+
+## Carta de la mano que está bajo un punto de la pantalla ("" si ninguna).
+func _hand_card_at(screen_pos: Vector2) -> String:
+	var cam := world.camera
+	var from := cam.project_ray_origin(screen_pos)
+	var q := PhysicsRayQueryParameters3D.create(from, from + cam.project_ray_normal(screen_pos) * 30.0)
+	q.collide_with_areas = true
+	q.collide_with_bodies = false
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return ""
+	var card := (hit.collider as Node).get_parent() as Card3D
+	if card == null or not _hand.has(card.card_id):
+		return ""
+	# El dedo está sobre la mano: se elige la carta cuyo lugar en el abanico quede más cerca en horizontal.
+	# (Si se usara solo lo que toca el rayo, la carta levantada taparía a sus vecinas y se saltarían cartas.)
+	var best := card.card_id
+	var best_d := INF
+	for id: String in _hand:
+		var n: Card3D = _hand[id]
+		if not n.has_meta("slot"):
+			continue
+		var sx := cam.unproject_position(_hand_pivot.to_global(n.get_meta("slot"))).x
+		var d := absf(sx - screen_pos.x)
+		if d < best_d:
+			best_d = d
+			best = id
+	return best
+
+
+func _set_hover(id: String) -> void:
+	if id == _hover:
+		return
+	_hover = id
+	if id != "":
+		hover_changes += 1
+		_snd("tap", -14.0, 0.15)
+		PlusSettings.vibrate(8)
+	_sync_hand()
+	_update_zoom()
+
+
+func _input(event: InputEvent) -> void:
+	if _v.is_empty() or _v.over != null or _modal_root.get_child_count() > 0:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			# Modo puntería: tocar un asiento (avatar o cartas) elige a ese jugador
+			if _aim_kind != "" and get_viewport().gui_get_hovered_control() == null:
+				var sid := _aim.seat_at(world.camera, event.position)
+				if sid != "":
+					_pressing = false
+					_dragging = false
+					get_viewport().set_input_as_handled()
+					_aim_pick(sid)
+					return
+			# Si el dedo empieza sobre un botón de la interfaz, no es un arrastre por la mano
+			_pressing = get_viewport().gui_get_hovered_control() == null
+			_dragging = false
+			_press_pos = event.position
+			_press_card = _hand_card_at(event.position) if _pressing else ""
+			_sel_before = _sel.duplicate()
+		elif _pressing and _carry != "":
+			_pressing = false
+			_dragging = false
+			_drop_carry(event.position)
+			_update_zoom()
+		elif _pressing:
+			_pressing = false
+			var target := _hover
+			var was_drag := _dragging
+			_dragging = false
+			_set_hover("")
+			# Soltar sobre otra carta distinta de la inicial la elige (la inicial ya se eligió al tocarla)
+			if was_drag and target != "" and target != _press_card and _hand.has(target):
+				_on_card_tapped(_hand[target])
+			_update_zoom()
+	elif event is InputEventMouseMotion and _pressing and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
+		if not _dragging and event.position.distance_to(_press_pos) >= DRAG_START_PX:
+			_dragging = true
+			_update_zoom()
+		if _carry != "":
+			_move_carry(event.position)
+		elif _dragging and event.position.y < _hand_top_y() - 30.0:
+			# El dedo salió de la mano hacia arriba: se lleva la carta (la que se tocó o la resaltada)
+			var id := _hover if _hover != "" else _press_card
+			if id != "" and _hand.has(id):
+				_start_carry(id, event.position)
+		elif _dragging:
+			_set_hover(_hand_card_at(event.position))
+
+
+## Altura en pantalla del borde superior de la mano.
+func _hand_top_y() -> float:
+	return world.camera.unproject_position(_hand_pivot.to_global(Vector3(0, 0.14, -0.2 - SIZE_Z * HAND_SCALE))).y
+
+
+## Punto de la mesa (a cierta altura) bajo el dedo.
+func _table_point(screen_pos: Vector2, height: float) -> Vector3:
+	var cam := world.camera
+	var from := cam.project_ray_origin(screen_pos)
+	var dir := cam.project_ray_normal(screen_pos)
+	if absf(dir.y) < 0.001:
+		return from
+	return from + dir * ((height - from.y) / dir.y)
+
+
+func _start_carry(id: String, screen_pos: Vector2) -> void:
+	if _aim_kind != "":
+		_exit_aim(false)
+	_carry = id
+	# Si la carta era parte de una pareja o trío ya elegidos, se lleva el combo; si no, solo esa carta
+	if _sel_before.has(id):
+		_sel = _sel_before.duplicate()
+	else:
+		_sel.clear()
+		_sel.append(id)
+	_hover = ""
+	var n: Card3D = _hand[id]
+	n.kill_motion()
+	n.set_glow(0.2)
+	_carry_prev = n.global_position
+	_drop_ring.visible = true
+	_snd("card", -4.0)
+	PlusSettings.vibrate(15)
+	_sync_hand()
+	_update_hud()          # el panel de abajo describe la carta que se lleva
+	_move_carry(screen_pos)
+
+
+func _move_carry(screen_pos: Vector2) -> void:
+	var n: Card3D = _hand.get(_carry)
+	if n == null:
+		_carry = ""
+		_drop_ring.visible = false
+		return
+	var p := _table_point(screen_pos, CARRY_HEIGHT)
+	var vel := p - _carry_prev
+	_carry_prev = p
+	n.global_position = n.global_position.lerp(p, 0.65)
+	# La carta se inclina hacia la cámara y se ladea un poco según hacia dónde se mueve
+	var tilt := clampf(-vel.x * 2.2, -0.35, 0.35)
+	n.global_rotation = Vector3(deg_to_rad(38.0), 0.0, tilt)
+	n.scale = Vector3.ONE * HAND_SCALE * 1.12
+	var on_table := Vector2(p.x - PLAY_ZONE_CENTER.x, p.z - PLAY_ZONE_CENTER.z).length() < PLAY_ZONE_RADIUS + 0.35
+	var over := on_table and screen_pos.y < _hand_top_y() - 30.0
+	if over != _carry_over:
+		_carry_over = over
+		if over:
+			PlusSettings.vibrate(10)
+
+
+## Soltar la carta: en el centro se juega; fuera, vuelve a la mano.
+func _drop_carry(screen_pos: Vector2 = Vector2(-1, -1)) -> void:
+	var id := _carry
+	var over := _carry_over
+	var need := _carry_need()
+	_carry = ""
+	_carry_over = false
+	_drop_ring.visible = false
+	if not _hand.has(id):
+		_sync_hand()
+		_update_hud()
+		return
+	# Soltada sobre un rival: si la jugada necesita objetivo y es válido, se juega contra él directamente
+	if need != "" and screen_pos.x >= 0.0:
+		var sid := _aim.seat_at(world.camera, screen_pos)
+		if sid != "":
+			var why := AimMode.reason(need, _player(sid), _v.you)
+			if why != "":
+				_toast(why, true)
+			else:
+				drops += 1
+				_play_selected(sid)
+			_sync_hand()
+			_update_hud()
+			return
+	if not over:
+		_sync_hand()
+		_update_hud()
+		return
+	drops += 1
+	var playable := false
+	if _sel.size() == 1:
+		playable = _v.playable.has(id)
+		if not playable:
+			var c := {}
+			for x: Dictionary in _v.hand:
+				if x.id == id:
+					c = x
+			_toast(_why_not(c), true)
+	else:
+		var cs := _combo_state()
+		playable = not cs.is_empty() and not cs.has("err")
+		if not playable:
+			_toast(cs.get("err", "Ese combo no se puede jugar ahora."), true)
+	if playable:
+		_play_selected()      # igual que tocar JUGAR (pide objetivo si hace falta)
+	_sync_hand()
+	_update_hud()
+
+
+func _on_card_tapped(card: Card3D) -> void:
+	# Tocar la pila de descarte abre la lista (no si se está llevando una carta ni con otra ventana abierta)
+	if _discard_nodes.get(card.card_id) == card:
+		if _carry == "" and not _dragging and _modal.is_empty() and _modal_root.get_child_count() == 0 and _v.over == null:
+			_open_discard()
+		return
+	if not _hand.has(card.card_id) or _v.over != null:
+		return
+	if _aim_kind != "":
+		_exit_aim(false)      # tocar otra carta de la mano cancela la puntería
+	var id := card.card_id
+	if _sel.has(id):
+		_sel.erase(id)
+	else:
+		var first: Card3D = _hand.get(_sel[0]) if _sel.size() > 0 else null
+		if first != null and _sel.size() < 3 and (card.type == first.type or card.type == "clone" or first.type == "clone"):
+			_sel.append(id)
+		else:
+			_sel.clear()
+			_sel.append(id)
+	_sync_hand()
+	_update_hud()
+
+
+func _sel_cards() -> Array:
+	var out: Array = []
+	for c: Dictionary in _v.hand:
+		if _sel.has(c.id):
+			out.append(c)
+	return out
+
+
+## Estado de la selección cuando son 2 o 3 cartas: {} si no aplica, {err} o {n, of}.
+func _combo_state() -> Dictionary:
+	var sel := _sel_cards()
+	if sel.size() < 2:
+		return {}
+	var real: Array = sel.filter(func(c: Dictionary) -> bool: return c.type != "clone")
+	if real.is_empty():
+		return {"err": "El Clon necesita acompañar a otra carta."}
+	for c: Dictionary in real:
+		if c.type != real[0].type:
+			return {"err": "Para un combo, las cartas deben ser iguales."}
+	if not _my_turn():
+		return {"err": "Los combos solo se juegan en tu turno."}
+	if _v.prompt != null or not _v.stack.is_empty():
+		return {"err": "Espera a que termine la jugada en curso."}
+	if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive and p.count > 0):
+		return {"err": "Nadie tiene cartas para robar."}
+	return {"n": sel.size(), "of": real[0].type}
+
+
+func _play_selected(target: String = "", named: String = "") -> void:
+	if _sel.is_empty():
+		return
+	if _sel.size() == 1:
+		var need: Variant = _v.playable.get(_sel[0])
+		if need == null:
+			return
+		if need is String and target == "":
+			_request_target(need)
+			return
+	else:
+		var cs := _combo_state()
+		if cs.is_empty() or cs.has("err"):
+			return
+		if target == "":
+			_request_target("living")
+			return
+		if cs.n == 3 and named == "":
+			_modal = {"type": "named", "target": target}
+			_update_hud()
+			return
+	var a := {"a": "play", "cards": _sel.duplicate()}
+	if target != "":
+		a["target"] = target
+	if named != "":
+		a["named"] = named
+	_sel.clear()
+	_modal = {}
+	_exit_aim(false)
+	_act(a)
+	_update_hud()
+
+
+# ---------------------------------------------------------------- modo puntería (UX-01)
+
+## La jugada necesita objetivo: modo puntería sobre la mesa, o la lista antigua si `aim_with_list`.
+func _request_target(kind: String) -> void:
+	if aim_with_list:
+		_modal = {"type": "target", "kind": kind}
+	else:
+		_aim_kind = kind
+		_aim_forced = false
+		_modal = {}
+		_snd("aim", -2.0)
+	_update_hud()
+
+
+## Tipo de objetivo de lo que se lleva en la mano ("" si no necesita ninguno).
+func _carry_need() -> String:
+	if _carry == "" or _sel.is_empty():
+		return ""
+	if _sel.size() == 1:
+		var need: Variant = _v.playable.get(_sel[0])
+		return need if need is String else ""
+	var cs := _combo_state()
+	return "living" if (not cs.is_empty() and not cs.has("err")) else ""
+
+
+## Tipo de objetivo cuyos asientos se resaltan: el de la puntería o el de la carta que se lleva.
+func _aim_vis_kind() -> String:
+	return _aim_kind if _aim_kind != "" else _carry_need()
+
+
+func _aim_still_valid() -> bool:
+	if _aim_forced:
+		return _v.over == null
+	if _v.over != null or _sel.is_empty():
+		return false
+	if _sel.size() == 1:
+		return _v.playable.get(_sel[0]) is String
+	var cs := _combo_state()
+	return not cs.is_empty() and not cs.has("err")
+
+
+## Sale del modo puntería sin jugar. `refresh`: redibuja la interfaz y restablece los asientos.
+func _exit_aim(refresh: bool = true) -> void:
+	if _aim_kind == "":
+		return
+	_aim_kind = ""
+	_aim_forced = false
+	_aim.set_kind("", _v, _seats)
+	if refresh:
+		_sync_seats()
+		_update_hud()
+
+
+## Se tocó a un jugador (asiento o ficha) en modo puntería: lo confirma o avisa por qué no vale.
+func _aim_pick(id: String) -> void:
+	if _aim_kind == "":
+		return
+	var why := AimMode.reason(_aim_kind, _player(id), _v.you)
+	if why != "":
+		_toast(why, true)
+		return
+	if _aim_forced:
+		_aim_debug_pick = id
+		_exit_aim()
+		return
+	_exit_aim(false)
+	_play_selected(id)
+
+
+func _aim_cancel() -> void:
+	_exit_aim()
+
+
+## Panel inferior del modo puntería: carta, instrucción, «Yo mismo» (si vale) y CANCELAR.
+func _build_aim_panel() -> void:
+	var panel := UIKit.panel(UIKit.C.cream, UIKit.C.toxic_dark, Vector2(24, 16))
+	var col := UIKit.vbox(8)
+	panel.add_child(col)
+	var title := "Elige un objetivo"
+	var cards := _sel_cards()
+	if cards.size() == 1:
+		title = CardDB.display_name(cards[0].type)
+	elif cards.size() > 1:
+		var cs := _combo_state()
+		title = ("Pareja" if cards.size() == 2 else "Trío") + ((" de " + CardDB.display_name(cs.of)) if cs.has("of") else "")
+	col.add_child(UIKit.label(title, 44, UIKit.C.dark, true))
+	col.add_child(UIKit.label(AimMode.prompt(_aim_kind), 36, Color("3a2f4a"), false, true))
+	var row := UIKit.hbox(14)
+	col.add_child(row)
+	if AimMode.self_valid(_aim_kind, _v):
+		_add_btn(row, "Yo mismo", "normal", func() -> void: _aim_pick(_v.you), 40)
+	var cancel := _add_btn(row, "CANCELAR", "danger", _aim_cancel, 40)
+	cancel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_info_slot.add_child(panel)
+
+
+# ================================================================ interfaz (HUD)
+
+func _build_hud() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 2
+	add_child(layer)
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	layer.add_child(root)
+	_hud_root = root
+
+	var top := MarginContainer.new()
+	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for side: String in ["left", "right"]:
+		top.add_theme_constant_override("margin_" + side, 24)
+	top.add_theme_constant_override("margin_top", 70)
+	root.add_child(top)
+	var tv := UIKit.vbox(12)
+	tv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top.add_child(tv)
+	var bar := UIKit.hbox(14)
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tv.add_child(bar)
+	var menu := UIKit.button("MENÚ", "normal", 34)
+	menu.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	menu.pressed.connect(_open_menu)
+	bar.add_child(menu)
+	# Distintivo del modo: así se sabe de un vistazo que esta es la pantalla de Plus
+	var badge := UIKit.panel(UIKit.C.toxic, UIKit.C.dark, Vector2(12, 4))
+	badge.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	badge.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var badge_label := UIKit.label("PLUS", 30, UIKit.C.dark, true)
+	badge_label.add_theme_constant_override("outline_size", 0)
+	badge.add_child(badge_label)
+	bar.add_child(badge)
+	# Sentido invertido: rótulo corto en la misma fila (sin añadir altura); con sentido normal no se ve
+	_dir_label = UIKit.label("↺ INVERTIDO", 30, UIKit.C.gold, true)
+	_dir_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dir_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_dir_label.visible = false
+	bar.add_child(_dir_label)
+	_turn_panel = UIKit.panel(UIKit.C.panel, UIKit.C.line, Vector2(20, 8))
+	_turn_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_turn_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_turn = UIKit.label("", 50, UIKit.C.ink, true)
+	_turn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_turn.clip_text = true            # la barra manda: el rótulo se encoge (ver _fit_turn_label) en vez de empujar los botones
+	_turn.custom_minimum_size = Vector2(0, 0)
+	var turn_col := UIKit.vbox(2)
+	turn_col.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	turn_col.add_child(_turn)
+	_turn_bar = UIKit.timer_bar()          # tiempo de turno (UX-07): solo con la regla `turn_ms`
+	_turn_bar.custom_minimum_size = Vector2(0, 14)
+	_turn_bar.visible = false
+	turn_col.add_child(_turn_bar)
+	_turn_panel.add_child(turn_col)
+	bar.add_child(_turn_panel)
+	# Reacciones (UX-08): botón con un globo dibujado, junto a HISTORIAL
+	_emote_btn = UIKit.button("", "normal", 34)
+	_emote_btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_emote_btn.custom_minimum_size = Vector2(104, 0)
+	_emote_btn.visible = _emotes_on
+	_emote_btn.pressed.connect(_toggle_emote_picker)
+	_emote_icon = EmoteIcon.new()
+	_emote_btn.add_child(_emote_icon)
+	bar.add_child(_emote_btn)
+	var hist := UIKit.button("HISTORIAL", "normal", 34)
+	hist.size_flags_horizontal = Control.SIZE_SHRINK_END
+	hist.pressed.connect(_open_history)
+	bar.add_child(hist)
+	_opps = RivalChips.new()
+	tv.add_child(_opps)
+	_risk = RiskMeter.new()
+	tv.add_child(_risk)
+	_toasts = UIKit.vbox(8)
+	_toasts.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tv.add_child(_toasts)
+
+	var bottom := MarginContainer.new()
+	bottom.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	bottom.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	bottom.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for side: String in ["left", "right"]:
+		bottom.add_theme_constant_override("margin_" + side, 24)
+	bottom.add_theme_constant_override("margin_bottom", 56)
+	root.add_child(bottom)
+	var bv := UIKit.vbox(14)
+	bv.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bottom.add_child(bv)
+	_me_bar = UIKit.hbox(16)
+	_me_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_me_bar.alignment = BoxContainer.ALIGNMENT_CENTER
+	bv.add_child(_me_bar)
+	_info_slot = UIKit.vbox(0)
+	_info_slot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bv.add_child(_info_slot)
+	_status = UIKit.label("", 44, UIKit.C.ink, false, true)
+	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	bv.add_child(_status)
+	_status_timer = UIKit.timer_bar()
+	bv.add_child(_status_timer)
+	_buttons = UIKit.hbox(16)
+	_buttons.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bv.add_child(_buttons)
+
+	# Recordatorio del futuro (UX-02): tira junto al mazo; solo su rectángulo recibe toques
+	_mem_strip = DeckMemoryStrip.new()
+	_mem_strip.tapped.connect(_open_memory)
+	root.add_child(_mem_strip)
+
+	# Carta seleccionada en grande. No intercepta toques: se puede seguir tocando la mano debajo.
+	_zoom = Control.new()
+	_zoom.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_zoom.visible = false
+	root.add_child(_zoom)
+	var shadow := ColorRect.new()
+	shadow.color = Color(0, 0, 0, 0.5)
+	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shadow.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shadow.offset_left = 14
+	shadow.offset_top = 18
+	shadow.offset_right = 14
+	shadow.offset_bottom = 18
+	_zoom.add_child(shadow)
+	_zoom_pic = TextureRect.new()
+	_zoom_pic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_zoom_pic.stretch_mode = TextureRect.STRETCH_SCALE
+	_zoom_pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_zoom_pic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_zoom.add_child(_zoom_pic)
+
+	_fx_root = Control.new()
+	_fx_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_fx_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_fx_root)
+	_emote_layer = Control.new()
+	_emote_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_emote_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_emote_layer)
+	_modal_root = Control.new()
+	_modal_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_modal_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(_modal_root)
+
+
+static func _clear(n: Node) -> void:
+	for c in n.get_children():
+		n.remove_child(c)
+		c.queue_free()
+
+
+func _add_btn(parent: Node, text: String, kind: String, fn: Callable, size: int = 46) -> Button:
+	var b := UIKit.button(text, kind, size)
+	b.pressed.connect(fn)
+	parent.add_child(b)
+	return b
+
+
+func _track(bar: ProgressBar, o: Dictionary) -> void:
+	_timers.append([bar, session.now() + int(o.remain), int(o.total)])
+
+
+func _update_hud() -> void:
+	var v := _v
+	var me := _me()
+	_timers.clear()
+	var my_turn := _my_turn()
+	var cur := _player(v.cur)
+	_turn.text = ("TU TURNO" if my_turn else "Turno de " + cur.get("name", "")) + (("  ×%d" % v.turnsLeft) if v.turnsLeft > 1 else "")
+	_turn.add_theme_color_override("font_color", UIKit.C.toxic if my_turn else UIKit.C.ink)
+	_paint_turn_panel(maxi(0, _turn_blink))
+
+	# Modo puntería: asientos y fichas resaltados (también mientras se lleva una carta que pide objetivo)
+	var vis := _aim_vis_kind()
+	_aim.set_kind(vis, v, _seats)
+	_opps.set_aim({} if vis == "" else _aim_valid_map(vis))
+	_opps.set_pickable(_aim_kind != "")
+	_opps.update(v, session.level_of, session.trait_of)
+	_risk.update(v)
+	_aura.low = _low()
+	_ambient.refresh(_low(), _reduced)
+	_aura.set_risk(int(_risk.debug_risk().pct))
+	_ambient.set_risk(int(_risk.debug_risk().pct))
+	_fx.low = _low()
+	_mem_strip.update(_memory.strip(v))
+
+	# Barra del jugador: solo donde sobra espacio bajo la mesa
+	_clear(_me_bar)
+	var screen := get_viewport().get_visible_rect().size
+	if screen.y / maxf(1.0, screen.x) >= 2.0 and _sel.is_empty() and not _tips_on():
+		var pic := UIKit.avatar_icon(_avatar_index(v.you), Vector2(110, 150))
+		pic.modulate = Color.WHITE if me.alive else Color(0.4, 0.4, 0.5)
+		_me_bar.add_child(pic)
+		var who := UIKit.vbox(0)
+		who.alignment = BoxContainer.ALIGNMENT_CENTER
+		who.add_child(UIKit.label(me.name, 46, UIKit.C.ink, true))
+		who.add_child(UIKit.label(("%d cartas en la mano" % me.count) if me.alive else "MUERTO · %d cartas" % me.count, 30, UIKit.C.dim if me.alive else UIKit.C.red))
+		_me_bar.add_child(who)
+
+	# Zona inferior: estado + botones
+	_clear(_buttons)
+	_clear(_info_slot)
+	_status_timer.visible = false
+	var t: Variant = v.stack[v.stack.size() - 1] if v.stack.size() > 0 else null
+	var pr: Variant = v.prompt
+	if v.over != null:
+		_status.text = ""
+	elif v.win != null and t != null:
+		var what: String
+		if t.eff == "combo2":
+			what = "una pareja de %s para robar a %s" % [CardDB.display_name(t.of), _to_name(t.target)]
+		elif t.eff == "combo3":
+			what = "un trío de %s y pide %s a %s" % [CardDB.display_name(t.of), CardDB.display_name(t.named), _to_name(t.target)]
+		else:
+			what = CardDB.display_name(t.eff) + ((" contra " + _to_name(t.target)) if t.target != null else "")
+		var verb := "juegas" if t.by == v.you else "juega"
+		var st := ""
+		if t.nopes > 0:
+			st = ("\nANULADA por %s" % _pname(t.last)) if t.nopes % 2 == 1 else "\n¡VUELVE A VALER!"
+		_status.text = "%s %s %s%s" % [_pname(t.by), verb, what, st]
+		_status_timer.visible = true
+		_track(_status_timer, v.win)
+		if NopWindow.can_respond(v):
+			_add_btn(_buttons, NopWindow.button_text(v), "danger", _play_nope)
+			_add_btn(_buttons, "Dejar pasar", "normal", func() -> void: _act({"a": "pass"}))
+	elif pr != null:
+		var who := _pname(pr.get("player"))
+		match pr.type:
+			"explode": _status.text = "Sacaste un Gatito Explosivo…" if pr.mine else "%s sacó un Gatito Explosivo…" % who
+			"zombie":
+				_status.text = "%s %s en el mazo…" % ["Escondes" if pr.mine else who + " esconde", "los Gatitos Explosivos" if pr.eks > 1 else "el Gatito Explosivo"]
+				if pr.watching:
+					_status.text += "\nEstás mirando (Clarividencia)"
+				else:
+					for c: Dictionary in v.hand:
+						if c.type == "clairvoyance" and v.playable.has(c.id):
+							var cid: String = c.id
+							_add_btn(_buttons, "Jugar Clarividencia", "primary", func() -> void: _act({"a": "play", "cards": [cid]}))
+							break
+			"give":
+				var names: Array = pr.waiting.map(func(id: String) -> String: return _to_name(id))
+				var title: String = "Favor" if pr.reason == "favor" else ("Alimenta a los Muertos" if pr.reason == "feed" else "Ladrón de Tumbas")
+				_status.text = "%s: esperando carta de %s…" % [title, ", ".join(PackedStringArray(names))]
+			"dig": _status.text = "Cavas más hondo…" if pr.mine else "%s cava más hondo…" % who
+			"alter": _status.text = "Reordenas el futuro…" if pr.mine else "%s reordena el futuro…" % who
+			"bury": _status.text = "Entierras una carta…" if pr.mine else "%s entierra una carta…" % who
+			"rot": _status.text = "Decides dónde dejar al Gatito Putrefacto…" if pr.mine else "%s decide dónde deja al Gatito Putrefacto…" % who
+		_status_timer.visible = true
+		_track(_status_timer, pr)
+	else:
+		if not me.alive:
+			_status.text = "Estás muerto. Aún puedes jugar Nop y cartas ⚡."
+		elif my_turn:
+			_status.text = "Juega cartas si quieres… y luego roba para terminar tu turno."
+		else:
+			_status.text = _log_last
+		if my_turn and _idle():
+			_add_btn(_buttons, "ROBAR CARTA", "primary", _draw_card, 54)
+
+	if _tips_on():
+		_build_tip()
+	_build_selection_info()
+	_build_modal()
+	_apply_text_scale()
+	if v.over != null:
+		_mark_first_game()
+	_update_zoom.call_deferred()
+
+
+## Muestra en grande, entre los rivales y la mano, la última carta seleccionada (no mientras se arrastra).
+func _update_zoom() -> void:
+	if not is_inside_tree():
+		return
+	var type := ""
+	# Solo con una carta elegida y el dedo quieto: mientras se arrastra (por la mano o al tablero) se oculta
+	var show_id: String = "" if (_dragging or _carry != "" or _aim_kind != "") else (_sel[-1] if _sel.size() > 0 else "")
+	if show_id != "" and _v.over == null and _modal_root.get_child_count() == 0:
+		for c: Dictionary in _v.hand:
+			if c.id == show_id:
+				type = c.type
+	if type == "":
+		_zoom.visible = false
+		_zoom_type = ""
+		return
+	var screen := get_viewport().get_visible_rect().size
+	# Espacio libre: debajo de las fichas de rivales y encima de la mano (según dónde cae en pantalla)
+	var top := _risk.get_global_rect().end.y + 18.0
+	var hand_edge := _hand_pivot.to_global(Vector3(0, 0.14, -0.2 - SIZE_Z * HAND_SCALE))
+	# unproject_position ya devuelve coordenadas de la interfaz (no de la ventana)
+	var bottom := world.camera.unproject_position(hand_edge).y - 18.0
+	var h := clampf(bottom - top, screen.y * 0.36, screen.y * 0.52)   # en pantallas cortas puede tapar un poco la mano
+	var w := h * 5.0 / 7.0
+	if w > screen.x * 0.74:
+		w = screen.x * 0.74
+		h = w * 7.0 / 5.0
+	_zoom.size = Vector2(w, h)
+	_zoom.position = Vector2((screen.x - w) / 2.0, top + maxf(0.0, (bottom - top - h) / 2.0))
+	_zoom.pivot_offset = _zoom.size / 2.0
+	_zoom.visible = true
+	if type != _zoom_type:
+		_zoom_type = type
+		_zoom_pic.texture = CardDB.texture(type)
+		_zoom.scale = Vector2(0.72, 0.72)
+		_zoom.modulate.a = 0.0
+		_zoom.rotation_degrees = -4.0
+		var t := _zoom.create_tween().set_parallel(true).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		t.tween_property(_zoom, "scale", Vector2.ONE, 0.2)
+		t.tween_property(_zoom, "rotation_degrees", 0.0, 0.2)
+		t.tween_property(_zoom, "modulate:a", 1.0, 0.12)
+
+
+## Por qué una carta (sola) no se puede jugar ahora.
+func _why_not(c: Dictionary) -> String:
+	if c.is_empty():
+		return "No se puede jugar ahora."
+	if CardDB.defs[c.type].cat:
+		return "Selecciona otra igual para jugar una pareja."
+	if c.type == "zombie":
+		return "Se usa sola cuando sacas un Gatito Explosivo."
+	if c.type == "nope":
+		return "Úsala cuando alguien juegue una carta."
+	if c.type == "clairvoyance":
+		return "Úsala cuando otro juegue un Gatito Zombi."
+	if c.type == "haunt":
+		if _me().alive:
+			return "Solo los muertos pueden espantar."
+		if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive and p.count > 0):
+			return "Nadie tiene cartas que espantar."
+		if not _idle():
+			return "Espera a que termine la jugada en curso."
+		return "No se puede espantar ahora."
+	if not _me().alive:
+		return "Estás muerto: solo Nop y cartas ⚡."
+	if _v.cur != _v.you:
+		return "Espera tu turno."
+	if c.type in ["attack_dead", "grave_robber", "feed_dead"] and _v.deadN == 0:
+		return "Necesita que haya jugadores muertos."
+	if not _idle():
+		return "Espera a que termine la jugada en curso."
+	match c.type:
+		"soul_swap":
+			if not _v.players.any(func(p: Dictionary) -> bool: return not p.alive and p.count > 0):
+				return "Necesita un jugador muerto con cartas."
+		"targeted_attack":
+			if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.alive):
+				return "No hay ningún rival vivo al que atacar."
+		"crow_eye":
+			if not _v.players.any(func(p: Dictionary) -> bool: return p.id != _v.you and p.count > 0):
+				return "Nadie más tiene cartas que mirar."
+		"alter_future", "bury", "draw_bottom":
+			if int(_v.draw) == 0:
+				return "El mazo está vacío."
+	return "No se puede jugar ahora."
+
+
+func _aim_valid_map(kind: String) -> Dictionary:
+	var out := {}
+	for p: Dictionary in _v.players:
+		if p.id != _v.you:
+			out[p.id] = AimMode.reason(kind, p, _v.you) == ""
+	return out
+
+
+func _build_selection_info() -> void:
+	if _aim_kind != "" and _v.over == null:
+		_build_aim_panel()
+		return
+	var cards := _sel_cards()
+	if cards.is_empty() or _v.over != null:
+		return
+	var panel := UIKit.panel(UIKit.C.cream, UIKit.C.dark, Vector2(24, 16))
+	var row := UIKit.hbox(16)
+	panel.add_child(row)
+	var txt := UIKit.vbox(2)
+	txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(txt)
+	var title := ""
+	var desc := ""
+	var can := false
+	var label := "JUGAR"
+	if cards.size() == 1:
+		var c: Dictionary = cards[0]
+		title = CardDB.display_name(c.type)
+		desc = CardDB.defs[c.type].short
+		can = _v.playable.has(c.id)
+		if not can:
+			desc += "\n→ " + _why_not(c)
+		if c.type == "clone":
+			var ch := CloneHint.describe(_v)
+			desc += "\n" + str(ch.text)
+	else:
+		var cs := _combo_state()
+		title = "Pareja" if cards.size() == 2 else "Trío"
+		if cs.has("err"):
+			desc = cs.err
+		elif not cs.is_empty():
+			title += " de " + CardDB.display_name(cs.of)
+			desc = "Roba una carta AL AZAR a un jugador vivo." if cs.n == 2 else "Nombra la carta que quieres: si la tiene, te la da."
+			can = true
+			label = "JUGAR PAREJA" if cs.n == 2 else "JUGAR TRÍO"
+	txt.add_child(UIKit.label(title, 44, UIKit.C.dark, false))
+	txt.add_child(UIKit.label(desc, 30, Color("3a2f4a"), false, true))
+	if can:
+		var b := _add_btn(row, label, "primary", func() -> void: _play_selected(), 44)
+		b.size_flags_horizontal = Control.SIZE_SHRINK_END
+		b.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_info_slot.add_child(panel)
+
+
+# ---------------------------------------------------------------- ventanas
+
+func _open_modal(title: String, title_color: Color = UIKit.C.toxic) -> VBoxContainer:
+	var dim := ColorRect.new()
+	dim.color = Color(0.03, 0.01, 0.08, 0.78)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_modal_root.add_child(dim)
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	for side: String in ["left", "right"]:
+		margin.add_theme_constant_override("margin_" + side, 40)
+	margin.add_theme_constant_override("margin_top", 120)
+	margin.add_theme_constant_override("margin_bottom", 80)
+	_modal_root.add_child(margin)
+	var center := VBoxContainer.new()
+	center.alignment = BoxContainer.ALIGNMENT_CENTER
+	margin.add_child(center)
+	_modal_title = title
+	var panel := UIKit.panel(UIKit.C.panel, UIKit.C.line, Vector2(36, 30))
+	center.add_child(panel)
+	var box := UIKit.vbox(20)
+	panel.add_child(box)
+	if title != "":
+		var tl := UIKit.label(title, 60, title_color, true, true)
+		tl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		box.add_child(tl)
+	return box
+
+
+func _text(box: Node, text: String, size: int = 34, color: Color = UIKit.C.ink) -> Label:
+	var l := UIKit.label(text, size, color, false, true)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(l)
+	return l
+
+
+func _centered(box: Node, child: Control) -> void:
+	var c := CenterContainer.new()
+	c.add_child(child)
+	box.add_child(c)
+
+
+func _player_buttons(box: Node, players: Array, fn: Callable) -> void:
+	for p: Dictionary in players:
+		var id: String = p.id
+		_add_btn(box, "%s  ·  %d cartas" % ["Yo mismo" if id == _v.you else p.name, p.count], "normal", func() -> void: fn.call(id))
+
+
+## Huella de una decisión propia con selector de mazo («zombie» / «bury»); "" si no es de ese tipo.
+func _picker_signature(pr: Variant) -> String:
+	if pr == null or not pr.mine or not (pr.type in ["zombie", "bury", "rot"]):
+		return ""
+	return "%s|%d|%s|%s|%s|%s" % [pr.type, int(_v.draw), str(pr.get("eks")), str(pr.get("revived")), str(pr.get("waiting")), str(pr.get("card"))]
+
+
+func _build_modal() -> void:
+	# Un selector de mazo no se reconstruye por avisos ajenos a la decisión: así no se pierde un arrastre en curso
+	var sig := _picker_signature(_v.prompt)
+	if sig != "" and sig == _picker_sig and is_instance_valid(_slot_picker) and _slot_picker.is_inside_tree() and _modal_root.get_child_count() > 0 and not _fx_running:
+		if is_instance_valid(_picker_bar):
+			_track(_picker_bar, _v.prompt)
+		return
+	_picker_sig = ""
+	var keep_scroll := _discard_list.scroll_value() if is_instance_valid(_discard_list) else 0   # la lista conserva su posición al reconstruirse
+	_clear(_modal_root)
+	_discard_list = null
+	_named_grid = null
+	_peek_grid = null
+	_arranger = null
+	_slot_picker = null
+	_slot_pickers = []
+	_modal_title = ""
+	var v := _v
+	if _fx_running and (v.over != null or (v.prompt != null and v.prompt.mine and v.prompt.type == "explode")):
+		return      # primero se ve la animación; _run_fx vuelve a llamar al terminar
+	if v.over != null:
+		var won: bool = v.over.winner == v.you
+		var box := _open_modal("¡GANASTE!" if won else "Ganó " + _pname(v.over.winner), UIKit.C.toxic if won else UIKit.C.gold)
+		_text(box, "Eres el último gatito con vida." if won else "Fue el último gatito con vida.")
+		box.add_child(_stats.build_table(v, session.scores()))
+		if not session.is_network():
+			_add_btn(box, "JUGAR OTRA VEZ", "primary", func() -> void: rematch_requested.emit(), 54)
+			_add_btn(box, "Volver al menú", "ghost", func() -> void: exit_requested.emit())
+		elif session.is_host():
+			_add_btn(box, "VOLVER A LA SALA", "primary", func() -> void: lobby_requested.emit(), 54)
+			_add_btn(box, "Cerrar la sala", "ghost", func() -> void: exit_requested.emit())
+		else:
+			_text(box, "Esperando a que el anfitrión abra la sala…", 30, UIKit.C.dim)
+			_add_btn(box, "Salir de la sala", "ghost", func() -> void: exit_requested.emit())
+		return
+	var pr: Variant = v.prompt
+	if pr == null or not pr.mine or pr.type != "alter":
+		_alter_order = []
+	if pr == null or not (pr.type in ["zombie", "bury", "rot"]):
+		_ins = [0, 0]
+	if pr != null and pr.mine:
+		_build_prompt_modal(pr)
+		_picker_sig = _picker_signature(pr)
+		return
+	if _modal.is_empty():
+		return
+	match _modal.type:
+		"target":
+			var dead: bool = str(_modal.kind).begins_with("dead")
+			var box := _open_modal("¿A qué muerto eliges?" if dead else "¿Contra quién?")
+			var list: Array = []
+			for p: Dictionary in v.players:
+				if AimMode.reason(_modal.kind, p, v.you) == "":
+					list.append(p)
+			_player_buttons(box, list, func(id: String) -> void: _play_selected(id))
+			_add_btn(box, "Cancelar", "ghost", _close_modal)
+		"named":
+			var box := _open_modal("¿Qué carta quieres?")
+			_text(box, "Si %s la tiene, te la da." % _pname(_modal.target))
+			var types: Array = v.get("deckTypes", CardDB.types_for(v.get("packs", [])))
+			types = types.filter(func(t: String) -> bool: return t != "exploding")
+			var target: String = _modal.target
+			var known: Array = []
+			var kh: Dictionary = _known_hands.get(target, {})
+			if not kh.is_empty() and int(kh.count) == int(_player(target).get("count", -1)):
+				for t: String in kh.cards:
+					if types.has(t) and not known.has(t):
+						known.append(t)        # lo que se vio con Ojo de Cuervo y sigue siendo cierto (UX-04)
+			_named_grid = CardPickGrid.new().setup(types, get_viewport().get_visible_rect().size.y * 0.5, known)
+			_named_grid.picked.connect(func(type: String) -> void: _play_selected(target, type))
+			box.add_child(_named_grid)
+			_add_btn(box, "Cancelar", "ghost", _close_modal)
+		"future":
+			var box := _open_modal("El futuro (solo tú lo ves)")
+			var row := UIKit.hbox(14)
+			row.alignment = BoxContainer.ALIGNMENT_CENTER
+			box.add_child(row)
+			for i in _modal.cards.size():
+				var col := UIKit.vbox(6)
+				var l := UIKit.label(["PRÓXIMA", "SEGUNDA", "TERCERA"][mini(i, 2)], 38, UIKit.C.gold, true)
+				l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				col.add_child(l)
+				col.add_child(UIKit.card_image(_modal.cards[i], 400))
+				row.add_child(col)
+			_text(box, "Las cartas siguen en el mismo orden en el mazo.", 28, UIKit.C.dim)
+			_add_btn(box, "Entendido", "primary", _close_modal)
+		"peek":
+			var box := _open_modal("Mano de %s" % _pname(_modal.target))
+			var n_seen: int = (_modal.cards as Array).size()
+			_text(box, "Solo tú lo ves. Tiene %d carta%s." % [n_seen, "" if n_seen == 1 else "s"], 30)
+			_peek_grid = CardPickGrid.new().setup(_modal.cards, get_viewport().get_visible_rect().size.y * 0.5)
+			box.add_child(_peek_grid)
+			_add_btn(box, "Entendido", "primary", _close_modal)
+		"clair":
+			var box := _open_modal("Clarividencia")
+			_text(box, "Viste dónde quedaron los explosivos (mazo de %d cartas):" % int(_modal.len))
+			for i in _modal.positions.size():
+				var p := int(_modal.positions[i])
+				_text(box, "Explosivo %s: %s" % [str(i + 1) if _modal.positions.size() > 1 else "", "arriba del todo" if p == 0 else "debajo de %d carta%s" % [p, "s" if p > 1 else ""]], 38, UIKit.C.gold)
+			_add_btn(box, "Entendido", "primary", _close_modal)
+		"memory":
+			var box := _open_modal("Lo que sabes del mazo", UIKit.C.gold)
+			DeckMemoryStrip.fill_window(box, _memory.known(v), int(v.draw))
+			_add_btn(box, "Cerrar", "primary", _close_modal)
+		"history":
+			var box := _open_modal("Historial")
+			var avatars := {}
+			for p: Dictionary in v.players:
+				avatars[p.id] = int(p.avatar)
+			var hl := HistoryList.new().setup(_history, _hist_mine, avatars, get_viewport().get_visible_rect().size.y * 0.5)
+			hl.filter_changed.connect(func(mine: bool) -> void:
+				_hist_mine = mine
+				_update_hud())
+			box.add_child(hl)
+			_add_btn(box, "Cerrar", "primary", _close_modal)
+		"discard":
+			var box := _open_modal("Descarte")
+			_text(box, "Las cartas jugadas, la más reciente arriba.", 28, UIKit.C.dim)
+			_discard_list = DiscardList.new().setup(v, get_viewport().get_visible_rect().size.y * 0.5, keep_scroll)
+			box.add_child(_discard_list)
+			_add_btn(box, "Cerrar", "primary", _close_modal)
+		"menu":
+			var box := _open_modal("Menú")
+			_add_btn(box, "Seguir jugando", "primary", _close_modal)
+			var info := UIKit.hbox(12)
+			box.add_child(info)
+			_add_btn(info, "Cómo jugar", "normal", func() -> void: InfoScreen.open(self, "rules"), 38)
+			_add_btn(info, "Cartas", "normal", func() -> void: InfoScreen.open(self, "cards", _v.get("packs", []), _v.get("rules", {})), 38)
+			var audio := UIKit.hbox(12)
+			box.add_child(audio)
+			_add_btn(audio, "Sonido: sí" if Sfx.sfx_on else "Sonido: no", "normal", _toggle_sfx, 34)
+			_add_btn(audio, "Música: sí" if Sfx.music_on else "Música: no", "normal", _toggle_music, 34)
+			_volume_row(box, "Efectos", Sfx.sfx_volume, func(x: float) -> void: Sfx.set_sfx_volume(x), true)
+			_volume_row(box, "Música", Sfx.music_volume, func(x: float) -> void: Sfx.set_music_volume(x), false)
+			var opts := UIKit.hbox(12)
+			box.add_child(opts)
+			_add_btn(opts, "Paso automático: sí" if _auto_pass else "Paso automático: no", "normal", _toggle_auto_pass, 34)
+			_add_btn(opts, "Reacciones: sí" if _emotes_on else "Reacciones: no", "normal", _toggle_emotes, 34)
+			var acc := UIKit.hbox(12)
+			box.add_child(acc)
+			_add_btn(acc, "Texto: grande" if _text_factor > 1.01 else "Texto: normal", "normal", _toggle_text, 34)
+			_add_btn(acc, "Vibración: sí" if PlusSettings.vibration_on() else "Vibración: no", "normal", _toggle_vibration, 34)
+			var acc2 := UIKit.hbox(12)
+			box.add_child(acc2)
+			_add_btn(acc2, "Reducir movimiento: sí" if _reduced else "Reducir movimiento: no", "normal", _toggle_reduced, 34)
+			_add_btn(acc2, "Mano: por uso" if PlusSettings.hand_order() == PlusSettings.HAND_USE else "Mano: por tipo", "normal", _toggle_hand_order, 34)
+			_add_btn(box, "Volver a ver los consejos", "normal", _reset_tips, 34)
+			_text(box, "Dejar pasar lo que no me afecta: no se te pide Nop ante jugadas ajenas que no van contra ti.", 24, UIKit.C.dim)
+			_text(box, active_rules_line(), 26, UIKit.C.gold)
+			_add_btn(box, "Salir de la partida", "danger", _ask_exit, 40)
+		"exit":
+			var box := _open_modal("¿Salir de la partida?")
+			_text(box, "Se perderá la partida en curso." if not session.is_network() else ("Eres el anfitrión: la partida termina para todos." if session.is_host() else "Podrás volver a entrar mientras la partida siga."))
+			_add_btn(box, "Seguir jugando", "primary", _close_modal)
+			_add_btn(box, "Salir al menú", "danger", func() -> void: exit_requested.emit())
+
+
+## Una línea con las reglas activas de la partida (cartas de pack y reglas opcionales), p. ej.
+## «La Cripta · Reglas: 30 s por turno · Gatito Putrefacto».
+func active_rules_line() -> String:
+	var parts: Array[String] = []
+	for pk: String in _v.get("packs", []):
+		parts.append(str(InfoScreen.PACK_TITLES.get(pk, pk)))
+	parts.append(MenuScreen.rules_summary(_v.get("rules", {})))
+	return " · ".join(PackedStringArray(parts))
+
+
+## Fila «Etiqueta + deslizador 0-100» de volumen. `tap`: suena un toque al soltar (para oír el nivel de los efectos).
+func _volume_row(box: Node, title: String, value: float, set_fn: Callable, tap: bool) -> void:
+	var row := UIKit.hbox(14)
+	box.add_child(row)
+	var l := UIKit.label(title, 32, UIKit.C.ink, true)
+	l.custom_minimum_size = Vector2(190, 0)
+	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(l)
+	var sl := UIKit.slider(100, roundi(value * 100.0))
+	sl.custom_minimum_size = Vector2(0, 64)
+	sl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	sl.value_changed.connect(func(x: float) -> void: set_fn.call(x / 100.0))
+	if tap:
+		sl.drag_ended.connect(func(_changed: bool) -> void: Sfx.play("tap"))
+	row.add_child(sl)
+	_vol_sliders[title] = sl
+
+
+## Prueba: deslizadores de volumen de la ventana de menú abierta (título -> HSlider).
+func debug_volume_sliders() -> Dictionary:
+	return _vol_sliders
+
+
+func _open_menu() -> void:
+	_exit_aim(false)
+	_modal = {"type": "menu"}
+	_update_hud()
+
+
+func _ask_exit() -> void:
+	_modal = {"type": "exit"}
+	_update_hud()
+
+
+func _toggle_sfx() -> void:
+	Sfx.set_sfx(not Sfx.sfx_on)
+	_update_hud()
+
+
+func _toggle_auto_pass() -> void:
+	_auto_pass = not _auto_pass
+	NopWindow.save_auto_pass(_auto_pass)
+	_update_hud()
+	_check_auto_pass()
+
+
+## Con «Paso automático» activo, envía «pasar» ante una jugada ajena que no me afecta (una vez por jugada).
+func _check_auto_pass() -> void:
+	if not _auto_pass or not NopWindow.should_auto_pass(_v):
+		return
+	var sig := NopWindow.signature(_v)
+	if sig == _auto_sig:
+		return
+	_auto_sig = sig
+	_auto_pass_send.call_deferred(sig)
+
+
+func _auto_pass_send(sig: String) -> void:
+	if _auto_pass and NopWindow.signature(_v) == sig and NopWindow.should_auto_pass(_v):
+		_act({"a": "pass"})
+
+
+## UX-13: tamaño del texto de la interfaz (normal / grande).
+func _toggle_text() -> void:
+	PlusSettings.set_text_large(not PlusSettings.text_large())
+	_text_factor = PlusSettings.text_factor()
+	_turn_fit_key = ""
+	_update_hud()
+	_fit_turn_label.call_deferred()
+
+
+func _toggle_vibration() -> void:
+	PlusSettings.set_vibration(not PlusSettings.vibration_on())
+	_update_hud()
+
+
+func _toggle_reduced() -> void:
+	_reduced = not PlusSettings.reduce_motion()
+	PlusSettings.set_reduce_motion(_reduced)
+	_fx.reduced = _reduced
+	_stage.reduced = _reduced
+	_aura.reduced = _reduced
+	_mood.reduced = _reduced
+	_dir_ring.reduced = _reduced
+	_ambient.refresh(_low(), _reduced)
+	_update_hud()
+
+
+## UX-11: orden de la mano (por tipo / por uso).
+func _toggle_hand_order() -> void:
+	PlusSettings.set_hand_order(PlusSettings.HAND_TYPE if PlusSettings.hand_order() == PlusSettings.HAND_USE else PlusSettings.HAND_USE)
+	_sync_hand()
+	_update_hud()
+
+
+## Escala el texto de toda la interfaz (salvo los rótulos grandes de aviso, los globos y el rótulo de turno, que se ajusta solo).
+func _apply_text_scale() -> void:
+	if _opps != null:
+		_opps.set_text_factor(_text_factor)
+	if _text_factor > 1.01:
+		_ever_scaled = true
+	if _ever_scaled and _hud_root != null and is_instance_valid(_hud_root):
+		PlusText.apply(_hud_root, _text_factor, [_fx_root, _emote_layer, _turn])
+
+
+func _on_node_added(n: Node) -> void:
+	if n is Control and _hud_root != null and is_instance_valid(_hud_root) and _hud_root.is_ancestor_of(n) \
+			and n != _turn and not _fx_root.is_ancestor_of(n) and not _emote_layer.is_ancestor_of(n):
+		PlusText.scale_one(n as Control, _text_factor)
+
+
+## Ajuste local «Reacciones»: en «no» se oculta el botón y no se ven las reacciones de nadie.
+func _toggle_emotes() -> void:
+	_emotes_on = not _emotes_on
+	EmoteSet.save_enabled(_emotes_on)
+	_emote_btn.visible = _emotes_on
+	if not _emotes_on:
+		_close_emote_picker()
+		for id: Variant in _emote_bubbles.keys():
+			if is_instance_valid(_emote_bubbles[id]):
+				_emote_bubbles[id].queue_free()
+		_emote_bubbles.clear()
+	_update_hud()
+
+
+# ---------------------------------------------------------------- reacciones rápidas (UX-08)
+
+func _toggle_emote_picker() -> void:
+	if is_instance_valid(_emote_picker):
+		_close_emote_picker()
+		return
+	if not _emotes_on or _v.is_empty() or _v.over != null or _modal_root.get_child_count() > 0 or session.now() < _emote_cd_end:
+		return
+	_exit_aim(false)
+	var screen := get_viewport().get_visible_rect().size
+	_emote_picker = EmotePicker.new().setup(_emote_btn.get_global_rect(), screen)
+	_emote_picker.chosen.connect(_send_emote)
+	_emote_picker.closed.connect(_close_emote_picker)
+	_hud_root.add_child(_emote_picker)
+	_hud_root.move_child(_emote_picker, _modal_root.get_index())
+
+
+func _close_emote_picker() -> void:
+	if is_instance_valid(_emote_picker):
+		_emote_picker.queue_free()
+	_emote_picker = null
+
+
+func _send_emote(index: int) -> void:
+	_close_emote_picker()
+	if session.now() < _emote_cd_end:
+		return
+	_emote_cd_end = session.now() + EmoteSet.COOLDOWN_MS
+	session.send_emote(index)
+
+
+## Llega una reacción (la mía también: la sala la devuelve a todos). Un globo por jugador: la nueva sustituye a la anterior.
+func _on_emote(id: String, index: int) -> void:
+	if not _emotes_on or _v.is_empty() or not EmoteSet.valid(index):
+		return
+	if id != _v.you and not _seats.has(id):
+		return
+	if _emote_bubbles.has(id) and is_instance_valid(_emote_bubbles[id]):
+		_emote_bubbles[id].queue_free()
+	var b := EmoteBubble.new().setup(id, _avatar_index(id), index, _seats.has(id))
+	_emote_layer.add_child(b)
+	_emote_bubbles[id] = b
+	b.place(_emote_anchor(id), get_viewport().get_visible_rect().size)
+	b.play()
+	dbg_emotes += 1
+	_snd("emote", -6.0, 0.03)
+
+
+## Dónde apunta la cola del globo: sobre el avatar 3D del rival, o sobre mi mano si soy yo.
+func _emote_anchor(id: String) -> Vector2:
+	var screen := get_viewport().get_visible_rect().size
+	if _seats.has(id):
+		# Los rivales están bajo las fichas de la barra: el globo cuelga justo debajo de su gato, con la cola hacia él
+		return world.camera.unproject_position((_seats[id].avatar as Node3D).global_position + Vector3(0, -0.18, 0))
+	return Vector2(screen.x * 0.5, _hand_top_y() + 40.0)
+
+
+## Ajusta el tamaño del rótulo de turno al hueco que dejan los botones de la barra (5 jugadores, nombre largo, sentido invertido...).
+func _fit_turn_label() -> void:
+	var avail := _turn_panel.size.x - 40.0
+	var key := "%s|%d" % [_turn.text, int(avail)]
+	if key == _turn_fit_key or avail < 40.0:
+		return
+	_turn_fit_key = key
+	var f: Font = UIKit.TITLE_FONT
+	var top := roundi(50.0 * _text_factor)
+	var need := f.get_string_size(_turn.text, HORIZONTAL_ALIGNMENT_LEFT, -1, top).x
+	var sz := clampi(int(float(top) * minf(1.0, avail / maxf(1.0, need))), 28, top)
+	_turn.add_theme_font_size_override("font_size", sz)
+
+
+func _tick_emotes(now: int) -> void:
+	var left := _emote_cd_end - now
+	var cd := left > 0
+	_emote_btn.disabled = cd
+	_emote_icon.set_cooldown(clampf(float(left) / float(EmoteSet.COOLDOWN_MS), 0.0, 1.0) if cd else 0.0, ceili(float(left) / 1000.0) if cd else 0)
+	if is_instance_valid(_emote_picker) and _modal_root.get_child_count() > 0:
+		_close_emote_picker()      # una ventana del juego tiene prioridad sobre el selector
+	if _emote_bubbles.is_empty():
+		return
+	var screen := get_viewport().get_visible_rect().size
+	for id: String in _emote_bubbles.keys():
+		var b: Variant = _emote_bubbles[id]
+		if not is_instance_valid(b) or (b as EmoteBubble).is_queued_for_deletion():
+			_emote_bubbles.erase(id)
+		else:
+			(b as EmoteBubble).place(_emote_anchor(id), screen)
+
+
+## Prueba: estado de las reacciones en pantalla.
+func debug_emotes() -> Dictionary:
+	var shown := {}
+	for id: String in _emote_bubbles:
+		var b: Variant = _emote_bubbles[id]
+		if is_instance_valid(b) and (b as EmoteBubble).shown():
+			shown[id] = {"word": EmoteSet.word(b.index), "rect": b.get_global_rect(), "index": b.index}
+	return {
+		"button": _emote_btn.visible, "enabled": _emotes_on, "cooling": _emote_icon.cooling(), "disabled": _emote_btn.disabled,
+		"picker": is_instance_valid(_emote_picker), "bubbles": shown, "received": dbg_emotes,
+	}
+
+
+func debug_emote_button() -> Button:
+	return _emote_btn
+
+
+func debug_emote_options() -> Array[Button]:
+	return _emote_picker.buttons if is_instance_valid(_emote_picker) else ([] as Array[Button])
+
+
+func _toggle_music() -> void:
+	Sfx.set_music(not Sfx.music_on)
+	_update_hud()
+
+
+# ---------------------------------------------------------------- tutorial
+
+## Elige el siguiente consejo que toca mostrar, si hay alguno pendiente para la situación actual.
+func _coach_pick() -> void:
+	if _tip != "" or _v.over != null:
+		return
+	var me := _me()
+	var others_turn: bool = _v.cur != _v.you
+	var alive := 0
+	for p: Dictionary in _v.players:
+		alive += 1 if p.alive else 0
+	var risk := 100.0 * (alive - 1) / maxi(1, int(_v.draw))
+	var mode := 2 if coach else _tip_mode
+	var checks := [
+		["aim", _aim_kind != ""],
+		["rot", int(_v.get("rotDepth", -1)) >= 0],
+		["intro", true],
+		["dead", not me.alive],
+		["nope", _v.win != null and _v.win.canNope and not _v.win.passed],
+		["window", _v.win != null and _v.stack.size() > 0 and _v.stack[-1].by != _v.you],
+		["hand", true],
+		["selected", _sel.size() > 0],
+		["turn", _my_turn() and _idle()],
+		["risk", _my_turn() and _idle() and risk >= 25.0],
+		["rivals", others_turn],
+		["future", not _memory.known(_v).is_empty()],
+		["discard", _v.discard.size() >= 3],
+	]
+	# Una carta de La Cripta la primera vez que llega a mi mano
+	for c: Dictionary in _sorted_hand():
+		if CRYPT_WHEN.has(c.type):
+			checks.append(["card_" + str(c.type), true])
+	for c: Array in checks:
+		if not c[1] or _tips_seen.has(c[0]):
+			continue
+		if mode >= 2 or (mode == 1 and (NEW_TIPS.has(c[0]) or str(c[0]).begins_with("card_"))):
+			_tip = c[0]
+			return
+
+
+func _dismiss_tip() -> void:
+	_tips_seen[_tip] = true
+	PlusSettings.save_tips_seen(_tips_seen)       # UX-14: no se repiten entre partidas
+	_tip = ""
+	_update_hud()
+
+
+## ¿Hay consejos activos? Tutorial, primera partida Plus o tras «Volver a ver los consejos».
+func _tips_on() -> bool:
+	return coach or _tip_mode > 0
+
+
+## Texto de un consejo: los de carta de La Cripta se componen con su `short` y una frase de cuándo conviene.
+func _tip_text(key: String) -> String:
+	if key.begins_with("card_"):
+		var t := key.trim_prefix("card_")
+		var d: Dictionary = CardDB.defs.get(t, {})
+		return "%s: %s %s" % [CardDB.display_name(t), str(d.get("short", "")), str(CRYPT_WHEN.get(t, ""))]
+	return str(TIPS.get(key, ""))
+
+
+## «Volver a ver los consejos»: borra los vistos (también del archivo) y vuelve a mostrarlos todos.
+func _reset_tips() -> void:
+	_tips_seen.clear()
+	PlusSettings.save_tips_seen({})
+	PlusSettings.set_first_game_done(false)
+	_tip = ""
+	_tip_mode = 2
+	_modal = {}
+	_update_hud()
+	_toast("Los consejos volverán a aparecer.")
+
+
+var _first_marked := false
+var _ever_scaled := false        # alguna vez hubo texto grande: solo entonces hay que repasar la interfaz al volver a normal
+
+
+func _mark_first_game() -> void:
+	if not _first_marked:
+		_first_marked = true
+		PlusSettings.set_first_game_done(true)
+
+
+func _build_tip() -> void:
+	_coach_pick()
+	if _tip == "":
+		return
+	var panel := UIKit.panel(Color("23401a"), UIKit.C.toxic, Vector2(24, 16))
+	var row := UIKit.hbox(16)
+	panel.add_child(row)
+	var txt := UIKit.label(_tip_text(_tip), 32, Color("ecffd0"), false, true)
+	txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(txt)
+	var ok := _add_btn(row, "Entendido", "primary", _dismiss_tip, 34)
+	ok.size_flags_horizontal = Control.SIZE_SHRINK_END
+	ok.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_info_slot.add_child(panel)
+
+
+func _play_nope() -> void:
+	for c: Dictionary in _v.hand:
+		if c.type == "nope":
+			_act({"a": "play", "cards": [c.id]})
+			return
+
+
+func _draw_card() -> void:
+	_sel.clear()
+	_act({"a": "draw"})
+
+
+func _confirm_insert() -> void:
+	var pos: Array = []
+	for i in int(_v.prompt.eks):
+		pos.append(mini(_ins[i], int(_v.draw) + i))
+	_ins = [0, 0]
+	_memory.note_insert(pos)
+	_act({"a": "insert", "positions": pos})
+
+
+func _confirm_alter() -> void:
+	var order: Array = _arranger.order() if is_instance_valid(_arranger) else _alter_order
+	_alter_order = []
+	_snd("alter", -2.0)
+	_act({"a": "reorder", "order": order})
+
+
+func _confirm_bury() -> void:
+	var pos := _ins[0]
+	_ins = [0, 0]
+	_act({"a": "bury", "pos": pos})
+
+
+func _confirm_rot() -> void:
+	var pos := _ins[0]
+	_ins = [0, 0]
+	_act({"a": "rot", "pos": pos})
+
+
+func _confirm_give() -> void:
+	if _give_sel != "":
+		var cid := _give_sel
+		_give_sel = ""
+		_act({"a": "give", "card": cid})
+
+
+func _pick_give(cid: String) -> void:
+	_give_sel = cid
+	_update_hud()
+
+
+# ---------------------------------------------------------------- historial
+
+## Guarda en el historial lo que pasó, en palabras. Los eventos sin texto (robar, cambio de turno,
+## ver el futuro) se redactan aquí para que el historial cuente toda la partida.
+func _record(e: Dictionary) -> void:
+	var text := ""
+	var kind := ""
+	match e.type:
+		"turn":
+			text = "Tu turno" if e.player == _v.you else "Turno de " + _pname(e.player)
+			kind = "turn"
+		"draw":
+			var from_bottom: bool = e.get("bottom", false)
+			if e.player == _v.you:
+				text = "Robas la carta del fondo del mazo." if from_bottom else "Robas una carta."
+			else:
+				text = ("%s roba la carta del fondo del mazo." if from_bottom else "%s roba una carta.") % _pname(e.player)
+		"future":
+			var names: Array = e.cards.map(func(t: String) -> String: return CardDB.display_name(t))
+			text = ("Reordenaste el futuro: " if _alter_live else "Viste el futuro: ") + ", ".join(PackedStringArray(names)) + "."
+			kind = "me"
+		"peek":
+			var seen: Array = e.cards.map(func(t: String) -> String: return CardDB.display_name(t))
+			text = "Viste la mano de %s: %s." % [_pname(e.target), ", ".join(PackedStringArray(seen))]
+			kind = "me"
+		_:
+			text = e.get("text", "")
+			if e.has("to"):
+				kind = "me"
+	if text == "":
+		return
+	var me: String = _v.you
+	_history.append({
+		"text": text, "kind": kind,
+		"player": e.get("player"), "target": e.get("target"),
+		"mine": kind == "me" or e.get("player") == me or e.get("target") == me,
+		"cards": HistoryList.cards_of(e),
+	})
+	if _history.size() > HISTORY_MAX:
+		_history.pop_front()
+
+
+func _open_discard() -> void:
+	_exit_aim(false)
+	_modal = {"type": "discard"}
+	_update_hud()
+
+
+func _open_history() -> void:
+	_exit_aim(false)
+	_modal = {"type": "history"}
+	_update_hud()
+
+
+## Para la prueba automática.
+func debug_history_size() -> int:
+	return _history.size()
+
+
+## Para la prueba (UX-12): entradas del historial con el filtro dado.
+func debug_history_count(mine_only: bool) -> int:
+	return HistoryList.count(_history, mine_only)
+
+
+## Para la prueba (UX-12): entradas dibujadas en la ventana «Historial» abierta (-1 si no está abierta).
+func debug_history_rows() -> int:
+	var hl := _find_history(_modal_root)
+	return hl.debug_rows() if hl != null else -1
+
+
+## Para la prueba (UX-12): {avatars, thumbs, blockers} de la ventana abierta.
+func debug_history_info() -> Dictionary:
+	var hl := _find_history(_modal_root)
+	return hl.debug_info() if hl != null else {}
+
+
+func _find_history(n: Node) -> HistoryList:
+	if n is HistoryList:
+		return n
+	for c in n.get_children():
+		var r := _find_history(c)
+		if r != null:
+			return r
+	return null
+
+
+## Para la prueba (UX-05): textos de los botones de la zona inferior.
+func debug_buttons() -> Array[String]:
+	var out: Array[String] = []
+	for b in _buttons.get_children():
+		if b is Button:
+			out.append(b.text)
+	return out
+
+
+## Para la prueba (UX-05): ids de los Nop resaltados en la mano.
+func debug_nop_lit() -> Array[String]:
+	return _nop_lit
+
+
+## Para la prueba (UX-05): activa o apaga el paso automático sin guardarlo en los ajustes.
+func debug_set_auto_pass(on: bool) -> void:
+	_auto_pass = on
+	_auto_sig = ""
+	_check_auto_pass()
+
+
+## Para la prueba (UX-05): texto de estado de la zona inferior.
+func debug_status() -> String:
+	return _status.text
+
+
+## Para la prueba (UX-09): contadores acumulados.
+func debug_stats() -> MatchStats:
+	return _stats
+
+
+## Para la prueba automática: la carta de arriba de la pila de descarte (para tocarla).
+func debug_discard_top() -> Card3D:
+	var all: Array = _v.discard
+	return _discard_nodes.get(all.back().id) if not all.is_empty() else null
+
+
+## Ids que lista la ventana «Descarte» (vacío si no está abierta), la más reciente primero.
+func debug_discard_listed() -> Array[String]:
+	return _discard_list.debug_ids() if is_instance_valid(_discard_list) else ([] as Array[String])
+
+
+## Texto «Copiará: …» del primer Clon de la mano ("" si no hay Clon).
+func debug_clone_hint() -> String:
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			return str(CloneHint.describe(_v).text)
+	return ""
+
+
+## Selecciona el primer Clon de la mano y devuelve el texto del panel de selección ("" si no hay Clon).
+func debug_select_clone() -> String:
+	for c: Dictionary in _v.hand:
+		if c.type == "clone":
+			_sel.clear()
+			_sel.append(c.id)
+			_sync_hand()
+			_update_hud()
+			return _info_text()
+	return ""
+
+
+## Texto de todas las etiquetas del panel de selección.
+func _info_text() -> String:
+	var out := ""
+	var stack: Array = [_info_slot]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is Label:
+			out += n.text + "\n"
+		stack.append_array(n.get_children())
+	return out
+
+
+## Abre la cuadrícula del trío contra el primer rival vivo y devuelve los tipos que ofrece.
+func debug_open_named() -> Array[String]:
+	if _sel.is_empty() and not _v.hand.is_empty():
+		_sel.append(_v.hand[0].id)       # la ventana se cierra sola sin selección
+	for p: Dictionary in _v.players:
+		if p.id != _v.you and p.alive:
+			_modal = {"type": "named", "target": p.id}
+			_update_hud()
+			break
+	return _named_grid.debug_types() if is_instance_valid(_named_grid) else ([] as Array[String])
+
+
+## Modo puntería activo (prueba).
+func debug_aim_active() -> bool:
+	return _aim_kind != ""
+
+
+func debug_aim_kind() -> String:
+	return _aim_kind
+
+
+## Última jugada enviada sin error ({} si ninguna).
+func debug_last_play() -> Dictionary:
+	return _last_play.duplicate(true)
+
+
+## Último rival elegido en un modo puntería forzado.
+func debug_aim_pick() -> String:
+	return _aim_debug_pick
+
+
+## Carta de la mano que pide objetivo (Favor, etc.) o null.
+func debug_targeted_card() -> Card3D:
+	for c: Dictionary in _v.hand:
+		if _v.playable.get(c.id) is String and c.type != "nope":
+			return _hand.get(c.id)
+	return null
+
+
+## Dos cartas de gato iguales de la mano (para una pareja) o [] si no hay. Solo los gatos forman pareja: dos Ver el Futuro
+## iguales no son un combo, y la prueba que las tomara por tal fallaría según el reparto.
+func debug_pair_cards() -> Array:
+	var seen := {}
+	for c: Dictionary in _v.hand:
+		if not CardDB.defs.get(c.type, {}).get("cat", false):
+			continue
+		if seen.has(c.type):
+			return [_hand[seen[c.type]], _hand[c.id]]
+		seen[c.type] = c.id
+	return []
+
+
+## Prueba: fuerza el modo puntería (sin jugada detrás). Elegir a alguien solo lo anota en debug_aim_pick().
+func debug_force_aim(kind: String) -> void:
+	_aim_kind = kind
+	_aim_forced = true
+	_modal = {}
+	_update_hud()
+
+
+## Posición en pantalla (coordenadas del viewport) del avatar de un rival.
+func debug_seat_pos(id: String) -> Vector2:
+	return world.camera.unproject_position((_seats[id].avatar as Node3D).global_position)
+
+
+## Rivales válidos / no válidos para el tipo de objetivo actual (vacío si no hay puntería).
+func debug_aim_ids(valid: bool) -> Array:
+	var out: Array = []
+	for id: String in _seats:
+		if _aim.active() and _aim.is_valid(id) == valid:
+			out.append(id)
+	return out
+
+
+## Texto del panel inferior de selección/puntería.
+func debug_info_text() -> String:
+	return _info_text()
+
+
+## Quita la selección de cartas (prueba).
+func debug_clear_selection() -> void:
+	_sel.clear()
+	_sync_hand()
+	_update_hud()
+
+
+# ---------------------------------------------------------------- ayudas de prueba (La Cripta)
+
+## Selecciona la primera carta de ese tipo de la mano (sin tocar la pantalla). false si no hay.
+func debug_select_type(type: String) -> bool:
+	for c: Dictionary in _sorted_hand():
+		if c.type == type:
+			_sel.clear()
+			_sel.append(c.id)
+			_sync_hand()
+			_update_hud()
+			return true
+	return false
+
+
+## Motivo por el que una carta de ese tipo no se podría jugar ahora (`_why_not`).
+func debug_why_not(type: String) -> String:
+	return _why_not({"id": "debug", "type": type})
+
+
+## Título de la ventana abierta ("" si no hay ninguna).
+func debug_modal_title() -> String:
+	return _modal_title
+
+
+func debug_arranger() -> FutureArranger:
+	return _arranger if is_instance_valid(_arranger) else null
+
+
+func debug_memory() -> DeckMemory:
+	return _memory
+
+
+func debug_strip() -> DeckMemoryStrip:
+	return _mem_strip
+
+
+## Prueba: abre la ventana del recordatorio como al tocar la tira.
+func debug_open_memory() -> void:
+	_open_memory()
+
+
+func debug_slot_pickers() -> Array[DeckSlotPicker]:
+	return _slot_pickers
+
+
+## Prueba: ¿se consideraría «partida recién empezada» una vista con estos eventos?
+func debug_fresh(events: Array) -> bool:
+	return _is_fresh_start(events)
+
+
+## Prueba: avisos y efectos en pantalla (popups, toasts) y ventana abierta.
+func debug_effects() -> Dictionary:
+	return {"popups": _fx_root.get_child_count(), "toasts": _toasts.get_child_count(), "modal": _modal_title}
+
+
+func debug_slot_picker() -> DeckSlotPicker:
+	return _slot_picker if is_instance_valid(_slot_picker) else null
+
+
+func debug_peek_grid() -> CardPickGrid:
+	return _peek_grid if is_instance_valid(_peek_grid) else null
+
+
+func debug_named_grid() -> CardPickGrid:
+	return _named_grid if is_instance_valid(_named_grid) else null
+
+
+## Lo que se recuerda de la mano de un rival: {cards, count} o {}.
+func debug_known(id: String) -> Dictionary:
+	return _known_hands.get(id, {})
+
+
+## Estado de la flecha de sentido: {visible, dir, label}.
+func debug_dir() -> Dictionary:
+	return {"visible": _dir_ring.visible, "dir": _dir_ring.dir, "label": _dir_label.text if _dir_label.visible else ""}
+
+
+## Abre la cuadrícula del trío contra ese jugador (necesita una selección) y devuelve los tipos de «Sabes que tiene».
+func debug_open_named_for(id: String) -> Array[String]:
+	if _sel.is_empty() and not _v.hand.is_empty():
+		_sel.append(_v.hand[0].id)
+	_modal = {"type": "named", "target": id}
+	_update_hud()
+	return _named_grid.debug_known() if is_instance_valid(_named_grid) else ([] as Array[String])
+
+
+## Confirma un objetivo en modo puntería como si se hubiera tocado su ficha.
+func debug_aim_confirm(id: String) -> void:
+	_aim_pick(id)
+
+
+func _close_modal() -> void:
+	_modal = {}
+	_update_hud()
+
+
+func _build_prompt_modal(pr: Dictionary) -> void:
+	var v := _v
+	match pr.type:
+		"explode":
+			var box := _open_modal("¡GATITO EXPLOSIVO!", UIKit.C.gold)
+			_centered(box, UIKit.card_image("exploding", 560))
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			for c: Dictionary in v.hand:
+				if c.type == "zombie":
+					var cid: String = c.id
+					_add_btn(box, "JUGAR GATITO ZOMBI", "primary", func() -> void: _act({"a": "play", "cards": [cid]}), 54)
+					break
+			for c: Dictionary in v.hand:
+				if c.type == "clone" and v.playable.has(c.id):
+					var cid: String = c.id
+					_add_btn(box, "Jugar Clon (copia al Zombi)", "primary", func() -> void: _act({"a": "play", "cards": [cid]}))
+					break
+			_add_btn(box, "Morir (conservas tus cartas)", "ghost", func() -> void: _act({"a": "die"}))
+			_text(box, "Si mueres, otro jugador puede revivirte con su Gatito Zombi.", 28, UIKit.C.dim)
+		"zombie":
+			if pr.needRevive and pr.revived == null:
+				var box := _open_modal("¿A quién revives?")
+				_text(box, "Debes traer de vuelta a un jugador muerto. Elige con cuidado: ¡solo ganará si te sobrevive!")
+				_player_buttons(box, v.players.filter(func(p: Dictionary) -> bool: return not p.alive), func(id: String) -> void: _act({"a": "revive", "target": id}))
+				return
+			if pr.waiting:
+				var wbox := _open_modal("Escondiendo…")
+				_text(wbox, "Colocando los explosivos en el mazo…")
+				return
+			var box := _open_modal("Esconde el Gatito Explosivo")
+			_text(box, "Colócalo en secreto donde quieras. Nadie verá dónde (salvo con Clarividencia).", 30)
+			for i in int(pr.eks):
+				var idx := i
+				var max_pos: int = int(v.draw) + i
+				_ins[i] = mini(_ins[i], max_pos)
+				var title := "Explosivo" if pr.eks == 1 else ("Tu explosivo" if i == 0 else "El del jugador revivido")
+				# Lo conocido se marca solo en el primer selector (el segundo cuenta con el primer explosivo ya dentro)
+				var picker := DeckSlotPicker.new().setup(max_pos, _ins[i], title, _memory.known(v) if i == 0 else [], 470 if pr.eks == 1 else 330)
+				picker.changed.connect(func(pos: int) -> void: _ins[idx] = pos)
+				box.add_child(picker)
+				_slot_picker = picker
+				_slot_pickers.append(picker)
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_picker_bar = bar
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_insert, 54)
+		"give":
+			var title := "Ladrón de Tumbas"
+			if pr.reason == "favor":
+				title = "%s te pide un Favor" % _pname(pr.to)
+			elif pr.reason == "feed":
+				title = "Alimenta a %s" % _pname(pr.to)
+			var box := _open_modal(title)
+			_text(box, "Elige 1 carta de tu mano: se barajará dentro del mazo." if pr.reason == "rob" else "Elige 1 carta de tu mano para dársela.")
+			var grid := GridContainer.new()
+			grid.columns = 4
+			grid.add_theme_constant_override("h_separation", 12)
+			grid.add_theme_constant_override("v_separation", 12)
+			_centered(box, grid)
+			for c: Dictionary in _sorted_hand():
+				var cid: String = c.id
+				var tb := TextureButton.new()
+				tb.texture_normal = CardDB.texture(c.type)
+				tb.ignore_texture_size = true
+				tb.stretch_mode = TextureButton.STRETCH_KEEP_ASPECT_CENTERED
+				tb.custom_minimum_size = Vector2(215, 301)
+				tb.modulate = Color.WHITE if (_give_sel == "" or _give_sel == cid) else Color(0.45, 0.45, 0.5)
+				tb.pressed.connect(_pick_give.bind(cid))
+				grid.add_child(tb)
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			var give := _add_btn(box, "DAR ESTA CARTA", "primary", _confirm_give, 54)
+			give.disabled = _give_sel == ""
+		"alter":
+			var box := _open_modal("Alterar el Futuro")
+			_text(box, "Solo tú lo ves. Arrastra una carta sobre otra o toca dos cartas para intercambiarlas.", 30)
+			var types: Array = pr.cards
+			var order: Array = _alter_order if _alter_order.size() == types.size() else []
+			_arranger = FutureArranger.new().setup(types, 370, order)
+			_arranger.order_changed.connect(func(o: Array) -> void: _alter_order = o)
+			_alter_order = _arranger.order()
+			box.add_child(_arranger)
+			_text(box, "Las etiquetas son fijas: la carta de PRÓXIMA será la siguiente que se robe.", 26, UIKit.C.dim)
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_alter, 54)
+		"bury":
+			var box := _open_modal("Entierro")
+			_text(box, "Robaste esta carta y no entra en tu mano. Entiérrala en secreto donde quieras; tu turno termina.", 30)
+			if pr.card == "exploding":
+				_text(box, "¡Es un Gatito Explosivo! No explota: se entierra igual.", 30, UIKit.C.gold)
+			_centered(box, UIKit.card_image(pr.card, 380))
+			var max_pos: int = int(v.draw)
+			_ins[0] = mini(_ins[0], max_pos)
+			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0], "", _memory.known(v))
+			picker.changed.connect(func(pos: int) -> void: _ins[0] = pos)
+			box.add_child(picker)
+			_slot_picker = picker
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_picker_bar = bar
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_bury, 54)
+		"rot":
+			var box := _open_modal("¡Encontraste al Gatito Putrefacto!", Color("9be21c"))
+			_text(box, "No pasa nada… esta vez. Déjalo boca ARRIBA donde quieras: quien lo robe así, muere.", 30)
+			_centered(box, UIKit.card_image("rotten", 300))
+			var max_pos: int = int(v.draw)
+			_ins[0] = mini(_ins[0], max_pos)
+			var picker := DeckSlotPicker.new().setup(max_pos, _ins[0], "", _memory.known(v), 400)
+			picker.changed.connect(func(pos: int) -> void: _ins[0] = pos)
+			box.add_child(picker)
+			_slot_picker = picker
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			_picker_bar = bar
+			_add_btn(box, "CONFIRMAR", "primary", _confirm_rot, 54)
+		"dig":
+			var box := _open_modal("Cava Más Hondo")
+			_text(box, "Esta es la carta de arriba. ¿Te la quedas? Si no, DEBES robar la siguiente sea cual sea.")
+			_centered(box, UIKit.card_image(pr.card, 560))
+			var bar := UIKit.timer_bar()
+			box.add_child(bar)
+			_track(bar, pr)
+			var row := UIKit.hbox(14)
+			box.add_child(row)
+			_add_btn(row, "Me la quedo", "primary", func() -> void: _act({"a": "dig", "keep": true}))
+			_add_btn(row, "Robar la siguiente", "danger", func() -> void: _act({"a": "dig", "keep": false}))
+
+
+# ---------------------------------------------------------------- avisos
+
+## Aviso breve desde fuera de la pantalla (p. ej. "Reconectando…").
+func notice(text: String, bad: bool = false) -> void:
+	_toast(text, bad)
+
+
+func _popup(text: String, color: Color) -> void:
+	var l := UIKit.label(text, 150, color, true)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	l.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_fx_root.add_child(l)
+	l.pivot_offset = get_viewport().get_visible_rect().size / 2.0
+	l.scale = Vector2(0.3, 0.3)
+	l.rotation_degrees = -6
+	var t := l.create_tween()
+	t.tween_property(l, "scale", Vector2.ONE, 0.22).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	t.tween_interval(0.65)
+	t.tween_property(l, "modulate:a", 0.0, 0.3)
+	t.tween_callback(l.queue_free)
+
+
+func _toast(text: String, bad: bool = false) -> void:
+	var p := UIKit.panel(UIKit.C.cream, UIKit.C.red if bad else UIKit.C.toxic_dark, Vector2(22, 10))
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var l := UIKit.label(text, 32, UIKit.C.dark, false, true)
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	p.add_child(l)
+	_toasts.add_child(p)
+	while _toasts.get_child_count() > 3:
+		var old := _toasts.get_child(0)
+		_toasts.remove_child(old)
+		old.queue_free()
+	var t := p.create_tween()
+	t.tween_interval(2.6)
+	t.tween_property(p, "modulate:a", 0.0, 0.4)
+	t.tween_callback(p.queue_free)

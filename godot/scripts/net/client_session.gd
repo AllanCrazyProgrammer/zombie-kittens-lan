@@ -34,7 +34,7 @@ func send(m: Dictionary) -> void:
 
 
 func hello(player_name: String, avatar: int, token: String) -> void:
-	send({"t": "hello", "name": player_name, "avatar": avatar, "token": token})
+	send({"t": "hello", "name": player_name, "avatar": avatar, "token": token, "proto": Net.PROTO})
 
 
 func receive(m: Dictionary) -> void:
@@ -50,6 +50,9 @@ func receive(m: Dictionary) -> void:
 		"state":
 			_view = m.view
 			updated.emit()
+		"emote":
+			if is_plus() and EmoteSet.valid(m.get("e")) and m.get("id") is String:
+				emote.emit(m.id, int(m.e))
 		"err":
 			error.emit(m.get("msg", ""))
 		"kicked", "full":
@@ -69,11 +72,35 @@ func act(a: Dictionary) -> String:
 	return ""
 
 
+## Reacción rápida: solo existe en salas Plus (en una clásica no se envía nada).
+func send_emote(index: int) -> void:
+	if is_plus() and EmoteSet.valid(index):
+		send({"t": "emote", "e": index})
+
+
 func level_of(id: String) -> String:
 	for p: Dictionary in lobby.get("players", []):
 		if p.id == id and p.bot:
 			return p.level
 	return ""
+
+
+## Rasgo de personalidad de un bot de la sala ("" en salas clásicas o si no tiene).
+func trait_of(id: String) -> String:
+	for p: Dictionary in lobby.get("players", []):
+		if p.id == id and p.bot:
+			return str(p.get("trait", ""))
+	return ""
+
+
+## Marcador de victorias de la sala {id: victorias}. Vacío en salas clásicas y antes del primer `lobby`.
+func scores() -> Dictionary:
+	var sc: Variant = lobby.get("scores", {})
+	return (sc as Dictionary).duplicate() if sc is Dictionary else {}
+
+
+func is_plus() -> bool:
+	return bool(lobby.get("settings", {}).get("plus", false))
 
 
 func is_network() -> bool:

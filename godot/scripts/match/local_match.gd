@@ -10,13 +10,17 @@ const MIX := ["easy", "normal", "hard", "normal"]
 var game: ZKGame
 var bots: ZKBots
 var levels := {}
+var traits := {}        # id del bot -> rasgo de personalidad (solo Plus, IA-03)
 var _due := {}          # id del bot -> instante (ms) en que hará su jugada
 var _sig := ""
 var _rng: ZKRng
+var _plus := false
+var _emotes: BotEmotes     # IA-04: reacciones de los bots (solo Plus); su azar es propio
+var _emote_at := -100000  # última reacción enviada por el humano (ms)
 var _me_delay := 900     # solo en modo demostración: cuánto tarda la IA en jugar por el humano
 
 
-## opts: {name, rivals: 1..4, level: easy|normal|hard|mix, deck_mode, autoplay?: bool, seed?: int}
+## opts: {name, rivals: 1..4, level: easy|normal|hard|mix, deck_mode, autoplay?: bool, seed?: int, plus?: bool, packs?: [], rules?: {}}
 func start(opts: Dictionary) -> void:
 	me_id = "p0"
 	var my_avatar := int(opts.get("avatar", 0))
@@ -30,10 +34,27 @@ func start(opts: Dictionary) -> void:
 		levels[me_id] = "normal"   # modo demostración: la IA juega también por el humano
 		_me_delay = int(opts.get("me_delay", 900))
 	_rng = ZKRng.new(int(opts.get("seed", randi())))
-	game = ZKGame.new({"players": players, "deck_mode": opts.get("deck_mode", "official"), "rng": _rng, "now": now()})
-	bots = ZKBots.new(game, levels, _rng.next)
+	_plus = bool(opts.get("plus", false))
+	var game_opts := {"players": players, "deck_mode": opts.get("deck_mode", "official"), "rng": _rng, "now": now()}
+	if _plus:
+		game_opts["plus"] = true
+		game_opts["packs"] = opts.get("packs", [])
+		game_opts["rules"] = opts.get("rules", {})
+		game_opts["names"] = CardDB.names_for(opts.get("packs", []))
+	game = ZKGame.new(game_opts)
+	bots = ZKBots.new(game, levels, _rng.next, _plus)
+	traits = {}
+	if _plus:
+		for p: Dictionary in players:
+			if p.bot:
+				var tr := ZKBots.trait_for_name(p.name)
+				if tr != "":
+					traits[p.id] = tr
+		bots.set_traits(traits)
 	_due = {}
 	_sig = ""
+	_emotes = BotEmotes.new(int(opts.get("emote_seed", 0))).start(game) if _plus else null
+	_emote_at = -100000
 
 
 func view() -> Dictionary:
@@ -45,6 +66,30 @@ func act(a: Dictionary) -> String:
 	var err := game.act(me_id, a, now())
 	_check_changed()
 	return err
+
+
+func is_plus() -> bool:
+	return _plus
+
+
+## Reacción del jugador humano: se emite al momento, con el mismo límite (1 cada 3 s) que pone la sala.
+func send_emote(index: int) -> void:
+	if not _plus or game == null or game.over != null or not EmoteSet.valid(index):
+		return
+	var t := now()
+	if t - _emote_at < EmoteSet.COOLDOWN_MS:
+		return
+	_emote_at = t
+	emote.emit(me_id, index)
+
+
+func scores() -> Dictionary:
+	return {}
+
+
+## Rasgo de personalidad del bot ("" en clásico o si no tiene). Ver ZKBots.TRAIT_LABELS.
+func trait_of(id: String) -> String:
+	return traits.get(id, "")
 
 
 func level_of(id: String) -> String:
@@ -69,6 +114,15 @@ func _process(_delta: float) -> void:
 			elif not bots.decide(id).is_empty():
 				_due[id] = t + (_me_delay if id == me_id else 650 + int(_rng.next() * 900))
 	_check_changed()
+	if _emotes != null:
+		_emotes.observe(game, _bot_ids(), t)
+		if game.over == null:
+			for r: Dictionary in _emotes.due(t):
+				emote.emit(r.id, r.e)
+
+
+func _bot_ids() -> Array:
+	return game.players.filter(func(p: ZKGame.Player) -> bool: return p.bot).map(func(p: ZKGame.Player) -> String: return p.id)
 
 
 func _check_changed() -> void:

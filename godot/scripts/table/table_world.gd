@@ -22,6 +22,13 @@ var _env: Environment
 var _moon: DirectionalLight3D
 var _lamp: SpotLight3D
 var _flies: GPUParticles3D
+var _felt: StandardMaterial3D
+## Aditivo (Plus): peticiones de sacudida y de destello recibidas (las pruebas de «Reducir movimiento» las cuentan).
+var shake_calls := 0
+var flash_calls := 0
+var _bolt: Tween
+## Aditivo (Plus · «Reducir movimiento»): 0 deja la cámara quieta (sin el vaivén suave); 1 = el de siempre.
+var sway_scale := 1.0
 
 
 func _ready() -> void:
@@ -41,7 +48,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_time += delta
 	_shake = maxf(0.0, _shake - delta * 2.2)
-	var sway := Vector3(sin(_time * 0.31) * 0.14, sin(_time * 0.47) * 0.035, 0)
+	var sway := Vector3(sin(_time * 0.31) * 0.14, sin(_time * 0.47) * 0.035, 0) * sway_scale
 	var jitter := Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * _shake * _shake * 0.22
 	camera.position = CAM_POS + sway + jitter
 	camera.look_at(CAM_TARGET + jitter * 0.5)
@@ -68,11 +75,13 @@ func set_view_offset(v: float) -> void:
 
 ## Sacudida de cámara (0..1) para explosiones y golpes.
 func shake(amount: float) -> void:
+	shake_calls += 1
 	_shake = clampf(maxf(_shake, amount), 0.0, 1.0)
 
 
 ## Destello a pantalla completa.
 func flash(color: Color, alpha: float = 0.7, time: float = 0.45) -> void:
+	flash_calls += 1
 	_flash.color = Color(color.r, color.g, color.b, alpha)
 	var t := create_tween()
 	t.tween_property(_flash, "color:a", 0.0, time).set_ease(Tween.EASE_OUT)
@@ -178,6 +187,7 @@ func _table() -> void:
 	felt.normal_texture = _noise(0.5, true, 5)
 	felt.normal_scale = 0.35
 	felt.uv1_scale = Vector3(5, 5, 5)
+	_felt = felt
 	var top := _find_mesh(table, "TableTop")
 	if top:
 		top.set_surface_override_material(0, felt)
@@ -291,3 +301,73 @@ func _overlay() -> void:
 	_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_flash.color = Color(1, 1, 1, 0)
 	layer.add_child(_flash)
+
+
+# ------------------------------------------------------------------ Aditivo (Plus · V-09): tapete, luna y relámpago
+## Solo los usa la pantalla Plus (y la deja como estaba al salir); la pantalla clásica no los llama.
+
+const FELT_DEFAULT := Color("16463a")
+const MOON_DEFAULT_COLOR := Color("9fb2ff")
+const MOON_DEFAULT_ROT := Vector3(-38, 160, 0)
+
+
+## Recolorea el tapete (sin texturas nuevas).
+func set_felt_color(c: Color) -> void:
+	if _felt != null:
+		_felt.albedo_color = c
+
+
+func felt_color() -> Color:
+	return _felt.albedo_color if _felt != null else FELT_DEFAULT
+
+
+## Color y orientación de la luna (por partida).
+func set_moon(color: Color, rot_deg: Vector3) -> void:
+	_moon.light_color = color
+	_moon.rotation_degrees = rot_deg
+
+
+func moon_color() -> Color:
+	return _moon.light_color
+
+
+func moon_rotation() -> Vector3:
+	return _moon.rotation_degrees
+
+
+## Relámpago de fondo: el cielo y la luna se encienden dos veces seguidas y vuelven a su valor. No toca la pantalla
+## completa (eso es `flash`). Devuelve la duración aproximada.
+func lightning() -> float:
+	if _bolt != null and _bolt.is_valid():
+		_bolt.kill()
+	var moon_e := 0.9
+	var amb_e := 0.16
+	var bg := Color("140a2e")
+	var fog := Color("1a0d3a")
+	_bolt = create_tween()
+	var pulse := func(k: float) -> void:
+		_moon.light_energy = lerpf(moon_e, 3.4, k)
+		_env.ambient_light_energy = lerpf(amb_e, 0.9, k)
+		_env.background_color = bg.lerp(Color("8fa4e8"), k)
+		_env.fog_light_color = fog.lerp(Color("6f82c8"), k)
+	_bolt.tween_method(pulse, 0.0, 1.0, 0.06)
+	_bolt.tween_method(pulse, 1.0, 0.25, 0.12)
+	_bolt.tween_method(pulse, 0.25, 0.85, 0.05)
+	_bolt.tween_method(pulse, 0.85, 0.0, 0.32).set_ease(Tween.EASE_OUT)
+	_bolt.finished.connect(func() -> void: pulse.call(0.0))
+	return 0.55
+
+
+## Brillo del cielo ahora mismo (prueba: el relámpago lo sube).
+func sky_energy() -> float:
+	return _env.ambient_light_energy
+
+
+## Deja el cielo y la luna con sus valores normales (al cerrar la pantalla Plus a mitad de un relámpago).
+func lightning_reset() -> void:
+	if _bolt != null and _bolt.is_valid():
+		_bolt.kill()
+	_moon.light_energy = 0.9
+	_env.ambient_light_energy = 0.16
+	_env.background_color = Color("140a2e")
+	_env.fog_light_color = Color("1a0d3a")

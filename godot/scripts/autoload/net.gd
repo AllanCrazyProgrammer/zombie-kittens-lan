@@ -8,6 +8,8 @@ signal connected
 signal failed
 signal server_lost
 
+## Versión del protocolo de red. 3 = Zombie Kittens Plus (las salas Plus exigen proto >= 3; las clásicas no comprueban nada).
+const PROTO := 3
 const PORT := 8766
 const DISCOVERY_PORT := 8767
 ## Puerto donde el anfitrión responde a quien pregunta directamente "¿hay sala?" (por si la red o el

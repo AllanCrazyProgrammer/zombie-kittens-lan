@@ -2,8 +2,8 @@ class_name RoomHost
 extends Node
 ## Sala de juego en el dispositivo anfitrión: lobby, reconexión por ficha (token), bots y la partida.
 ## Port de la sala de web/www/room.js. Habla con cada jugador mediante mensajes {t: ...}:
-##   recibe: hello, set, addBot, botLevel, kick, settings, start, toLobby, act
-##   envía:  welcome, lobby, state, err, kicked, full
+##   recibe: hello (con proto), set, addBot, botLevel, kick, settings, start, toLobby, act, emote (solo Plus)
+##   envía:  welcome, lobby, state, err, kicked, full, emote (solo Plus)
 
 signal local_message(m: Dictionary)
 
@@ -12,14 +12,23 @@ const LEVELS := ["easy", "normal", "hard"]
 const MAX_PLAYERS := 5
 const LOCAL := 1   # el propio anfitrión
 
+const PACKS := ["crypt"]
+const PLUS_REJECT := "Esta sala es de Zombie Kittens Plus. Actualiza el juego para entrar."
+
 var players: Array[Dictionary] = []   # {id, token, name, avatar, bot, level, peer}  (peer 0 = sin conexión)
-var settings := {"deck_mode": "official"}
+## {deck_mode, plus, packs, rules}. `plus` se fija al crear la sala y no cambia; en una sala clásica packs = [] y rules = {}.
+var settings := {"deck_mode": "official", "plus": false, "packs": [], "rules": {}}
 var game: ZKGame
 var bots: ZKBots
 var _rng: ZKRng
 var _due := {}
 var _sig := ""
 var _next_id := 1
+## Plus (M-06): victorias por id de jugador mientras la sala exista. Solo se llena en salas Plus.
+var scores := {}
+var _scored := false   # la partida en curso ya se ha contado
+var _emotes: BotEmotes   # IA-04: reacciones de los bots (solo Plus); su azar es propio y no toca el de la partida
+var _emote_at := {}      # id de jugador -> instante (ms) de su última reacción aceptada
 
 
 func _ready() -> void:
@@ -44,7 +53,14 @@ func beacon_info() -> Dictionary:
 	for p in players:
 		if p.peer == LOCAL:
 			host_name = p.name
-	return {"name": host_name, "players": players.size(), "started": game != null}
+	return {"name": host_name, "players": players.size(), "started": game != null, "plus": bool(settings.plus), "proto": Net.PROTO}
+
+
+## Fija el modo de la sala. Solo vale antes de que entre nadie (el anfitrión local lo indica al crearla).
+func configure(plus: bool) -> void:
+	if not players.is_empty() or game != null:
+		return
+	settings.plus = plus
 
 
 func _by_peer(peer: int) -> Dictionary:
@@ -70,8 +86,14 @@ func _on_peer_left(peer: int) -> void:
 		game.set_connected(p.id, false, now())
 		_broadcast_state()
 	else:
-		players.erase(p)
+		_drop(p)
 		_send_lobby()
+
+
+## Saca a un jugador de la sala y borra su marcador.
+func _drop(p: Dictionary) -> void:
+	players.erase(p)
+	scores.erase(p.id)
 
 
 func on_msg(peer: int, m: Dictionary) -> void:
@@ -125,7 +147,7 @@ func on_msg(peer: int, m: Dictionary) -> void:
 			var k := _by_id(m.get("id"))
 			if k.is_empty() or k.peer == LOCAL:
 				return
-			players.erase(k)
+			_drop(k)
 			if k.peer > LOCAL:
 				send(k.peer, {"t": "kicked", "msg": "El anfitrión te sacó de la sala."})
 			_send_lobby()
@@ -134,6 +156,11 @@ func on_msg(peer: int, m: Dictionary) -> void:
 				return
 			if m.get("deck_mode", "") in ["official", "full"]:
 				settings.deck_mode = m.deck_mode
+			if settings.plus:   # packs y reglas solo existen en salas Plus; en las clásicas se rechazan en silencio
+				if m.get("packs") is Array:
+					settings.packs = (m.packs as Array).filter(func(k: Variant) -> bool: return k is String and PACKS.has(k))
+				if m.get("rules") is Dictionary:
+					settings.rules = _clean_rules(m.rules)
 			_send_lobby()
 		"start":
 			if not is_host or game != null:
@@ -147,9 +174,10 @@ func on_msg(peer: int, m: Dictionary) -> void:
 				return
 			game = null
 			bots = null
+			_emotes = null
 			for q: Dictionary in players.duplicate():
 				if not q.bot and q.peer == 0:
-					players.erase(q)
+					_drop(q)
 			_send_lobby()
 		"act":
 			if game == null:
@@ -158,6 +186,17 @@ func on_msg(peer: int, m: Dictionary) -> void:
 			if err != "":
 				send(peer, {"t": "err", "msg": err})
 			_check_changed()
+		"emote":
+			# UX-08: solo salas Plus y con la partida en curso; no pasa por el motor ni cambia la vista
+			if not settings.plus or game == null or game.over != null or p.bot:
+				return
+			if not EmoteSet.valid(m.get("e")):
+				return
+			var at := now()
+			if at - int(_emote_at.get(p.id, -EmoteSet.COOLDOWN_MS)) < EmoteSet.COOLDOWN_MS:
+				return
+			_emote_at[p.id] = at
+			_broadcast_emote(p.id, int(m.e))
 
 
 func _clean_name(raw: String, me: Dictionary) -> String:
@@ -174,7 +213,33 @@ func _clean_name(raw: String, me: Dictionary) -> String:
 	return n
 
 
+## Solo deja pasar las reglas opcionales conocidas, con los mismos límites que `ZKGame._sanitize_rules`.
+## `hand` null o 0 significa «normal» y se quita de las reglas (el motor decide: 7, u 8 con La Cripta).
+func _clean_rules(raw: Dictionary) -> Dictionary:
+	var out: Dictionary = settings.rules.duplicate()
+	if _is_num(raw.get("turn_ms")):
+		var t := int(raw.turn_ms)
+		out["turn_ms"] = 0 if t <= 0 else clampi(t, 5000, 600000)
+	if raw.has("hand"):
+		if raw.hand == null or (_is_num(raw.hand) and int(raw.hand) <= 0):
+			out.erase("hand")
+		elif _is_num(raw.hand):
+			out["hand"] = clampi(int(raw.hand), 4, 8)
+	for k: String in ["nope_fixed", "sudden_death", "rotten"]:
+		if raw.get(k) is bool:
+			out[k] = raw[k]
+	return out
+
+
+static func _is_num(v: Variant) -> bool:
+	return v is int or (v is float and is_finite(v))
+
+
 func _hello(peer: int, m: Dictionary) -> void:
+	# Las salas Plus exigen cliente con protocolo 3; las clásicas aceptan a cualquiera (clientes 2.x incluidos)
+	if settings.plus and int(m.get("proto", 0)) < 3:
+		send(peer, {"t": "full", "msg": PLUS_REJECT})
+		return
 	var token := str(m.get("token", ""))
 	var p := {}
 	for x in players:
@@ -213,10 +278,19 @@ func _hello(peer: int, m: Dictionary) -> void:
 
 
 func _lobby_msg() -> Dictionary:
-	return {
-		"t": "lobby", "settings": settings.duplicate(), "started": game != null,
+	var m := {
+		"t": "lobby", "settings": settings.duplicate(true), "started": game != null,
 		"players": players.map(func(p: Dictionary) -> Dictionary: return {"id": p.id, "name": p.name, "avatar": p.avatar, "bot": p.bot, "host": p.peer == LOCAL, "level": p.level}),
 	}
+	if settings.plus:
+		for i in players.size():
+			m.players[i]["trait"] = _trait_of(players[i])   # IA-03: solo en salas Plus
+		m["scores"] = scores.duplicate()   # M-06: solo en salas Plus
+	return m
+
+
+func _trait_of(p: Dictionary) -> String:
+	return ZKBots.trait_for_name(p.name) if p.bot else ""
 
 
 func _send_lobby() -> void:
@@ -234,13 +308,28 @@ func _start() -> void:
 		if p.bot:
 			levels[p.id] = p.level
 	_rng = ZKRng.new(randi())
-	game = ZKGame.new({"players": list, "deck_mode": settings.deck_mode, "rng": _rng, "now": now()})
-	bots = ZKBots.new(game, levels, _rng.next)
+	var game_opts := {"players": list, "deck_mode": settings.deck_mode, "rng": _rng, "now": now()}
+	if settings.plus:
+		game_opts["plus"] = true
+		game_opts["packs"] = settings.packs.duplicate()
+		game_opts["rules"] = settings.rules.duplicate()
+		game_opts["names"] = CardDB.names_for(settings.packs)
+	game = ZKGame.new(game_opts)
+	bots = ZKBots.new(game, levels, _rng.next, bool(settings.plus))
+	if settings.plus:
+		var traits := {}
+		for p in players:
+			if p.bot and _trait_of(p) != "":
+				traits[p.id] = _trait_of(p)
+		bots.set_traits(traits)
 	for p in players:
 		if not p.bot and p.peer == 0:
 			game.set_connected(p.id, false, now())
 	_due = {}
 	_sig = ""
+	_scored = false
+	_emote_at = {}
+	_emotes = BotEmotes.new().start(game) if settings.plus else null
 	_send_lobby()
 	_check_changed()
 
@@ -263,9 +352,33 @@ func _process(_delta: float) -> void:
 			elif not bots.decide(id).is_empty():
 				_due[id] = t + 650 + int(_rng.next() * 900)
 	_check_changed()
+	if _emotes != null:
+		_emotes.observe(game, bots.levels.keys(), t)
+		if game.over == null:
+			for r: Dictionary in _emotes.due(t):
+				_broadcast_emote(r.id, r.e)
+
+
+## Reenvía una reacción a todos los jugadores conectados (el emisor incluido).
+func _broadcast_emote(id: String, e: int) -> void:
+	for q in players:
+		if q.peer > 0:
+			send(q.peer, {"t": "emote", "id": id, "e": e})
+
+
+## Plus: suma una victoria al ganador (una sola vez por partida) y reenvía el lobby con el marcador nuevo.
+func _score_if_over() -> void:
+	if not settings.plus or _scored or game == null or game.over == null:
+		return
+	_scored = true
+	var w: Variant = game.over.get("winner")
+	if w is String and not _by_id(w).is_empty():
+		scores[w] = int(scores.get(w, 0)) + 1
+	_send_lobby()
 
 
 func _check_changed() -> void:
+	_score_if_over()
 	var s := game.signature()
 	if s != _sig:
 		_sig = s

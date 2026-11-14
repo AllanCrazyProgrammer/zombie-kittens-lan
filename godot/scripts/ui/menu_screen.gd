@@ -16,8 +16,18 @@ var page := "home"
 var status := ""
 var session: ClientSession      # solo en la sala de espera
 var profile := {"name": "", "avatar": 0}
-var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official"}
+var plus := false               # modo elegido en la pantalla de inicio (user://settings.cfg, [game] plus)
+var _plus_ephemeral := false    # el modo viene de una prueba automática: no se guarda en el archivo
+var _title: Label
+var _tag: Label
+var _opts := {"rivals": 2, "level": "normal", "deck_mode": "official", "packs": ["crypt"]}
+## Reglas de Plus de «Un jugador» (user://settings.cfg, [plus]). hand 0 = normal (el motor decide: 7, u 8 con La Cripta).
+var _rules := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false, "rotten": false}
+var _rule_touched := ""   # última regla cambiada: enseña su nota aunque haya quedado desactivada
 var _box: VBoxContainer
+var _panel: PanelContainer
+var _scroll: ScrollContainer    # solo existe cuando el contenido no cabe (p. ej. reglas de Plus en pantallas pequeñas)
+var _fit_gen := 0
 var _rooms_box: VBoxContainer
 var _rooms_sig := ""
 var _manual_ip := ""
@@ -31,6 +41,11 @@ func _ready() -> void:
 			_opts[k] = cfg.get_value("solo", k, _opts[k])
 		for k: String in profile.keys():
 			profile[k] = cfg.get_value("profile", k, profile[k])
+		plus = bool(cfg.get_value("game", "plus", false))
+		_rules = _clean_solo_rules({
+			"turn_ms": cfg.get_value("plus", "turn_ms", 0), "hand": cfg.get_value("plus", "hand", 0),
+			"sudden_death": cfg.get_value("plus", "sudden_death", false), "nope_fixed": cfg.get_value("plus", "nope_fixed", false),
+				"rotten": cfg.get_value("plus", "rotten", false)})
 	if str(profile.name).strip_edges() == "":
 		profile.name = "Gatito%d" % (10 + randi() % 90)
 	var root := Control.new()
@@ -42,11 +57,14 @@ func _ready() -> void:
 	title.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	title.offset_top = 110
 	root.add_child(title)
+	_title = title
+	_refresh_title()
 	var tag := UIKit.label("Explota. Revive. Vuelve a explotar.", 44, Color("ff5c8d"), true)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	tag.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	tag.offset_top = 270
 	root.add_child(tag)
+	_tag = tag
 
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
@@ -59,6 +77,7 @@ func _ready() -> void:
 	margin.add_child(panel)
 	_box = UIKit.vbox(14)
 	panel.add_child(_box)
+	_panel = panel
 	Updater.changed.connect(_on_update_state)
 	_build()
 
@@ -66,7 +85,7 @@ func _ready() -> void:
 func _process(_delta: float) -> void:
 	# La lista de salas se refresca sola, sin reconstruir el resto (para no perder lo que se está escribiendo)
 	if page == "join" and _rooms_box != null:
-		var sig := JSON.stringify(Net.rooms.keys()) + str(Net.rooms.values().map(func(r: Dictionary) -> String: return "%s%s%s" % [r.get("name"), r.get("players"), r.get("started")]))
+		var sig := JSON.stringify(Net.rooms.keys()) + str(Net.rooms.values().map(func(r: Dictionary) -> String: return "%s%s%s%s" % [r.get("name"), r.get("players"), r.get("started"), r.get("plus")]))
 		if sig != _rooms_sig:
 			_rooms_sig = sig
 			_fill_rooms()
@@ -95,13 +114,36 @@ func _on_lobby_updated() -> void:
 		_build()
 
 
+## En Plus el título dice «Zombie Kittens Plus» (más pequeño para que quepa en una línea).
+func _refresh_title() -> void:
+	if _title == null:
+		return
+	_title.text = "ZOMBIE KITTENS PLUS" if plus else "ZOMBIE KITTENS"
+	_title.add_theme_font_size_override("font_size", 96 if plus else 132)
+
+
+## Cambia el modo. `persist = false` solo para pruebas automáticas (no toca user://settings.cfg).
+func set_plus(value: bool, persist: bool = true) -> void:
+	plus = value
+	_plus_ephemeral = not persist
+	if persist:
+		save_profile()
+	_refresh_title()
+	if is_inside_tree() and page == "home":
+		_build()
+
+
 func save_profile() -> void:
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS)
+	if not _plus_ephemeral:
+		cfg.set_value("game", "plus", plus)
 	for k: String in _opts.keys():
 		cfg.set_value("solo", k, _opts[k])
 	for k: String in profile.keys():
 		cfg.set_value("profile", k, profile[k])
+	for k: String in _rules.keys():
+		cfg.set_value("plus", k, _rules[k])
 	cfg.save(SETTINGS)
 
 
@@ -130,6 +172,49 @@ func _build() -> void:
 		"join": _build_join()
 		"connecting": _build_connecting()
 		"lobby": _build_lobby()
+	_fit_gen += 1
+	if _title != null:
+		_title.visible = true
+		_tag.visible = true
+	if plus and (page == "solo" or page == "lobby"):
+		_fit(_fit_gen)
+	elif _scroll != null:
+		_unscroll()
+
+
+## Si el contenido no cabe bajo el título, lo mete en un ScrollContainer. En pantallas que caben no se toca nada.
+func _fit(gen: int) -> void:
+	if not is_inside_tree():
+		return
+	await get_tree().process_frame
+	if gen != _fit_gen or not is_inside_tree():
+		return
+	var avail := get_viewport().get_visible_rect().size.y - 70.0 - 350.0 - 52.0
+	var need := _box.get_combined_minimum_size().y
+	# Si el panel sube hasta el título, se oculta el título (así no se transparenta detrás de la sala)
+	if _title != null and _panel.get_global_rect().position.y < 345.0:
+		_title.visible = false
+		_tag.visible = false
+	if need <= avail:
+		if _scroll != null:
+			_unscroll()
+		return
+	if _scroll == null:
+		_scroll = ScrollContainer.new()
+		_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		_panel.remove_child(_box)
+		_panel.add_child(_scroll)
+		_scroll.add_child(_box)
+		_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll.custom_minimum_size.y = avail
+
+
+func _unscroll() -> void:
+	_scroll.remove_child(_box)
+	_panel.remove_child(_scroll)
+	_scroll.queue_free()
+	_scroll = null
+	_panel.add_child(_box)
 
 
 func _go(p: String) -> void:
@@ -178,6 +263,11 @@ func _build_home() -> void:
 	row.add_child(col)
 	if status != "":
 		_note(status, 32, UIKit.C.gold)
+	var mode := UIKit.hbox(12)
+	_box.add_child(mode)
+	for m: Array in [["CLÁSICO", false], ["PLUS", true]]:
+		var mb := _add(m[0], "on" if plus == m[1] else "normal", set_plus.bind(m[1]), 38, mode)
+		mb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_add("UN JUGADOR", "primary", _go.bind("solo"), 58)
 	_add("CREAR SALA", "normal", _on_host, 50)
 	_add("UNIRSE A UNA SALA", "normal", _go.bind("join"), 50)
@@ -231,6 +321,8 @@ func _build_settings() -> void:
 	var q := _quality()
 	_add("Gráficos: " + {"high": "calidad alta", "medium": "calidad media", "low": "calidad baja"}[q], "normal", _next_quality, 40)
 	_note({"high": "Todos los efectos: sombras, brillo y suavizado de bordes.", "medium": "Menos sombras y sin suavizado. Buen equilibrio si el juego va lento.", "low": "Sin sombras ni brillo y menor resolución. Para teléfonos modestos o para ahorrar batería."}[q], 28)
+	if plus:
+		_plus_settings()
 	var info: String = {
 		"idle": "", "checking": "Buscando actualizaciones…",
 		"latest": "Tienes la versión más reciente (%s)." % Updater.installed_version(),
@@ -246,6 +338,27 @@ func _build_settings() -> void:
 		_note(info, 28, UIKit.C.toxic if Updater.state == "available" else UIKit.C.dim)
 	_note("Versión instalada: %s" % Updater.installed_version(), 24)
 	_add("Volver", "ghost", _go.bind("home"), 38)
+
+
+## Ajustes de accesibilidad y ambiente de Plus (UX-13, V-09): solo se muestran con el modo Plus elegido.
+func _plus_settings() -> void:
+	var a := UIKit.hbox(12)
+	_box.add_child(a)
+	_add("Texto: grande" if PlusSettings.text_large() else "Texto: normal", "normal", func() -> void:
+		PlusSettings.set_text_large(not PlusSettings.text_large())
+		_build(), 34, a)
+	_add("Vibración: sí" if PlusSettings.vibration_on() else "Vibración: no", "normal", func() -> void:
+		PlusSettings.set_vibration(not PlusSettings.vibration_on())
+		_build(), 34, a)
+	var b := UIKit.hbox(12)
+	_box.add_child(b)
+	_add("Reducir movimiento: sí" if PlusSettings.reduce_motion() else "Reducir movimiento: no", "normal", func() -> void:
+		PlusSettings.set_reduce_motion(not PlusSettings.reduce_motion())
+		_build(), 34, b)
+	_add("Tapete: " + str(PlusSettings.MAT_NAMES[PlusSettings.mat()]), "normal", func() -> void:
+		PlusSettings.next_mat()
+		_build(), 34, b)
+	_note("Reducir movimiento quita sacudidas, cámara lenta, destellos y efectos de movimiento.", 26)
 
 
 func _on_host() -> void:
@@ -267,6 +380,9 @@ func _on_solo_play() -> void:
 	var o := _opts.duplicate()
 	o["name"] = profile.name
 	o["avatar"] = profile.avatar
+	o["plus"] = plus
+	o["packs"] = (_opts.packs as Array).duplicate() if plus else []
+	o["rules"] = _solo_rules_for_engine() if plus else {}
 	save_profile()
 	solo_requested.emit(o)
 
@@ -312,8 +428,116 @@ func _build_solo() -> void:
 	var full: bool = _opts.deck_mode == "full"
 	_add("Mazo: completo" if full else "Mazo: oficial", "normal", _choose.bind("deck_mode", "official" if full else "full"), 38)
 	_note(_deck_info(int(_opts.rivals) + 1, full), 28)
+	if plus:
+		var crypt: bool = "crypt" in _opts.packs
+		_add("La Cripta: sí" if crypt else "La Cripta: no", "normal", _choose.bind("packs", [] if crypt else ["crypt"]), 38)
+		_note("Añade 9 cartas nuevas: Ataque Dirigido, Marcha Atrás, Robar del Fondo, Ojo de Cuervo y más." if crypt else "Solo las cartas originales, con las mejoras de Plus.", 28)
+		_rules_block(_rules, _set_solo_rule, false, crypt, int(_opts.rivals) + 1)
 	_add("¡JUGAR!", "primary", _on_solo_play, 68)
 	_add("Volver", "ghost", _go.bind("home"), 38)
+
+
+## Normaliza las reglas guardadas: mismos límites que el motor (turn_ms 0 o 5000-600000, hand 4-8; 0 = normal).
+static func _clean_solo_rules(raw: Dictionary) -> Dictionary:
+	var out := {"turn_ms": 0, "hand": 0, "sudden_death": false, "nope_fixed": false, "rotten": false}
+	var t: Variant = raw.get("turn_ms")
+	if t is int or t is float:
+		out.turn_ms = 0 if int(t) <= 0 else clampi(int(t), 5000, 600000)
+	var h: Variant = raw.get("hand")
+	if h is int or h is float:
+		out.hand = 0 if int(h) <= 0 else clampi(int(h), 4, 8)
+	for k: String in ["sudden_death", "nope_fixed", "rotten"]:
+		if raw.get(k) is bool:
+			out[k] = raw[k]
+	return out
+
+
+## Reglas tal como las recibe el motor: `hand` solo si se ha elegido una.
+func _solo_rules_for_engine() -> Dictionary:
+	var r := _rules.duplicate()
+	if int(r.hand) <= 0:
+		r.erase("hand")
+	return r
+
+
+func _set_solo_rule(key: String, value: Variant) -> void:
+	_rules[key] = value
+	_rule_touched = key
+	save_profile()
+	_build()
+
+
+func _send_rule(key: String, value: Variant) -> void:
+	_rule_touched = key
+	session.send({"t": "settings", "rules": {key: value}})
+
+
+static func _turn_label(ms: int) -> String:
+	return "sin límite" if ms <= 0 else "%d s" % roundi(ms / 1000.0)
+
+
+## Siguiente valor de «Tiempo por turno»: sin límite, 30 s, 60 s y vuelta a sin límite.
+static func _next_turn_ms(ms: int) -> int:
+	return 30000 if ms <= 0 else (60000 if ms < 60000 else 0)
+
+
+## Resumen de solo lectura de las reglas activas, p. ej. «Reglas: 30 s por turno · muerte súbita».
+static func rules_summary(r: Dictionary) -> String:
+	var parts: Array[String] = []
+	if int(r.get("turn_ms", 0)) > 0:
+		parts.append("%s por turno" % _turn_label(int(r.turn_ms)))
+	if int(r.get("hand", 0)) > 0:
+		parts.append("mano de %d" % int(r.hand))
+	if bool(r.get("sudden_death", false)):
+		parts.append("muerte súbita")
+	if bool(r.get("nope_fixed", false)):
+		parts.append("Nop sin pistas")
+	if bool(r.get("rotten", false)):
+		parts.append("Gatito Putrefacto")
+	return "Reglas: " + (" · ".join(parts) if not parts.is_empty() else "las de siempre")
+
+
+## Bloque «Reglas de Plus»: cuatro botones que alternan y una nota de una línea por regla activa (o recién cambiada).
+## `change(key, value)` aplica el cambio; en la sala lo manda el anfitrión, en «Un jugador» se guarda.
+## `crypt`: La Cripta activada (solo con ella existe el Gatito Putrefacto); `players`: jugadores de la partida.
+func _rules_block(r: Dictionary, change: Callable, in_lobby: bool, crypt: bool = false, players: int = 0) -> void:
+	_box.add_child(UIKit.label("Reglas de Plus", 36 if in_lobby else 40, UIKit.C.toxic, true))
+	var turn := int(r.get("turn_ms", 0))
+	var hand := int(r.get("hand", 0))
+	var sd := bool(r.get("sudden_death", false))
+	var nf := bool(r.get("nope_fixed", false))
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 12)
+	grid.add_theme_constant_override("v_separation", 12)
+	_box.add_child(grid)
+	var items := [
+		["turn_ms", "Tiempo por turno: " + _turn_label(turn), turn > 0, _next_turn_ms(turn),
+			"Si no juegas a tiempo, se roba carta solo." if turn > 0 else "Los turnos no tienen límite de tiempo."],
+		["hand", "Mano inicial: " + ("normal" if hand <= 0 else ("corta (5)" if hand == 5 else str(hand))), hand > 0, 0 if hand > 0 else 5,
+			"Cada jugador empieza con %d cartas: partida más rápida." % hand if hand > 0 else "Mano inicial de siempre (7 cartas, 8 con La Cripta)."],
+		["sudden_death", "Muerte súbita: " + ("sí" if sd else "no"), sd, not sd,
+			"Con 2 vivos, cada vuelta se retira la carta del fondo del mazo." if sd else "Sin muerte súbita."],
+		["nope_fixed", "Nop sin pistas: " + ("sí" if nf else "no"), nf, not nf,
+			"La espera para anular dura siempre lo mismo, para no delatar quién tiene Nop." if nf else "La espera para anular se acorta si nadie tiene Nop."],
+	]
+	for it: Array in items:
+		var key: String = it[0]
+		var b := _add(it[1], "on" if it[2] else "normal", change.bind(key, it[3]), 30, grid)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.clip_text = true
+	var rot := bool(r.get("rotten", false))
+	if crypt:
+		var rb := _add("Gatito Putrefacto: " + ("sí" if rot else "no"), "on" if rot else "normal", change.bind("rotten", not rot), 30)
+		rb.clip_text = true
+	for it: Array in items:
+		if it[2] or _rule_touched == it[0]:
+			_note(it[4], 26)
+	if crypt and (rot or _rule_touched == "rotten"):
+		var rn := "Sustituye a un explosivo. Con 3 o más jugadores."
+		if players > 0 and players < 3:
+			rn += "\nCon %d jugadores no tendrá efecto." % players if in_lobby else "\nCon 1 rival no tendrá efecto: elige 2 o más."
+		_note(rn, 26)
 
 
 static func _deck_info(players: int, full: bool) -> String:
@@ -364,7 +588,8 @@ func _fill_rooms() -> void:
 		var r: Dictionary = Net.rooms[key]
 		var ip: String = r.ip
 		var started: bool = r.get("started", false)
-		var b := UIKit.button("Sala de %s  ·  %d/5%s" % [r.get("name", "?"), int(r.get("players", 0)), "  (en partida)" if started else ""], "on" if not started else "normal", 42)
+		var tag := "PLUS" if r.get("plus", false) else "CLÁSICO"
+		var b := UIKit.button("Sala de %s  ·  %d/5  ·  %s%s" % [r.get("name", "?"), int(r.get("players", 0)), tag, "  (en partida)" if started else ""], "on" if not started else "normal", 42)
 		b.pressed.connect(func() -> void: join_requested.emit(ip))
 		_rooms_box.add_child(b)
 
@@ -389,9 +614,13 @@ func _build_lobby() -> void:
 		if p.host:
 			host_name = p.name
 	_box.add_child(UIKit.label("Sala de %s   %d/5" % [host_name, n], 50, UIKit.C.toxic, true))
+	if session.is_plus():
+		_note("Modo PLUS", 30, UIKit.C.gold)
 	if is_host:
 		var ips: Array = Net.local_ips()
 		_note(("Los demás tocan «Unirse a una sala». Si no aparece, tu dirección es  %s" % ips[0]) if ips.size() > 0 else "Sin red local: conéctate a una Wi-Fi o activa tu zona Wi-Fi para que otros se unan.", 28, UIKit.C.ink)
+	var scores: Dictionary = session.scores()
+	var show_scores := scores.values().any(func(v: Variant) -> bool: return int(v) > 0)
 	for p: Dictionary in players:
 		var row := UIKit.panel(UIKit.C.panel2, UIKit.C.line, Vector2(14, 6))
 		var h := UIKit.hbox(12)
@@ -401,6 +630,8 @@ func _build_lobby() -> void:
 		name_l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		name_l.clip_text = true
 		h.add_child(name_l)
+		if show_scores:
+			h.add_child(UIKit.label("🏆 %d" % int(scores.get(p.id, 0)), 32, UIKit.C.gold))
 		if p.host:
 			h.add_child(UIKit.label("Anfitrión", 28, UIKit.C.gold))
 		if p.id == session.me_id:
@@ -424,7 +655,15 @@ func _build_lobby() -> void:
 		var ab := _add("Añadir IA", "normal", func() -> void: session.send({"t": "addBot"}), 38, tools)
 		ab.disabled = n >= 5
 		_add("Mazo: completo" if full else "Mazo: oficial", "normal", func() -> void: session.send({"t": "settings", "deck_mode": "official" if full else "full"}), 38, tools)
+		if session.is_plus():
+			var crypt_on: bool = "crypt" in lobby.settings.get("packs", [])
+			_add("La Cripta: sí" if crypt_on else "La Cripta: no", "normal", func() -> void: session.send({"t": "settings", "packs": [] if crypt_on else ["crypt"]}), 38, tools)
 	_note(_deck_info(maxi(2, n), full), 28)
+	if session.is_plus() and not is_host:
+		_note("La Cripta: activada" if "crypt" in lobby.settings.get("packs", []) else "La Cripta: desactivada", 28)
+		_note(rules_summary(lobby.settings.get("rules", {})), 28)
+	elif session.is_plus():
+		_rules_block(lobby.settings.get("rules", {}), _send_rule, true, "crypt" in lobby.settings.get("packs", []), n)
 	if status != "":
 		_note(status, 32, UIKit.C.gold)
 	if is_host:

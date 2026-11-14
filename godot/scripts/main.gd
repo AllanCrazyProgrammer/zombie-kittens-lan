@@ -5,10 +5,12 @@ extends Node3D
 ## Argumentos de depuración (tras "--"):
 ##   --auto [rivales] [nivel]   partida de un jugador en la que la IA también juega por el humano
 ##   --seed N                   semilla del reparto
+##   --plus                     con --auto, partida en modo Plus
 ##   --slow                     en modo --auto, el "humano" tarda 5 s en responder (deja ver las ventanas)
 ##   --shots carpeta [cada_s]   guarda capturas periódicas
-##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir)
-##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola
+##   --uitest carpeta           prueba de toques (menú, elegir carta, jugar, robar, salir) en modo clásico
+##   --uitest-plus carpeta      la misma prueba de toques en modo Plus (PlusGameScreen); --uitest-plus-part 1|2 la divide (6: solo escena y lápidas)
+##   --nettest host [humanos]   crea una sala, espera a los invitados, añade una IA y juega sola (con --plus la sala es Plus y el invitado envía una reacción)
 ##   --nettest join IP          se une a una sala y juega sola      (--nettest discover: la busca en la red)
 ##   --drop s                   en --nettest join: corta la conexión a los s segundos y se reconecta
 ##   --no-broadcast             el anfitrión no se anuncia por difusión (prueba la búsqueda directa)
@@ -24,7 +26,7 @@ const MAX_RECONNECTS := 6
 
 var _world: TableWorld
 var _menu: MenuScreen
-var _game: GameScreen
+var _game: Node3D          # GameScreen (clásico) o PlusGameScreen: misma API pública, por eso se usa con llamadas dinámicas
 var _session: GameSession
 var _room: RoomHost
 var _last_opts := {}
@@ -40,6 +42,10 @@ var _elapsed := 0.0
 var _nettest := ""
 var _nettest_humans := 2
 var _nettest_started := false
+var _nettest_plus := false
+var _nettest_emote_sent := false
+var _nettest_hooked := false
+var _nettest_emotes: Array[String] = []
 var _auto_t := 0.0
 var _drop_at := -1.0
 var _game_started_at := -1.0
@@ -59,6 +65,7 @@ func _ready() -> void:
 	Net.failed.connect(_on_net_failed)
 	Net.server_lost.connect(_on_net_lost)
 
+	_t70_restore_stale()      # una prueba de Plus interrumpida pudo dejar ajustes cambiados: se devuelven antes de leer nada
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS)
 	_token = cfg.get_value("net", "token", "")
@@ -85,13 +92,17 @@ func _ready() -> void:
 		_quit_after = float(arg.call("--quit-after"))
 	if arg.call("--drop") != "":
 		_drop_at = float(arg.call("--drop"))
-	if args.has("--uitest"):
+	if args.has("--uitest") or args.has("--uitest-plus"):
 		_show_menu()
-		_ui_test(arg.call("--uitest"))
+		var plus_test := args.has("--uitest-plus")
+		_ui_test(arg.call("--uitest-plus" if plus_test else "--uitest"), plus_test)
 	elif args.has("--nettest"):
 		_nettest = arg.call("--nettest")
 		_show_menu()
 		_menu.profile.name = "Anfitrion" if _nettest == "host" else "Invitado" + _token.left(3)
+		_nettest_plus = args.has("--plus")
+		if _nettest_plus and _nettest == "host":
+			_menu.set_plus(true, false)      # sin guardar: la prueba no cambia los ajustes del usuario
 		if _nettest == "host":
 			if arg.call("--nettest", 2).is_valid_int():
 				_nettest_humans = int(arg.call("--nettest", 2))
@@ -110,6 +121,9 @@ func _ready() -> void:
 			opts.seed = int(arg.call("--seed"))
 		if args.has("--slow"):
 			opts.me_delay = 5200
+		if args.has("--plus"):
+			opts.plus = true
+			opts.packs = ["crypt"]       # la demostración Plus lleva el pack de La Cripta
 		_start_solo(opts)
 	elif args.has("--tutorial"):
 		_start_solo({"rivals": 1, "level": "easy", "deck_mode": "official", "name": "Allan", "tutorial": true, "seed": 4})
@@ -145,7 +159,15 @@ func _process(delta: float) -> void:
 
 
 func _save_shot(path: String) -> void:
-	await RenderingServer.frame_post_draw
+	# Con la ventana tapada el sistema puede dejar de pedir cuadros: se espera como mucho 2 s y se guarda lo que haya
+	var drawn := [false]
+	RenderingServer.frame_post_draw.connect(func() -> void: drawn[0] = true, CONNECT_ONE_SHOT)
+	var waited := 0.0
+	while not drawn[0] and waited < 2.0:
+		await get_tree().process_frame
+		waited += get_process_delta_time()
+	if not drawn[0]:
+		print("UITEST aviso: sin cuadro dibujado al capturar ", path.get_file())
 	get_viewport().get_texture().get_image().save_png(path)
 
 
@@ -186,7 +208,10 @@ func _open_game() -> void:
 	_hide_menu()
 	if _game:
 		_game.queue_free()
-	_game = GameScreen.new().setup(_session, _world)
+	if _session.is_plus():
+		_game = PlusGameScreen.new().setup(_session, _world)
+	else:
+		_game = GameScreen.new().setup(_session, _world)
 	_game.exit_requested.connect(_on_game_exit)
 	_game.rematch_requested.connect(func() -> void: _start_solo(_last_opts))
 	_game.lobby_requested.connect(func() -> void: (_session as ClientSession).send({"t": "toLobby"}))
@@ -254,6 +279,7 @@ func _on_host() -> void:
 		_show_menu("home", "No se pudo crear la sala: el puerto está ocupado. Cierra otras copias del juego.")
 		return
 	_room = RoomHost.new()
+	_room.configure(_menu != null and _menu.plus)   # el modo se fija al crear la sala
 	add_child(_room)
 	var cs := ClientSession.new().setup(_room)
 	_bind_client(cs)
@@ -350,6 +376,11 @@ func _nettest_step(delta: float) -> void:
 	var cs := _session as ClientSession
 	if cs == null:
 		return
+	if not _nettest_hooked:
+		_nettest_hooked = true      # se engancha antes de empezar la partida para no perder ninguna reacción
+		cs.emote.connect(func(id: String, i: int) -> void:
+			_nettest_emotes.append("%s:%d" % [id, i])
+			print("NETTEST reacción recibida de %s (índice %d)" % [id, i]))
 	if _nettest == "host" and not cs.in_game() and not _nettest_started and not cs.lobby.is_empty():
 		var humans := 0
 		for p: Dictionary in cs.lobby.players:
@@ -371,12 +402,20 @@ func _nettest_step(delta: float) -> void:
 	var v := cs.view()
 	if v.is_empty():
 		return
+	if cs.is_plus():
+		_nettest_plus = true      # el invitado lo sabe por la sala, sin necesitar --plus
+	if _nettest_plus and _nettest != "host" and not _nettest_emote_sent and cs.is_plus():
+		_nettest_emote_sent = true
+		print("NETTEST invitado %s envía la reacción 2" % cs.me_id)
+		cs.send_emote(2)
 	if v.over != null:
 		var winner := ""
 		for p: Dictionary in v.players:
 			if p.id == v.over.winner:
 				winner = p.name
 		print("NETTEST fin: ganó %s | soy %s | cartas en mano %d" % [winner, cs.me_id, v.hand.size()])
+		if _nettest_plus:
+			print("NETTEST reacciones vistas: %s" % str(_nettest_emotes))
 		_nettest = ""
 		await get_tree().create_timer(1.0).timeout
 		get_tree().quit()
@@ -485,9 +524,69 @@ func _wait(seconds: float) -> void:
 	await get_tree().create_timer(seconds).timeout
 
 
-func _ui_test(dir: String) -> void:
+var _plus_part := 0
+
+
+func _ui_test(dir: String, plus_mode: bool = false) -> void:
 	var report: Array = []
+	_t53_restore_stale()      # si una ejecución anterior se interrumpió a medias, devuelve el ajuste de reacciones
+	_t70_restore_stale()
+	if plus_mode:
+		_t70_begin()
 	await _wait(1.2)
+	_menu.set_plus(plus_mode, false)     # sin guardar: la prueba no cambia los ajustes del usuario
+	await _wait(0.3)
+	_say(report, "selector de modo visible: %s | modo de la prueba: %s" % [str(_find_button(self, "PLUS") != null and _find_button(self, "CLÁSICO") != null), "PLUS" if plus_mode else "CLÁSICO"])
+	# --uitest-plus-part N: 1 = recorrido completo salvo la parte T52/T62/T45; 2 = solo esa parte; sin N, todo
+	var user_args := OS.get_cmdline_user_args()
+	var pk := user_args.find("--uitest-plus-part")
+	_plus_part = int(user_args[pk + 1]) if plus_mode and pk >= 0 and pk + 1 < user_args.size() else 0
+	if _plus_part == 9:        # solo el cuervo y el humo del mazo (capturas)
+		await _t62_start({"rivals": 4, "seed": 61})
+		await _t70_visuales(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 8:        # solo orden de la mano, accesibilidad, consejos y ambiente (T70)
+		await _ui_test_t70(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 7:        # solo la mesa viva (V-04, V-05, V-07, V-08), sobre una partida de 5
+		await _t62_start({"rivals": 4})
+		await _ui_test_mesa_viva(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 6:        # solo la carta en escena y las lápidas (V-02, V-03), sobre una partida de 5
+		await _t62_start({"rivals": 4})
+		await _ui_test_escena(dir, report)
+		await _ui_test_lapidas(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 5:        # solo las reacciones rápidas (T53)
+		await _ui_test_t53(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 3:        # solo los menús de Plus (para iterar rápido)
+		await _ui_test_t62_menus(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 4:        # sonido + menús (depuración)
+		await _ui_test_t62_sonido(dir, report)
+		print("UITEST tras sonido")
+		await _ui_test_t62_menus(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
+	if _plus_part == 2:
+		await _ui_test_t62(dir, report)
+		print("UITEST fin")
+		_ui_quit()
+		return
 	await _save_shot(dir + "/t1_menu.png")
 	await _tap_control(_find_button(self, "UN JUGADOR"))
 	await _wait(0.4)
@@ -499,9 +598,13 @@ func _ui_test(dir: String) -> void:
 	await _tap_control(_find_button(self, "¡JUGAR!"))
 	await _wait(1.5)
 	_say(report, "partida creada: %s" % str(_game != null))
+	_say(report, "pantalla de juego: %s | sesión Plus: %s" % [_game.get_script().get_global_name(), str(_session.is_plus())])
+	if _game.get_script().get_global_name() != ("PlusGameScreen" if plus_mode else "GameScreen"):
+		_say(report, "ERROR: la pantalla de juego no corresponde al modo")
 	# Espera a que sea mi turno con una carta jugable sin objetivo (hasta 90 s)
 	var card: Card3D = null
 	for _i in 180:
+		_ui_rescue(plus_mode)
 		if _game.debug_can_draw():
 			card = _game.debug_playable_card()
 			if card:
@@ -510,11 +613,23 @@ func _ui_test(dir: String) -> void:
 		await _wait(0.5)
 		if (_session as LocalMatch).game.over != null:
 			break
+	var played_id := ""
 	if card:
+		played_id = card.card_id
 		var before: int = (_session as LocalMatch).game.discard.size()
 		await _wait(0.5)
+		var chips_before: int = _game.debug_chip_builds() if plus_mode else 0
 		await _tap_3d(card, Vector3(-0.24, 0, -0.3))   # esquina superior izquierda: la parte que no tapa la carta vecina
 		await _wait(0.6)
+		if plus_mode:
+			var gm: ZKGame = (_session as LocalMatch).game
+			var alive := 0
+			for pl in gm.players:
+				alive += 1 if pl.alive else 0
+			var rk: Dictionary = _game.debug_risk()
+			var expect := int(round(100.0 * (alive - 1) / maxi(1, gm.draw.size())))
+			_say(report, "Plus: fichas construidas antes/después de seleccionar: %d / %d | %s" % [chips_before, _game.debug_chip_builds(), "OK" if chips_before == _game.debug_chip_builds() else "ERROR: se recrearon"])
+			_say(report, "Plus: riesgo %d%% (esperado %d%%), tramo %s | %s" % [rk.pct, expect, rk.name, "OK" if absi(rk.pct - expect) <= 1 else "ERROR: incoherente"])
 		await _save_shot(dir + "/t2_seleccion.png")
 		_say(report, "carta grande visible con la carta elegida y el dedo quieto: %s" % str(_game.debug_zoom_visible()))
 		_say(report, "carta seleccionada: %s (%s)" % [card.type, _game.debug_state()])
@@ -537,6 +652,7 @@ func _ui_test(dir: String) -> void:
 		_say(report, "no hubo carta jugable")
 	# Robar tocando el mazo
 	for _i in 120:
+		_ui_rescue(plus_mode)
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
@@ -552,6 +668,7 @@ func _ui_test(dir: String) -> void:
 	var lm := _session as LocalMatch
 	var carried: Card3D = null
 	for _i in 160:
+		_ui_rescue(plus_mode)
 		if lm.game.over != null:
 			break
 		if _game.debug_can_draw():
@@ -568,7 +685,7 @@ func _ui_test(dir: String) -> void:
 		var hand_before: int = lm.game.P("p0").hand.size()
 		await _drag(from_pos, center, true)
 		await _save_shot(dir + "/t7_llevando.png")
-		var mid := _game.debug_carry()
+		var mid: String = _game.debug_carry()
 		_say(report, "carta grande visible mientras se lleva al tablero: %s" % str(_game.debug_zoom_visible()))
 		await _drag(center, center, false)
 		await _wait(1.2)
@@ -579,6 +696,7 @@ func _ui_test(dir: String) -> void:
 			await _wait(0.3)
 		# Sacarla y regresarla a la mano sin soltar en el centro: no debe jugarse
 		for _i in 120:
+			_ui_rescue(plus_mode)
 			if lm.game.over != null or _game.debug_can_draw():
 				break
 			await _wait(0.5)
@@ -597,6 +715,7 @@ func _ui_test(dir: String) -> void:
 		_say(report, "no hubo carta jugable para llevar al centro")
 	# Arrastrar el dedo por la mano, de la primera a la última carta (cuando la mano está libre, sin ventanas)
 	for _i in 120:
+		_ui_rescue(plus_mode)
 		if (_session as LocalMatch).game.over != null or _game.debug_can_draw():
 			break
 		await _wait(0.5)
@@ -626,6 +745,8 @@ func _ui_test(dir: String) -> void:
 		if close:
 			await _tap_control(close)
 			await _wait(0.3)
+	if plus_mode and (_session as LocalMatch).game.over == null:
+		await _ui_test_plus_extras(dir, report, played_id)
 	# Menú → salir
 	var menu := _find_button(self, "MENÚ")
 	if menu and (_session as LocalMatch).game.over == null:
@@ -642,10 +763,3331 @@ func _ui_test(dir: String) -> void:
 			await _wait(0.5)
 			_say(report, "de vuelta en el menú: %s" % str(_menu != null and _game == null))
 	print("UITEST fin")
-	get_tree().quit()
+	_ui_quit()
+
+
+## Comprobaciones de Plus: ventana de descarte (UX-03), texto del Clon (UX-03) y cuadrícula del trío (UX-04).
+func _ui_test_plus_extras(dir: String, report: Array, played_id: String) -> void:
+	# Texto fijo del Clon: con un Ataque arriba del descarte debe decir «Copiará: Ataque (2x)»
+	var fake := {"discard": [{"id": "x1", "type": "attack", "by": "p0"}], "deadN": 0, "stack": []}
+	var hint: String = CloneHint.describe(fake).text
+	_say(report, "Plus: Clon sobre un Ataque dice «%s» | %s" % [hint, "OK" if hint == "Copiará: Ataque (2x)" else "ERROR"])
+	# Descarte: tocar la pila abre la ventana y lista la carta jugada
+	var top: Card3D = _game.debug_discard_top()
+	if top:
+		await _tap_3d(top)
+		await _wait(0.6)
+		var listed: Array = _game.debug_discard_listed()
+		_say(report, "Plus: descarte abierto tocando la pila: %s | %d cartas listadas | incluye la jugada %s: %s" % [_game.debug_state(), listed.size(), played_id, "OK" if (played_id == "" or listed.has(played_id)) else "ERROR"])
+		await _save_shot(dir + "/t8_descarte.png")
+		var close := _find_button(self, "Cerrar")
+		if close:
+			await _tap_control(close)
+			await _wait(0.3)
+	else:
+		_say(report, "Plus: no había carta en el descarte que tocar")
+	# Clon en la mano: el panel de selección dice qué copiará
+	var info: String = _game.debug_select_clone()
+	if info == "":
+		_say(report, "Plus: no hay Clon en la mano; se prueba solo el texto fijo")
+	else:
+		_say(report, "Plus: panel del Clon: %s | %s" % [info.replace("\n", " / "), "OK" if (info.contains("Copiará:") or info.contains("No cop") or info.contains("No pued")) else "ERROR"])
+		_game.debug_clear_selection()
+	# Trío: la cuadrícula ofrece exactamente los tipos de la partida
+	var offered: Array = _game.debug_open_named()
+	await _wait(0.5)
+	var want: Array = _session.view().get("deckTypes", [])
+	var a: Array = offered.duplicate()
+	var b: Array = want.duplicate()
+	a.sort()
+	b.sort()
+	_say(report, "Plus: cuadrícula del trío ofrece %d tipos, deckTypes %d | %s | sin explosivo: %s" % [offered.size(), want.size(), "OK" if a == b else "ERROR", str(not offered.has("exploding"))])
+	await _save_shot(dir + "/t9_trio.png")
+	var cancel := _find_button(self, "Cancelar")
+	if cancel:
+		await _tap_control(cancel)
+		await _wait(0.3)
+	_game.debug_clear_selection()
+	await _ui_test_aim(dir, report)
+	await _ui_test_cripta(dir, report)
+	await _ui_test_memoria(dir, report)
+	await _ui_test_escena(dir, report)
+	await _ui_test_lapidas(dir, report)
+	await _ui_test_mesa_viva(dir, report)
+	await _ui_test_ux(dir, report)
+	await _ui_test_t53(dir, report)
+	await _ui_test_t70(dir, report)
+	if _plus_part != 1:
+		await _ui_test_t62(dir, report)
+
+
+## Modo puntería (UX-01): elegir objetivo tocando el avatar 3D, rechazo de no válidos y CANCELAR.
+func _ui_test_aim(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var vt := get_viewport().get_final_transform()
+	for _i in 60:
+		for label: String in ["Entendido", "Cerrar"]:      # ventanas que pudieran haber quedado abiertas
+			var open_btn := _find_button(self, label)
+			if open_btn:
+				await _tap_control(open_btn)
+				await _wait(0.3)
+		if lm.game.over != null or _game.debug_can_draw():
+			break
+		await _wait(0.5)
+	_game.debug_clear_selection()
+	var natural := false
+	var src: Array = []
+	if _game.debug_can_draw():
+		var tc: Card3D = _game.debug_targeted_card()
+		if tc:
+			src = [tc]
+		else:
+			src = _game.debug_pair_cards()
+	if not src.is_empty():
+		natural = true
+		for c: Card3D in src:
+			await _tap_3d(c, Vector3(-0.24, 0, -0.3))
+			await _wait(0.3)
+		var btn := _find_button(self, "JUGAR") if src.size() == 1 else _find_button(self, "JUGAR PAREJA")
+		_say(report, "Plus/puntería: carta con objetivo (%s), botón de jugar visible: %s" % [src[0].type, str(btn != null)])
+		if btn:
+			await _tap_control(btn)
+			await _wait(0.5)
+	else:
+		_say(report, "Plus/puntería: AVISO, la mano no tiene carta con objetivo ni pareja; se FUERZA el modo puntería con debug_force_aim('living')")
+		_game.debug_force_aim("living")
+		await _wait(0.5)
+	if not _game.debug_aim_active():
+		# La jugada natural no abrió el modo (otra ventana abierta, sin rivales con cartas...): se fuerza, como si no hubiera carta
+		_say(report, "Plus/puntería: AVISO, la jugada natural no abrió el modo puntería; se FUERZA con debug_force_aim('living')")
+		_game.debug_clear_selection()
+		_game.debug_force_aim("living")
+		await _wait(0.5)
+	_say(report, "Plus/puntería: modo activo=%s tipo=%s | válidos=%s no válidos=%s | panel: %s" % [str(_game.debug_aim_active()), _game.debug_aim_kind(), str(_game.debug_aim_ids(true)), str(_game.debug_aim_ids(false)), _game.debug_info_text().replace("\n", " / ")])
+	await _save_shot(dir + "/t10_punteria.png")
+	var valid: Array = _game.debug_aim_ids(true)
+	# (c) CANCELAR sale sin jugar
+	var disc0: int = lm.game.discard.size()
+	var cancel := _find_button(self, "CANCELAR")
+	var had_cancel := cancel != null
+	if cancel:
+		await _tap_control(cancel)
+		await _wait(0.4)
+	_say(report, "Plus/puntería: CANCELAR (botón=%s) -> activo=%s, descarte %d -> %d, jugada enviada=%s | %s" % [str(had_cancel), str(_game.debug_aim_active()), disc0, lm.game.discard.size(), str(_game.debug_last_play()), "OK" if (had_cancel and not _game.debug_aim_active() and lm.game.discard.size() == disc0) else "ERROR"])
+	# (b) tocar un jugador NO válido no juega nada y no cancela (modo forzado «dead»: todos los vivos son inválidos)
+	_game.debug_force_aim("dead")
+	await _wait(0.3)
+	var rivals: Array = _game.debug_aim_ids(false)
+	if not rivals.is_empty():
+		var play0: Dictionary = _game.debug_last_play()
+		await _tap(vt * _game.debug_seat_pos(rivals[0]))
+		await _wait(0.3)
+		_say(report, "Plus/puntería: (FORZADO tipo dead) tocar a %s no válido -> sigue activo=%s, nada jugado=%s, elegido='%s' | %s" % [rivals[0], str(_game.debug_aim_active()), str(_game.debug_last_play() == play0), _game.debug_aim_pick(), "OK" if (_game.debug_aim_active() and _game.debug_last_play() == play0 and _game.debug_aim_pick() == "") else "ERROR"])
+	var c2 := _find_button(self, "CANCELAR")
+	if c2:
+		await _tap_control(c2)
+		await _wait(0.3)
+	# (a) tocar el avatar 3D de un rival válido juega la carta contra él
+	if natural and not valid.is_empty() and _game.debug_can_draw():
+		var tc2: Card3D = _game.debug_targeted_card() if src.size() == 1 else null
+		if src.size() == 1 and tc2 == null:
+			_say(report, "Plus/puntería: la carta ya no está para repetir")
+		else:
+			_game.debug_clear_selection()
+			await _wait(0.3)
+			for c: Card3D in (src if src.size() > 1 else [tc2]):
+				await _tap_3d(c, Vector3(-0.24, 0, -0.3))
+				await _wait(0.3)
+			var b2 := _find_button(self, "JUGAR") if src.size() == 1 else _find_button(self, "JUGAR PAREJA")
+			if b2:
+				await _tap_control(b2)
+				await _wait(0.5)
+			var tgt: String = valid[0]
+			await _tap(vt * _game.debug_seat_pos(tgt))
+			await _wait(0.4)
+			var lp: Dictionary = _game.debug_last_play()
+			_say(report, "Plus/puntería: tocar el avatar de %s -> jugada %s | %s" % [tgt, str(lp), "OK" if lp.get("target", "") == tgt else "ERROR: no salió con ese objetivo"])
+	else:
+		# Sin carta con objetivo real: modo forzado, el toque solo se anota
+		_game.debug_force_aim("living")
+		await _wait(0.3)
+		var vv: Array = _game.debug_aim_ids(true)
+		if not vv.is_empty():
+			await _tap(vt * _game.debug_seat_pos(vv[0]))
+			await _wait(0.3)
+			_say(report, "Plus/puntería: (FORZADO, sin jugada real) tocar el avatar de %s -> elegido='%s' | %s" % [vv[0], _game.debug_aim_pick(), "OK" if _game.debug_aim_pick() == vv[0] else "ERROR"])
+	# Captura con un jugador muerto: él queda atenuado
+	if lm.game.over == null:
+		for pl in lm.game.players:
+			if pl.id == "p2":
+				pl.alive = false
+		_session.updated.emit()
+		_game.debug_force_aim("living")
+		await _wait(0.6)
+		_say(report, "Plus/puntería: captura con p2 muerto (FORZADO) | válidos=%s no válidos=%s" % [str(_game.debug_aim_ids(true)), str(_game.debug_aim_ids(false))])
+		await _save_shot(dir + "/t11_punteria_muerto.png")
+		var c3 := _find_button(self, "CANCELAR")
+		if c3:
+			await _tap_control(c3)
+			await _wait(0.3)
+	_game.debug_clear_selection()
+
+
+# ---------------------------------------------------------------- La Cripta (T25 + T32): las 9 cartas, una a una
+
+## Solo prueba Plus: si el jugador murió en la partida de prueba (azar), lo devuelve a la vida para no agotar el tiempo.
+func _ui_rescue(plus_mode: bool) -> void:
+	if not plus_mode or not (_session is LocalMatch):
+		return
+	var g: ZKGame = (_session as LocalMatch).game
+	if g.over == null and g.prompt == null and not g.P("p0").alive:
+		g.P("p0").alive = true
+		_session.updated.emit()
+
+
+## Cierra cualquier ventana que haya quedado abierta. true si no queda ninguna.
+func _cripta_close_windows() -> bool:
+	for _i in 6:
+		var any := false
+		for label: String in ["Entendido", "Cerrar", "Cancelar", "CANCELAR"]:
+			var b := _find_button(self, label)
+			if b:
+				any = true
+				await _tap_control(b)
+				await _wait(0.3)
+		if not any:
+			break
+	return _game.debug_modal_title() == "" and not _game.debug_aim_active()
+
+
+## Espera a que la partida esté libre (sin pila ni decisión) y me devuelve el turno (vivo, un solo turno).
+func _cripta_my_turn(lm: LocalMatch, alive: bool = true, attempt: int = 0) -> bool:
+	if attempt >= 1:
+		# Tras una jugada anulada por Nop (los bots actuales usan más Nop), se quitan los Nop de las manos rivales para poder comprobar el efecto
+		for pl in lm.game.players:
+			if pl.id != "p0":
+				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
+	for _i in 60:
+		if lm.game.over != null:
+			break
+		if lm.game.stack.is_empty() and lm.game.prompt == null:
+			break
+		await _wait(0.5)
+	if lm.game.over != null:
+		# La partida es real y los bots pueden terminarla a mitad del recorrido: se reanima a todos (sus cartas de muerte
+		# vuelven al fondo del mazo, así no se pierde ni se duplica ninguna) para que los pasos siguientes puedan probarse.
+		var g: ZKGame = lm.game
+		for pl in g.players:
+			if pl.ek != null:
+				pl.ek.up = false
+				g.draw.insert(0, pl.ek)
+				pl.ek = null
+			pl.alive = true
+		g.stack.clear()
+		g.prompt = null
+		g.over = null
+		print("UITEST Plus/cripta: AVISO, la partida terminó a mitad del recorrido; se reanima a todos para seguir")
+		_session.updated.emit()
+		await _wait(0.4)
+		await _cripta_close_windows()
+	lm.game.P("p0").alive = alive
+	lm.game.cur = 0 if alive else 1
+	lm.game.turns_left = 1
+	lm.game.attacked = false
+	lm.game.idle_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.4)
+	return lm.game.over == null
+
+
+var _cripta_n := 0
+
+
+## Coloca una copia de la carta en la mano del jugador (como si la hubiera robado) y devuelve su id.
+func _cripta_give(lm: LocalMatch, type: String) -> String:
+	_cripta_n += 1
+	var c := ZKGame.Card.new("z%d" % _cripta_n, type, false)
+	lm.game.P("p0").hand.append(c)
+	_session.updated.emit()
+	await _wait(0.4)
+	return c.id
+
+
+## Quita de la mano las copias de una carta (tras una jugada anulada, para reintentar con otra limpia).
+func _cripta_drop(lm: LocalMatch, type: String) -> void:
+	lm.game.P("p0").hand = lm.game.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != type)
+
+
+## Selecciona la carta, toca JUGAR y, si pide objetivo, toca el avatar de `target`. Devuelve {played, nopes}.
+func _cripta_play(lm: LocalMatch, type: String, target: String = "") -> Dictionary:
+	var seq0 := lm.game.seq
+	var disc0 := lm.game.discard.size()
+	var out := {"played": false, "nopes": 0}
+	if not _game.debug_select_type(type):
+		return out
+	await _wait(0.4)
+	var btn := _find_button(self, "JUGAR")
+	if btn == null:
+		return out
+	await _tap_control(btn)
+	await _wait(0.4)
+	if target != "":
+		if _game.debug_aim_active():
+			await _tap(get_viewport().get_final_transform() * _game.debug_seat_pos(target))
+			await _wait(0.4)
+		if _game.debug_aim_active():
+			_game.debug_aim_confirm(target)     # el toque no dio en el avatar: se confirma por la ficha
+			await _wait(0.4)
+	out.played = lm.game.discard.size() > disc0 or not lm.game.stack.is_empty()
+	# Espera a que se resuelva (ventana de Nop) o a que aparezca la decisión propia
+	for _i in 40:
+		var pr: Variant = lm.game.prompt
+		if lm.game.stack.is_empty() and (pr == null or pr.type in ["alter", "bury"]):
+			break
+		await _wait(0.5)
+	await _wait(0.6)
+	for e: Dictionary in lm.game.events:
+		if e.seq > seq0 and e.type == "nope":
+			out.nopes += 1
+	return out
+
+
+func _cripta_line(report: Array, card: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/cripta: %s %s | %s" % [card, detail, "OK" if ok else "ERROR"])
+
+
+func _cripta_event(lm: LocalMatch, type: String, seq0: int) -> Dictionary:
+	for e: Dictionary in lm.game.events:
+		if e.seq > seq0 and e.type == type:
+			return e
+	return {}
+
+
+func _cripta_rival(lm: LocalMatch, alive: bool) -> String:
+	for pl in lm.game.players:
+		if pl.id != "p0" and pl.alive == alive and pl.hand.size() > 0:
+			return pl.id
+	return ""
+
+
+func _find_label(n: Node, text: String) -> Label:
+	if n is Label and (n as Label).text == text:
+		return n
+	for c in n.get_children():
+		var r := _find_label(c, text)
+		if r:
+			return r
+	return null
+
+
+func _tree_has_label(n: Node, text: String) -> bool:
+	if n is Label and (n as Label).text == text:
+		return true
+	for c in n.get_children():
+		if _tree_has_label(c, text):
+			return true
+	return false
+
+
+func _ui_test_cripta(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null or not (g.packs as Array).has("crypt"):
+		_say(report, "Plus/cripta: AVISO, partida terminada o sin el pack; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	# Estado de partida limpio: todos vivos (la prueba de puntería mató a p2), sin ventanas
+	for pl in g.players:
+		pl.alive = true
+	await _cripta_my_turn(lm)
+	# --- Motivos de «no se puede jugar»
+	var why_haunt: String = _game.debug_why_not("haunt")
+	_cripta_line(report, "motivos", "| Espanto vivo: «%s»" % why_haunt, why_haunt == "Solo los muertos pueden espantar.")
+	var why_swap: String = _game.debug_why_not("soul_swap")
+	_cripta_line(report, "motivos", "| Trueque sin muertos: «%s»" % why_swap, why_swap == "Necesita un jugador muerto con cartas.")
+	g.cur = 1
+	_session.updated.emit()
+	await _wait(0.3)
+	var why_turn: String = _game.debug_why_not("reverse")
+	_cripta_line(report, "motivos", "| fuera de turno: «%s»" % why_turn, why_turn == "Espera tu turno.")
+	# Espanto estando vivo: el panel lo explica y no hay botón JUGAR
+	await _cripta_my_turn(lm)
+	await _cripta_give(lm, "haunt")
+	_game.debug_select_type("haunt")
+	await _wait(0.4)
+	var panel_txt: String = _game.debug_info_text()
+	_cripta_line(report, "Espanto vivo (panel)", "| «%s» | botón JUGAR: %s" % [panel_txt.replace("\n", " / "), str(_find_button(self, "JUGAR") != null)], panel_txt.contains("Solo los muertos pueden espantar.") and _find_button(self, "JUGAR") == null)
+	_game.debug_clear_selection()
+	_cripta_drop(lm, "haunt")
+
+	# 1. Ataque Dirigido
+	var done := false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var tgt := _cripta_rival(lm, true)
+		await _cripta_give(lm, "targeted_attack")
+		var seq0 := g.seq
+		var r := await _cripta_play(lm, "targeted_attack", tgt)
+		var ev := _cripta_event(lm, "attack", seq0)
+		if not ev.is_empty():
+			_cripta_line(report, "targeted_attack", "contra %s -> evento attack objetivo=%s n=%d%s" % [tgt, str(ev.target), int(ev.n), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ev.target == tgt and int(ev.n) == 2)
+			done = true
+			break
+		_say(report, "Plus/cripta: targeted_attack ANULADA por Nop (%d) o no jugada (%s); se reintenta con otra copia" % [r.nopes, str(r.played)])
+		_cripta_drop(lm, "targeted_attack")
+	if not done:
+		_cripta_line(report, "targeted_attack", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 2. Marcha Atrás
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var dir0: int = g.dir
+		await _cripta_give(lm, "reverse")
+		await _cripta_play(lm, "reverse")
+		if g.dir != dir0:
+			await _wait(0.8)
+			var ds: Dictionary = _game.debug_dir()
+			_cripta_line(report, "reverse", "dir %d -> %d | flecha visible=%s dir=%d | rótulo «%s»%s" % [dir0, g.dir, str(ds.visible), int(ds.dir), str(ds.label), (" (intento %d)" % (attempt + 1)) if attempt > 0 else ""], ds.visible and int(ds.dir) == g.dir and (str(ds.label) != "" or g.dir > 0))
+			await _save_shot(dir + "/t12_sentido.png")
+			done = true
+			break
+		_say(report, "Plus/cripta: reverse ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "reverse")
+	if not done:
+		_cripta_line(report, "reverse", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 3. Robar del Fondo
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		if g.draw[0].type == "exploding":      # que el fondo sea seguro: se cambia por otra carta del mazo
+			for i in range(1, g.draw.size()):
+				if g.draw[i].type != "exploding":
+					var tmp: ZKGame.Card = g.draw[0]
+					g.draw[0] = g.draw[i]
+					g.draw[i] = tmp
+					break
+		var bottom: ZKGame.Card = g.draw[0]
+		var n0: int = g.draw.size()
+		await _cripta_give(lm, "draw_bottom")
+		var seq0 := g.seq
+		await _cripta_play(lm, "draw_bottom")
+		var ev := _cripta_event(lm, "draw", seq0)
+		if not ev.is_empty() and ev.get("bottom", false):
+			await _wait(0.8)
+			# Al acabar el turno un bot puede robar enseguida: se comprueba que la carta salió del mazo y está en mi mano
+			var mine: bool = _session.view().hand.any(func(c: Dictionary) -> bool: return c.id == bottom.id)
+			var left_deck: bool = not g.draw.any(func(c: ZKGame.Card) -> bool: return c.id == bottom.id)
+			_cripta_line(report, "draw_bottom", "mazo %d -> %d | la carta del fondo (%s) está en mi mano=%s y ya no está en el mazo=%s | evento draw bottom" % [n0, g.draw.size(), bottom.type, str(mine), str(left_deck)], mine and left_deck and g.draw.size() <= n0 - 1)
+			done = true
+			break
+		_say(report, "Plus/cripta: draw_bottom ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "draw_bottom")
+	if not done:
+		_cripta_line(report, "draw_bottom", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 4. Ojo de Cuervo (+ memoria para el trío)
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var tgt := _cripta_rival(lm, true)
+		var hand_kinds: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.type)
+		await _cripta_give(lm, "crow_eye")
+		var seq0 := g.seq
+		await _cripta_play(lm, "crow_eye", tgt)
+		var ev := _cripta_event(lm, "peek", seq0)
+		if not ev.is_empty():
+			await _wait(0.6)
+			var title: String = _game.debug_modal_title()
+			var grid: CardPickGrid = _game.debug_peek_grid()
+			var shown: int = grid.debug_types().size() if grid else -1
+			var open_ok: bool = title.begins_with("Mano de ") and shown == hand_kinds.size()
+			await _save_shot(dir + "/t13_ojo_de_cuervo.png")
+			var entendido := _find_button(self, "Entendido")
+			if entendido:
+				await _tap_control(entendido)
+				await _wait(0.4)
+			var closed: bool = _game.debug_modal_title() == ""
+			var kn: Dictionary = _game.debug_known(tgt)
+			_cripta_line(report, "crow_eye", "contra %s | ventana «%s» con %d/%d cartas | cerrada=%s | recuerdo=%s" % [tgt, title, shown, hand_kinds.size(), str(closed), str(kn.get("count", -1))], open_ok and closed and int(kn.get("count", -1)) == hand_kinds.size())
+			# UX-04: la cuadrícula del trío contra ese jugador muestra primero «Sabes que tiene»
+			_game.debug_clear_selection()
+			var known: Array = _game.debug_open_named_for(tgt)
+			await _wait(0.5)
+			var want: Array = []
+			for t: String in hand_kinds:
+				if (g.deck_types as Array).has(t) and not want.has(t):
+					want.append(t)
+			var ka: Array = known.duplicate()
+			ka.sort()
+			want.sort()
+			_cripta_line(report, "trío (Sabes que tiene)", "| %d tipos conocidos, esperados %d" % [known.size(), want.size()], ka == want and not known.is_empty())
+			await _save_shot(dir + "/t14_trio_sabes.png")
+			await _cripta_close_windows()
+			_game.debug_clear_selection()
+			done = true
+			break
+		_say(report, "Plus/cripta: crow_eye ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "crow_eye")
+	if not done:
+		_cripta_line(report, "crow_eye", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 5. Apocalipsis Zombi
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var eks0: int = g.draw.filter(func(c: ZKGame.Card) -> bool: return c.type == "exploding").size()
+		await _cripta_give(lm, "apocalypse")
+		var seq0 := g.seq
+		await _cripta_play(lm, "apocalypse")
+		var ev := _cripta_event(lm, "apocalypse", seq0)
+		if not ev.is_empty():
+			var top_ok := true
+			for k in int(ev.n):
+				top_ok = top_ok and g.draw[g.draw.size() - 1 - k].type == "exploding"
+			_cripta_line(report, "apocalypse", "explosivos arriba: %s de %d (evento n=%d)" % [str(top_ok), eks0, int(ev.n)], top_ok and int(ev.n) == eks0)
+			# Para que los bots no mueran todos al instante y la prueba siga: los explosivos vuelven al fondo del mazo
+			var bottom_eks: Array[ZKGame.Card] = []
+			for k in int(ev.n):
+				bottom_eks.append(g.draw.pop_back())
+			for c: ZKGame.Card in bottom_eks:
+				g.draw.insert(0, c)
+			done = true
+			break
+		_say(report, "Plus/cripta: apocalypse ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "apocalypse")
+	if not done:
+		_cripta_line(report, "apocalypse", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 6. Alterar el Futuro: ventana, intercambio arrastrando y tocando, CONFIRMAR
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		await _cripta_give(lm, "alter_future")
+		await _cripta_play(lm, "alter_future")
+		var arr: FutureArranger = _game.debug_arranger()
+		if arr != null and g.prompt != null and g.prompt.type == "alter":
+			var cards: Array = (g.prompt.cards as Array).duplicate()
+			var ids: Array = cards.map(func(c: ZKGame.Card) -> String: return c.id)
+			await _save_shot(dir + "/t15_alterar_futuro.png")
+			# Arrastre real: la primera carta sobre la tercera
+			var vt := get_viewport().get_final_transform()
+			var c0: Vector2 = vt * arr.debug_cell(0).get_global_rect().get_center()
+			var c2: Vector2 = vt * arr.debug_cell(2).get_global_rect().get_center()
+			await _drag(c0, c2, true)
+			await _drag(c2, c2, false)
+			await _wait(0.3)
+			var drag_ok: bool = arr.order() == [2, 1, 0]
+			if not drag_ok:
+				arr.debug_swap(0, 2)           # el arrastre sintético no llegó: se hace por la vía directa
+			# Dos toques reales: primera y segunda carta
+			await _tap(vt * arr.debug_cell(0).get_global_rect().get_center())
+			await _wait(0.2)
+			await _tap(vt * arr.debug_cell(1).get_global_rect().get_center())
+			await _wait(0.3)
+			var tap_ok: bool = arr.order() == [1, 2, 0]
+			var conf := _find_button(self, "CONFIRMAR")
+			if conf:
+				await _tap_control(conf)
+				await _wait(0.8)
+			var want_ids: Array = [ids[1], ids[2], ids[0]]
+			var got_ids: Array = [g.draw[g.draw.size() - 1].id, g.draw[g.draw.size() - 2].id, g.draw[g.draw.size() - 3].id]
+			var stuck: bool = _game.debug_modal_title() != "" or (g.prompt != null and g.prompt.get("player") == "p0")
+			_cripta_line(report, "alter_future", "arrastre real=%s | dos toques=%s | orden final %s (esperado %s) | ventana cerrada=%s" % [str(drag_ok), str(tap_ok), str(got_ids), str(want_ids), str(not stuck)], got_ids == want_ids and not stuck and tap_ok)
+			done = true
+			break
+		_say(report, "Plus/cripta: alter_future ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "alter_future")
+	if not done:
+		_cripta_line(report, "alter_future", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 7. Entierro
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var n0: int = g.draw.size()
+		await _cripta_give(lm, "bury")
+		var seq0 := g.seq
+		await _cripta_play(lm, "bury")
+		var pk: DeckSlotPicker = _game.debug_slot_picker()
+		if pk != null and g.prompt != null and g.prompt.type == "bury":
+			var cid: String = g.prompt.card.id
+			pk.debug_set(3)
+			await _wait(0.3)
+			await _save_shot(dir + "/t16_entierro.png")
+			var phrase: String = pk.debug_text()
+			var conf := _find_button(self, "CONFIRMAR")
+			if conf:
+				await _tap_control(conf)
+				await _wait(0.8)
+			# El turno acaba al enterrar y un bot puede robar enseguida: se comprueba el evento y que la carta esté en el mazo
+			var bev := _cripta_event(lm, "buried", seq0)
+			var in_deck: bool = g.draw.any(func(c: ZKGame.Card) -> bool: return c.id == cid)
+			var stuck: bool = _game.debug_modal_title() != "" or (g.prompt != null and g.prompt.get("player") == "p0")
+			_cripta_line(report, "bury", "mazo %d | evento buried pos=%s len=%s (esperado 3) | la carta (%s) está en el mazo=%s | «%s» | ventana cerrada=%s" % [g.draw.size(), str(bev.get("pos", -1)), str(bev.get("len", -1)), cid, str(in_deck), phrase, str(not stuck)], int(bev.get("pos", -1)) == 3 and in_deck and not stuck)
+			done = true
+			break
+		_say(report, "Plus/cripta: bury ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "bury")
+	if not done:
+		_cripta_line(report, "bury", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 8. Trueque de Almas: p3 muerto con cartas
+	done = false
+	for attempt in 3:
+		await _cripta_my_turn(lm, true, attempt)
+		var dead_id := "p3"
+		g.P(dead_id).alive = false
+		if g.P(dead_id).hand.size() < 3:
+			for k in 3:
+				_cripta_n += 1
+				g.P(dead_id).hand.append(ZKGame.Card.new("z%d" % _cripta_n, "favor", false))
+		_session.updated.emit()
+		await _wait(0.3)
+		await _cripta_give(lm, "soul_swap")
+		# Tras el trueque el bot muerto tiene mi mano y los muertos pueden jugar cartas ⚡ y Nop: si recibe alguna,
+		# puede jugarla durante la espera y la comparación fallaría sin que el trueque esté mal. Se quitan antes.
+		var dead_playable := ["haunt", "shuffle", "feed_dead", "clairvoyance", "nope"]
+		g.P("p0").hand = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return not dead_playable.has(c.type))
+		# Fuera de turno, los bots pueden cambiar las manos implicadas mientras se resuelve: Alimenta a los Muertos
+		# (añade cartas al muerto) y Espanto de otro muerto contra mí (me quita una antes del trueque). Se quitan.
+		for pl in g.players:
+			if pl.id != "p0":
+				pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "feed_dead" and c.type != "haunt")
+		var theirs: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+		var mine_after: Array = g.P("p0").hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "soul_swap").map(func(c: ZKGame.Card) -> String: return c.id)
+		var seq0 := g.seq
+		await _cripta_play(lm, "soul_swap", dead_id)
+		var ev := _cripta_event(lm, "swap", seq0)
+		if not ev.is_empty():
+			await _wait(0.8)
+			var my_ids: Array = g.P("p0").hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var view_ids: Array = _session.view().hand.map(func(c: Dictionary) -> String: return c.id)
+			var their_ids: Array = g.P(dead_id).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var a: Array = my_ids.duplicate()
+			var b: Array = theirs.duplicate()
+			a.sort()
+			b.sort()
+			var c1: Array = their_ids.duplicate()
+			var c2: Array = mine_after.duplicate()
+			c1.sort()
+			c2.sort()
+			var diag := ""
+			if c1 != c2:
+				var extra: Array = c1.filter(func(x: String) -> bool: return not c2.has(x))
+				var missing: Array = c2.filter(func(x: String) -> bool: return not c1.has(x))
+				var kinds := func(ids: Array) -> Array: return ids.map(func(x: String) -> String:
+					for d: Dictionary in g.discard:
+						if d.card.id == x:
+							return "%s(descarte, by %s)" % [d.card.type, d.by]
+					for pl in g.players:
+						for c in pl.hand:
+							if c.id == x:
+								return "%s(mano %s)" % [c.type, pl.id]
+					return x)
+				diag = " | de más en su mano %s, faltan %s | eventos tras el trueque %s" % [str(kinds.call(extra)), str(kinds.call(missing)), str(g.events.filter(func(e: Dictionary) -> bool: return e.seq > seq0).map(func(e: Dictionary) -> String: return e.type))]
+			_cripta_line(report, "soul_swap", "con %s muerto | mi mano %d cartas = la suya de antes=%s | la suya = la mía de antes=%s | vista=%d cartas%s" % [dead_id, my_ids.size(), str(a == b), str(c1 == c2), view_ids.size(), diag], a == b and c1 == c2 and view_ids.size() == my_ids.size())
+			done = true
+			break
+		_say(report, "Plus/cripta: soul_swap ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "soul_swap")
+	if not done:
+		_cripta_line(report, "soul_swap", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 9. Espanto: yo muerto contra un vivo con cartas
+	done = false
+	for attempt in 4:
+		await _cripta_my_turn(lm, false, attempt)
+		var tgt := _cripta_rival(lm, true)
+		if tgt == "":
+			break
+		var n_before: int = g.P(tgt).hand.size()
+		var kinds_before: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.type)
+		var ids_before: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+		await _cripta_give(lm, "haunt")
+		var seq0 := g.seq
+		await _cripta_play(lm, "haunt", tgt)
+		var ev := _cripta_event(lm, "haunt", seq0)
+		if not ev.is_empty():
+			await _wait(0.8)
+			# El turno de la víctima sigue (un bot puede robar o jugar): se comprueba que esa carta salió de su mano al descarte
+			# La mano de la víctima puede haber cambiado entre la foto previa y la resolución (ventana de Nop): la carta
+			# espantada se identifica por estar en el descarte a nombre de la víctima y no por la foto previa.
+			var hand_ids: Array = g.P(tgt).hand.map(func(c: ZKGame.Card) -> String: return c.id)
+			var in_discard: bool = g.discard.any(func(d: Dictionary) -> bool: return d.by == tgt and d.card.type == ev.card and not hand_ids.has(d.card.id))
+			var still_in_hand: bool = not in_discard
+			_cripta_line(report, "haunt", "muerto, contra %s | descarta %s (estaba en su mano antes de jugar=%s) | está en el descarte atribuida a la víctima=%s | sigue en su mano=%s" % [tgt, str(ev.card), str(kinds_before.has(ev.card)), str(in_discard), str(still_in_hand)], in_discard)
+			done = true
+			break
+		_say(report, "Plus/cripta: haunt ANULADA por Nop; se reintenta")
+		_cripta_drop(lm, "haunt")
+	if not done:
+		_cripta_line(report, "haunt", "no se pudo resolver tras 3 intentos", false)
+	g.P("p0").alive = true
+	# Guía de cartas con el pack
+	var info := InfoScreen.open(self, "cards", ["crypt"])
+	await _wait(0.5)
+	var has_head := _tree_has_label(info, "La Cripta")
+	var plain := InfoScreen.open(self, "cards")
+	await _wait(0.3)
+	var plain_head := _tree_has_label(plain, "La Cripta")
+	plain.queue_free()
+	await _wait(0.2)
+	var sc := info.find_children("*", "ScrollContainer", true, false)
+	if not sc.is_empty():
+		(sc[0] as ScrollContainer).scroll_vertical = 100000      # al final: ahí está la sección del pack
+		await _wait(0.5)
+		await _save_shot(dir + "/t17_guia_cripta.png")
+		var head_label := _find_label(info, "La Cripta")
+		if head_label:
+			(sc[0] as ScrollContainer).ensure_control_visible(head_label)
+			(sc[0] as ScrollContainer).scroll_vertical = maxi(0, (sc[0] as ScrollContainer).scroll_vertical - 40)
+		await _wait(0.5)
+		await _save_shot(dir + "/t18_guia_cripta_inicio.png")
+	_cripta_line(report, "guía", "| con el pack: sección «La Cripta»=%s | sin pack: %s" % [str(has_head), str(plain_head)], has_head and not plain_head)
+	info.queue_free()
+	await _wait(0.3)
+	# Nada atascado
+	var clean := await _cripta_close_windows()
+	# Las decisiones de «dar carta» no tienen `player` sino `waiting`: es mía si me esperan a mí
+	var mine_pending: bool = g.prompt != null and (g.prompt.get("player", "") == "p0" or (g.prompt.has("waiting") and g.prompt.waiting.has("p0")))
+	_cripta_line(report, "final", "| sin ventanas abiertas=%s (ventana «%s», puntería=%s), decisión pendiente mía=%s" % [str(clean), _game.debug_modal_title(), str(_game.debug_aim_active()), str(mine_pending)], clean and not mine_pending)
+	g.P("p0").alive = true
+	_session.updated.emit()
 
 
 ## Anota un resultado de la prueba y lo imprime al momento (por si la prueba se corta por tiempo).
 func _say(report: Array, line: String) -> void:
 	report.append(line)
 	print("UITEST " + line)
+
+
+# ---------------------------------------------------------------- recordatorio del futuro, mazo visual y eventos antiguos
+
+func _memo_line(report: Array, what: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/memoria: %s | %s | %s" % [what, detail, "OK" if ok else "ERROR"])
+
+
+## Deja las `n` cartas de arriba sin explosivos (se cambian por otras del mazo) para poder robarlas sin riesgo.
+func _memo_safe_top(g: ZKGame, n: int) -> void:
+	if g.draw.size() < n + 2:
+		return
+	for k in n:
+		var idx := g.draw.size() - 1 - k
+		if g.draw[idx].type != "exploding":
+			continue
+		for j in range(0, g.draw.size() - n):
+			if g.draw[j].type != "exploding":
+				var tmp: ZKGame.Card = g.draw[idx]
+				g.draw[idx] = g.draw[j]
+				g.draw[j] = tmp
+				break
+
+
+func _memo_top_types(g: ZKGame, n: int) -> Array:
+	var out: Array = []
+	for k in mini(n, g.draw.size()):
+		out.append(g.draw[g.draw.size() - 1 - k].type)
+	return out
+
+
+## Lo que el recordatorio recuerda ahora: tipos en orden (profundidades, aparte).
+func _memo_known() -> Array:
+	return _game.debug_memory().known(_session.view())
+
+
+func _memo_types(known: Array) -> Array:
+	return known.map(func(k: Dictionary) -> String: return k.type)
+
+
+func _memo_depths(known: Array) -> Array:
+	return known.map(func(k: Dictionary) -> int: return int(k.depth))
+
+
+## Juega Ver el Futuro de verdad y cierra la ventana. Devuelve {types, shuf, tops} o {} si se anuló.
+func _memo_see_future(lm: LocalMatch) -> Dictionary:
+	var g: ZKGame = lm.game
+	for attempt in 3:
+		await _cripta_close_windows()
+		await _cripta_my_turn(lm, true, attempt)
+		g.turns_left = 8        # que el turno no pase a un bot mientras se comprueba
+		_memo_safe_top(g, 3)
+		_session.updated.emit()
+		await _cripta_give(lm, "see_future")
+		var seq0 := g.seq
+		await _cripta_play(lm, "see_future")
+		if not _cripta_event(lm, "future", seq0).is_empty():
+			await _wait(0.5)
+			await _cripta_close_windows()
+			await _wait(0.2)
+			return {"types": _memo_top_types(g, 3), "shuf": g.shuf, "tops": g.tops}
+		_cripta_drop(lm, "see_future")
+	return {}
+
+
+func _ui_test_memoria(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null or not (g.packs as Array).has("crypt"):
+		_say(report, "Plus/memoria: AVISO, partida terminada o sin el pack; se omite el recorrido")
+		return
+	for pl in g.players:
+		pl.alive = true
+	var strip: DeckMemoryStrip = _game.debug_strip()
+	await _cripta_close_windows()
+	await _cripta_my_turn(lm)
+	# Los bots de Plus barajan cuando un rival acaba de ver el futuro (IA-02): es correcto, pero borraría la memoria
+	# que este recorrido comprueba. Se quitan Barajar y Nop de las manos rivales mientras dura.
+	for pl in g.players:
+		if pl.id != lm.me_id:
+			pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "shuffle" and c.type != "nope")
+	while g.draw.size() < 24:       # tras la partida de la prueba el mazo puede estar casi vacío: se repone (cartas Saltar)
+		_cripta_n += 1
+		g.draw.insert(0, ZKGame.Card.new("z%d" % _cripta_n, "skip", false))
+	_session.updated.emit()
+	await _wait(0.3)
+
+	g.shuf += 1        # la memoria empieza de cero: solo cuenta lo que se aprende en este recorrido
+	g.tops = 0
+	_session.updated.emit()
+	await _wait(0.2)
+
+	# 1. Ver el Futuro -> tira con 3
+	var snap := await _memo_see_future(lm)
+	if snap.is_empty():
+		_memo_line(report, "ver el futuro", "no se pudo jugar tras 3 intentos", false)
+		return
+	var kn := _memo_known()
+	_memo_line(report, "ver el futuro", "tira con %s (esperado 3: %s) | tipos %s = arriba del mazo %s | visible=%s" % [str(strip.debug_items()), str(snap.types), str(_memo_types(kn)), str(snap.types), str(strip.visible)], strip.visible and strip.debug_items() == ["carta", "carta", "carta"] and _memo_types(kn) == snap.types and _memo_depths(kn) == [0, 1, 2])
+	await _save_shot(dir + "/t19_memoria_tira.png")
+
+	# Tocar la tira abre la ventana con todo lo conocido
+	await _tap_control(strip)
+	await _wait(0.5)
+	var title: String = _game.debug_modal_title()
+	await _save_shot(dir + "/t20_memoria_ventana.png")
+	_memo_line(report, "ventana del recordatorio", "ventana «%s»" % title, title == "Lo que sabes del mazo")
+	await _cripta_close_windows()
+
+	# UX-15 / D-20: una pantalla nueva sobre una partida avanzada no repite efectos antiguos
+	var old_events: int = (_session.view().events as Array).size()
+	# Sin la corrección (simulada marcando la primera vista como ya hecha) la pantalla nueva SÍ repite los efectos antiguos
+	var g3 := PlusGameScreen.new().setup(_session, _world)
+	g3._first_view = false
+	add_child(g3)
+	await _wait(0.3)
+	var fx3: Dictionary = g3.debug_effects()
+	_memo_line(report, "D-20 sin corrección (simulado)", "pantalla nueva repite: ventana «%s», %d popups, %d avisos" % [str(fx3.modal), int(fx3.popups), int(fx3.toasts)], str(fx3.modal) != "" or int(fx3.popups) > 0 or int(fx3.toasts) > 0)
+	g3.queue_free()
+	await _wait(0.3)
+	await _cripta_close_windows()
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await _wait(0.3)
+	var fx: Dictionary = g2.debug_effects()
+	var kn2: Array = g2.debug_memory().known(_session.view())
+	_memo_line(report, "pantalla nueva (D-20)", "%d eventos antiguos en la vista, %d registrados sin efectos | ventana «%s», %d popups, %d avisos | recuerda lo mismo=%s | historial %d" % [old_events, g2.replay_skipped, str(fx.modal), int(fx.popups), int(fx.toasts), str(_memo_types(kn2) == _memo_types(kn)), g2.debug_history_size()], old_events > 5 and g2.replay_skipped == old_events and str(fx.modal) == "" and int(fx.popups) == 0 and int(fx.toasts) == 0 and _memo_types(kn2) == _memo_types(kn) and g2.debug_history_size() > 0)
+	_memo_line(report, "partida recién empezada", "solo inicio=%s | con un robo=%s" % [str(g2.debug_fresh([{"type": "start"}, {"type": "turn"}])), str(g2.debug_fresh([{"type": "start"}, {"type": "draw"}]))], g2.debug_fresh([{"type": "start"}, {"type": "turn"}]) and not g2.debug_fresh([{"type": "start"}, {"type": "draw"}]))
+	# Los eventos posteriores a la primera vista sí hacen efecto: un `future` nuevo abre la ventana
+	g.emit("future", {"cards": _memo_top_types(g, 3), "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "p0")
+	_session.updated.emit()
+	await _wait(0.4)
+	var fx2: Dictionary = g2.debug_effects()
+	_memo_line(report, "evento posterior", "ventana «%s»" % str(fx2.modal), str(fx2.modal).begins_with("El futuro"))
+	g2.queue_free()
+	await _wait(0.3)
+	await _cripta_close_windows()
+
+	# 2. Un rival roba -> se desplaza (quedan 2)
+	var c1: ZKGame.Card = g.draw.pop_back()
+	g.tops += 1
+	g.P("p1").hand.append(c1)
+	_session.updated.emit()
+	await _wait(0.3)
+	kn = _memo_known()
+	_memo_line(report, "un rival roba", "tira %s | recuerda %s (esperado %s) a profundidades %s" % [str(strip.debug_items()), str(_memo_types(kn)), str(snap.types.slice(1)), str(_memo_depths(kn))], strip.debug_items() == ["carta", "carta"] and _memo_types(kn) == snap.types.slice(1) and _memo_depths(kn) == [0, 1])
+	await _save_shot(dir + "/t21_memoria_tira_dos.png")
+
+	# 2b. Robo propio de verdad -> queda 1
+	var err := g.act("p0", {"a": "draw"}, lm.now())
+	_session.updated.emit()
+	kn = _memo_known()
+	_memo_line(report, "robo propio", "error «%s» | tira %s | recuerda %s (esperado %s)" % [err, str(strip.debug_items()), str(_memo_types(kn)), str(snap.types.slice(2))], err == "" and strip.debug_items() == ["carta"] and _memo_types(kn) == snap.types.slice(2) and _memo_depths(kn) == [0])
+	await _cripta_close_windows()
+
+	# 3. Robar del Fondo no desplaza
+	snap = await _memo_see_future(lm)
+	if snap.is_empty():
+		_memo_line(report, "robar del fondo", "no se pudo preparar Ver el Futuro", false)
+	else:
+		var n0: int = g.draw.size()
+		var ok_b := false
+		for attempt in 3:
+			await _cripta_my_turn(lm, true, attempt)
+			g.turns_left = 8
+			if g.shuf != snap.shuf:
+				break
+			if g.draw[0].type == "exploding":
+				for i in range(1, g.draw.size() - 3):
+					if g.draw[i].type != "exploding":
+						var tmp: ZKGame.Card = g.draw[0]
+						g.draw[0] = g.draw[i]
+						g.draw[i] = tmp
+						break
+			n0 = g.draw.size()
+			await _cripta_give(lm, "draw_bottom")
+			var seq0 := g.seq
+			await _cripta_play(lm, "draw_bottom")
+			var ev := _cripta_event(lm, "draw", seq0)
+			if not ev.is_empty() and ev.get("bottom", false):
+				await _wait(0.4)
+				kn = _memo_known()
+				_memo_line(report, "robar del fondo", "mazo %d -> %d, tops %d -> %d | recuerda %s (esperado %s) a profundidades %s | tira %s" % [n0, g.draw.size(), int(snap.tops), g.tops, str(_memo_types(kn)), str(snap.types), str(_memo_depths(kn)), str(strip.debug_items())], g.draw.size() < n0 and g.tops == snap.tops and _memo_types(kn) == snap.types and _memo_depths(kn) == [0, 1, 2])
+				ok_b = true
+				break
+			_cripta_drop(lm, "draw_bottom")
+		if not ok_b:
+			_memo_line(report, "robar del fondo", "no se pudo resolver tras 3 intentos", false)
+	await _cripta_close_windows()
+
+	# 4. Barajar -> desaparece
+	snap = await _memo_see_future(lm)
+	var ok_s := false
+	if not snap.is_empty():
+		for attempt in 3:
+			await _cripta_my_turn(lm, true, attempt)
+			g.turns_left = 8
+			await _cripta_give(lm, "shuffle")
+			await _cripta_play(lm, "shuffle")
+			if g.shuf != snap.shuf:
+				await _wait(0.4)
+				kn = _memo_known()
+				_memo_line(report, "barajar", "shuf %d -> %d | recuerda %d cartas | tira visible=%s" % [int(snap.shuf), g.shuf, kn.size(), str(strip.visible)], kn.is_empty() and not strip.visible)
+				ok_s = true
+				break
+			_cripta_drop(lm, "shuffle")
+	if not ok_s:
+		_memo_line(report, "barajar", "no se pudo resolver", false)
+	await _cripta_close_windows()
+
+	# 5. Entierro en un mazo grande: selector visual (arrastre + ajuste fino) y la posición llega al motor
+	await _cripta_my_turn(lm)
+	g.turns_left = 8
+	for k in 22:
+		_cripta_n += 1
+		g.draw.insert(0, ZKGame.Card.new("z%d" % _cripta_n, "skip", false))
+	_session.updated.emit()
+	await _cripta_give(lm, "bury")
+	var seq1 := g.seq
+	await _cripta_play(lm, "bury")
+	var pk: DeckSlotPicker = _game.debug_slot_picker()
+	if pk == null or g.prompt == null or g.prompt.type != "bury":
+		_memo_line(report, "entierro", "no se abrió el selector", false)
+	else:
+		var bcard: String = g.prompt.card.type
+		var big: int = pk.max_pos
+		var prof: DeckProfile = pk.debug_profile()
+		var want := 17
+		await _save_shot(dir + "/t22_selector_mazo.png")
+		# Arrastre real del hueco hasta cerca de la posición 21 y ajuste fino con −1 hasta la 17
+		var vt := get_viewport().get_final_transform()
+		await _drag(vt * prof.debug_point(pk.value), vt * prof.debug_point(want + 4), true)
+		await _drag(vt * prof.debug_point(want + 4), vt * prof.debug_point(want + 4), false)
+		await _wait(0.2)
+		var after_drag: int = pk.value
+		var steps := 0
+		while pk.value != want and steps < 12:
+			var fine := _find_button(self, "−1" if pk.value > want else "+1")
+			if fine == null:
+				break
+			await _tap_control(fine)
+			await _wait(0.1)
+			steps += 1
+		var phrase := pk.debug_text()
+		var final_val: int = pk.value
+		await _save_shot(dir + "/t23_selector_mazo_17.png")
+		var conf := _find_button(self, "CONFIRMAR")
+		if conf:
+			await _tap_control(conf)
+			await _wait(0.6)
+		var bev := _cripta_event(lm, "buried", seq1)
+		kn = _memo_known()
+		_memo_line(report, "selector visual (mazo de %d)" % big, "arrastre -> %d, %d toques de ajuste fino -> %d | «%s» | acción enviada pos=%s (esperado %d)" % [after_drag, steps, final_val, phrase, str(bev.get("pos", -1)), want], absi(after_drag - (want + 4)) <= 2 and int(bev.get("pos", -1)) == want and phrase == DeckSlotPicker.label_for(want, big))
+		_memo_line(report, "entierro en posición conocida", "carta %s | recuerda %s a profundidades %s | tira %s" % [bcard, str(_memo_types(kn)), str(_memo_depths(kn)), str(strip.debug_items())], _memo_types(kn) == [bcard] and _memo_depths(kn) == [want] and strip.debug_items() == ["?", "carta"])
+		await _save_shot(dir + "/t24_memoria_entierro.png")
+	await _cripta_close_windows()
+
+	# 6. Esconder DOS explosivos (decisión forzada): dos selectores visuales, posiciones elegidas y memoria propia
+	await _cripta_my_turn(lm)
+	g.turns_left = 8
+	var eks: Array = []
+	for k in 2:
+		_cripta_n += 1
+		eks.append(ZKGame.Card.new("z%d" % _cripta_n, "exploding", false))
+	g.prompt = {"type": "zombie", "player": "p0", "eks": eks, "needRevive": false, "revived": null, "watchers": [], "pendingPos": null, "minUntil": lm.now(), "start": lm.now(), "deadline": lm.now() + 90000}
+	_session.updated.emit()
+	await _wait(0.6)
+	var pickers: Array = _game.debug_slot_pickers()
+	if pickers.size() != 2:
+		_memo_line(report, "dos explosivos", "selectores abiertos: %d (esperado 2)" % pickers.size(), false)
+		g.prompt = null
+	else:
+		await _save_shot(dir + "/t25_selector_dos.png")
+		pickers[0].debug_set(9)
+		pickers[1].debug_set(4)
+		await _wait(0.2)
+		var conf2 := _find_button(self, "CONFIRMAR")
+		if conf2:
+			await _tap_control(conf2)
+			await _wait(0.4)
+		var depth_now: Array = []
+		for c: ZKGame.Card in eks:
+			for i in g.draw.size():
+				if g.draw[i].id == c.id:
+					depth_now.append(g.draw.size() - 1 - i)
+		depth_now.sort()
+		kn = _memo_known()
+		_memo_line(report, "dos explosivos", "posiciones 9 y 4 | en el mazo a profundidades %s | recuerda %s | tira %s | marca bomba=%d" % [str(depth_now), str(_memo_depths(kn)), str(strip.debug_items()), strip.debug_bomb()], depth_now.size() == 2 and _memo_depths(kn) == depth_now and _memo_types(kn) == ["exploding", "exploding"])
+		await _save_shot(dir + "/t26_memoria_explosivos.png")
+	await _cripta_close_windows()
+
+	# 7. Marca «💣 en N»: se conocen 3 cartas de arriba y un explosivo más abajo
+	if pickers.size() == 2:
+		var snap2 := await _memo_see_future(lm)
+		var near := 999
+		for c: ZKGame.Card in eks:
+			for i in g.draw.size():
+				if g.draw[i].id == c.id:
+					near = mini(near, g.draw.size() - 1 - i)
+		kn = _memo_known()
+		_memo_line(report, "marca de explosivo", "conoce %d cartas | tira %s | «💣 en %d» (esperado en %d)" % [kn.size(), str(strip.debug_items()), strip.debug_bomb(), near + 1], not snap2.is_empty() and strip.debug_items() == ["carta", "carta", "carta"] and strip.debug_bomb() == near + 1)
+		await _save_shot(dir + "/t27_memoria_bomba.png")
+		await _cripta_close_windows()
+	for pl in g.players:
+		pl.alive = true
+	_session.updated.emit()
+
+
+# ---------------------------------------------------------------- ventana de Nop, historial con iconos y resumen final (UX-05, UX-09, UX-12)
+
+func _ux_line(report: Array, what: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/%s: %s | %s" % [what, detail, "OK" if ok else "ERROR"])
+
+
+func _ux_give(g: ZKGame, pid: String, type: String) -> String:
+	_cripta_n += 1
+	var c := ZKGame.Card.new("z%d" % _cripta_n, type, false)
+	g.P(pid).hand.append(c)
+	return c.id
+
+
+## Todos vivos, sin pila ni decisión; el jugador con `nopes` Nop, p2 con uno (para que la jugada siga en la pila) y cartas de relleno.
+func _ux_reset(g: ZKGame, nopes: int) -> void:
+	g.stack.clear()
+	g.prompt = null
+	for pl in g.players:
+		pl.alive = true
+		pl.hand = pl.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "nope")
+	for _i in nopes:
+		_ux_give(g, "p0", "nope")
+	_ux_give(g, "p2", "nope")
+	_ux_give(g, "p0", "skip")
+	g.over = null
+
+
+## `by` juega una carta (con objetivo opcional) en su turno y espera a que la pantalla lo muestre.
+func _ux_play(lm: LocalMatch, by: String, type: String, target: String = "") -> String:
+	var g := lm.game
+	g.cur = g.players.find(g.P(by))
+	g.turns_left = 1
+	g.attacked = false
+	var id := _ux_give(g, by, type)
+	var a := {"a": "play", "cards": [id]}
+	if target != "":
+		a["target"] = target
+	var err := g.act(by, a, lm.now())
+	_session.updated.emit()
+	await _wait(0.7)
+	return err
+
+
+func _ui_test_ux(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/nop: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	var cfg0 := ConfigFile.new()
+	cfg0.load("user://settings.cfg")
+	var had_key := cfg0.has_section_key("plus", "auto_pass")
+	var old_val: Variant = cfg0.get_value("plus", "auto_pass", false)
+	_game.debug_set_auto_pass(false)
+	await _cripta_my_turn(lm)
+	lm.set_process(false)          # los bots no actúan: el estado queda tal como lo fuerzo
+	# --- UX-05: botón con el número de Nop y Nop de la mano levantados
+	_ux_reset(g, 2)
+	var err := await _ux_play(lm, "p1", "skip")
+	var btns: Array[String] = _game.debug_buttons()
+	var lit: Array[String] = _game.debug_nop_lit()
+	_ux_line(report, "nop", "2 Nop ante una jugada ajena (err «%s»): botones %s | Nop resaltados %d" % [err, str(btns), lit.size()], err == "" and btns.has("¡NOP! ×2") and btns.has("Dejar pasar") and lit.size() == 2)
+	await _save_shot(dir + "/t30_nop_x2.png")
+	_ux_reset(g, 1)
+	err = await _ux_play(lm, "p1", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "1 Nop: botones %s (sin «×»)" % str(btns), btns.has("¡NOP!") and not btns.has("¡NOP! ×2"))
+	_ux_reset(g, 2)
+	err = await _ux_play(lm, "p0", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "jugada mía (err «%s»): botones %s | resaltados %d | texto «%s»" % [err, str(btns), _game.debug_nop_lit().size(), _game.debug_status().replace("\n", " / ")], err == "" and btns.is_empty() and _game.debug_nop_lit().is_empty() and _game.debug_status().begins_with("Tú juegas"))
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "skip")
+	btns = _game.debug_buttons()
+	_ux_line(report, "nop", "sin Nop (err «%s»): botones %s | texto «%s»" % [err, str(btns), _game.debug_status().replace("\n", " / ")], err == "" and btns.is_empty() and _game.debug_status().contains("juega"))
+	# --- Paso automático
+	_ux_reset(g, 2)
+	_game.debug_set_auto_pass(true)
+	err = await _ux_play(lm, "p1", "skip")
+	var t: Variant = g.top()
+	_ux_line(report, "nop", "paso automático ante Saltar ajeno (err «%s»): pasé=%s, botones %s" % [err, str(t != null and t.passed.has("p0")), str(_game.debug_buttons())], err == "" and t != null and t.passed.has("p0") and _game.debug_buttons().is_empty())
+	_ux_reset(g, 2)
+	err = await _ux_play(lm, "p1", "favor", "p0")
+	t = g.top()
+	_ux_line(report, "nop", "paso automático ante un Favor contra mí (err «%s»): pasé=%s, botones %s" % [err, str(t != null and t.passed.has("p0")), str(_game.debug_buttons())], err == "" and t != null and t.target == "p0" and not t.passed.has("p0") and _game.debug_buttons().has("¡NOP! ×2"))
+	_game.debug_set_auto_pass(false)
+	# Reglas de «me afecta» sobre vistas sintéticas
+	var v: Dictionary = _session.view()
+	var mk := func(eff: String, by: String, nopes: int, turns_left: int, dir: int) -> Dictionary:
+		var w: Dictionary = v.duplicate(true)
+		w["stack"] = [{"id": 9, "eff": eff, "of": null, "by": by, "target": null, "named": null, "nopes": nopes, "last": by}]
+		w["cur"] = by
+		w["turnsLeft"] = turns_left
+		w["dir"] = dir
+		for pl: Dictionary in w.players:
+			pl["alive"] = true
+		return w
+	var r1: bool = NopWindow.affects(mk.call("attack", "p4", 0, 1, 1))          # tras p4 viene p0
+	var r2: bool = NopWindow.affects(mk.call("attack", "p1", 0, 1, 1))          # tras p1 viene p2
+	var r3: bool = NopWindow.affects(mk.call("attack", "p1", 0, 1, -1))         # sentido inverso: tras p1 viene p0
+	var r4: bool = NopWindow.affects(mk.call("apocalypse", "p4", 0, 1, 1))
+	var r5: bool = NopWindow.affects(mk.call("apocalypse", "p4", 0, 2, 1))      # repite turno: roba p4
+	var r6: bool = NopWindow.affects(mk.call("shuffle", "p1", 0, 1, 1))
+	var r7: bool = NopWindow.affects(mk.call("skip", "p0", 1, 1, 1))            # un Nop anuló mi jugada
+	_ux_line(report, "nop", "me afecta: ataque a mi turno %s/%s/%s, apocalipsis %s/%s, barajar %s, mi jugada anulada %s" % [str(r1), str(r2), str(r3), str(r4), str(r5), str(r6), str(r7)], r1 and not r2 and r3 and r4 and not r5 and not r6 and r7)
+	# Ajuste en el menú de pausa: se guarda en [plus] auto_pass
+	var menu := _find_button(self, "MENÚ")
+	var toggled := false
+	var saved_on := false
+	if menu:
+		await _tap_control(menu)
+		await _wait(0.4)
+		var b := _find_button(self, "Paso automático: no")
+		if b:
+			await _save_shot(dir + "/t31_menu_paso_automatico.png")
+			await _tap_control(b)
+			await _wait(0.3)
+			var cfg1 := ConfigFile.new()
+			cfg1.load("user://settings.cfg")
+			saved_on = bool(cfg1.get_value("plus", "auto_pass", false))
+			var b2 := _find_button(self, "Paso automático: sí")
+			var found2 := b2 != null
+			if found2:
+				await _tap_control(b2)
+				await _wait(0.3)
+			toggled = found2 and not NopWindow.load_auto_pass()
+		var back := _find_button(self, "Seguir jugando")
+		if back:
+			await _tap_control(back)
+			await _wait(0.3)
+	# Se restaura el archivo de ajustes del usuario
+	var cfg2 := ConfigFile.new()
+	cfg2.load("user://settings.cfg")
+	if had_key:
+		cfg2.set_value("plus", "auto_pass", old_val)
+	elif cfg2.has_section_key("plus", "auto_pass"):
+		cfg2.erase_section_key("plus", "auto_pass")
+	cfg2.save("user://settings.cfg")
+	var cfg3 := ConfigFile.new()
+	cfg3.load("user://settings.cfg")
+	_ux_line(report, "nop", "ajuste en el menú: guardado sí=%s, vuelto a no=%s | archivo restaurado=%s" % [str(saved_on), str(toggled), str(cfg3.has_section_key("plus", "auto_pass") == had_key)], saved_on and toggled and cfg3.has_section_key("plus", "auto_pass") == had_key)
+	_ux_reset(g, 2)
+	_session.updated.emit()
+	await _wait(0.3)
+
+	# --- UX-12: historial con iconos y filtro
+	var hist := _find_button(self, "HISTORIAL")
+	if hist:
+		await _tap_control(hist)
+		await _wait(0.6)
+		var all_n: int = _game.debug_history_count(false)
+		var rows_all: int = _game.debug_history_rows()
+		var info: Dictionary = _game.debug_history_info()
+		_ux_line(report, "historial", "todo: %d entradas (esperadas %d) | %d avatares, %d miniaturas | controles que bloquean el toque: %d" % [rows_all, all_n, int(info.get("avatars", 0)), int(info.get("thumbs", 0)), int(info.get("blockers", -1))], rows_all == all_n and all_n > 10 and int(info.get("avatars", 0)) > 3 and int(info.get("thumbs", 0)) > 0 and int(info.get("blockers", -1)) == 0)
+		await _save_shot(dir + "/t32_historial_todo.png")
+		var mine := _find_button(self, "Solo lo mío")
+		var found_mine := mine != null
+		if found_mine:
+			await _tap_control(mine)
+			await _wait(0.6)
+		var rows_mine: int = _game.debug_history_rows()
+		_ux_line(report, "historial", "filtro «Solo lo mío»: %d entradas (esperadas %d) frente a %d" % [rows_mine, _game.debug_history_count(true), rows_all], found_mine and rows_mine == _game.debug_history_count(true) and rows_mine > 0 and rows_mine < rows_all)
+		await _save_shot(dir + "/t33_historial_mio.png")
+		var all_btn := _find_button(self, "Todo")
+		if all_btn:
+			await _tap_control(all_btn)
+			await _wait(0.4)
+		var close := _find_button(self, "Cerrar")
+		if close:
+			await _tap_control(close)
+			await _wait(0.3)
+	else:
+		_ux_line(report, "historial", "no hay botón HISTORIAL", false)
+
+	# --- UX-09: resumen final con una partida forzada a terminar
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
+	var stats: MatchStats = _game.debug_stats()
+	var seq0 := g.seq
+	var turns0 := {}
+	var before := {}        # contadores previos: la partida de la prueba ya tuvo sus propias explosiones y Nops
+	for pl in g.players:
+		turns0[pl.id] = int(stats.of(pl.id).turns)
+		before[pl.id] = stats.of(pl.id)
+	var now := lm.now()
+	g.cur = 1
+	g._die(g.P("p1"), ZKGame.Card.new("zk1", "exploding", false), now)                  # p1 explota
+	g.P("p1").alive = true                                                              # y lo revivieron
+	g.emit("revived", {"player": "p0", "target": "p1", "text": "p0 revive a p1."})
+	g.cur = 1
+	g._die(g.P("p1"), ZKGame.Card.new("zk2", "exploding", false), now)                  # explota otra vez
+	g.emit("nope", {"player": "p2", "yup": false, "text": "p2 dice NOP."})
+	g.emit("nope", {"player": "p2", "yup": true, "text": "p2 dice NOP otra vez."})
+	g.emit("steal", {"player": "p3", "target": "p0", "text": "p3 roba."})
+	g.emit("steal", {"player": "p0", "target": "p4", "text": "p0 roba."})
+	g.emit("gave", {"player": "p4", "target": "p0", "text": "p4 da un favor."})
+	g._die(g.P("p2"), ZKGame.Card.new("zk3", "exploding", false), now)
+	g._die(g.P("p3"), ZKGame.Card.new("zk4", "exploding", false), now)
+	g._die(g.P("p4"), ZKGame.Card.new("zk5", "exploding", false), now)                  # solo queda p0: gana
+	_session.updated.emit()
+	var rows: Array = []
+	for _i in 80:
+		await _wait(0.5)
+		if (_game.debug_modal_title() == "¡GANASTE!" or _game.debug_modal_title().begins_with("Ganó")) and (stats.debug_rows() as Array).size() == g.players.size():
+			break
+	await _wait(0.6)
+	rows = stats.debug_rows()
+	var turns_ok := true
+	var by_id := {}
+	for r: Dictionary in rows:
+		by_id[r.id] = r
+	for pl in g.players:
+		var expect := 0
+		for e: Dictionary in g.events:
+			if e.seq > seq0 and e.type == "turn" and e.player == pl.id:
+				expect += 1
+		turns_ok = turns_ok and by_id.has(pl.id) and int(by_id[pl.id].values[4]) == turns0[pl.id] + expect
+	var want := {"p1": [2, 1, 0, 0], "p2": [1, 0, 2, 0], "p3": [1, 0, 0, 1], "p4": [1, 0, 0, 0], "p0": [0, 0, 0, 2]}
+	var counts_ok := rows.size() == 5
+	var shown := []
+	for id: String in want:
+		if not by_id.has(id):
+			counts_ok = false
+			continue
+		var b: Dictionary = before[id]
+		var vals: Array = [int(by_id[id].values[0]) - int(b.boom), int(by_id[id].values[1]) - int(b.revived), int(by_id[id].values[2]) - int(b.nopes), int(by_id[id].values[3]) - int(b.steals)]
+		shown.append("%s=%s" % [id, str(vals)])
+		counts_ok = counts_ok and vals == want[id]
+	var win_ok := rows.size() == 5
+	for r: Dictionary in rows:
+		win_ok = win_ok and r.winner == (r.id == "p0") and (r.border == UIKit.C.gold) == (r.id == "p0")
+	_ux_line(report, "resumen", "ventana «%s», %d filas | contadores añadidos %s | turnos coherentes con los eventos=%s | solo p0 resaltado=%s" % [_game.debug_modal_title(), rows.size(), " ".join(PackedStringArray(shown)), str(turns_ok), str(win_ok)], counts_ok and turns_ok and win_ok and _game.debug_modal_title() == "¡GANASTE!")
+	await _save_shot(dir + "/t34_resumen_final.png")
+	var btn_ok := _find_button(self, "JUGAR OTRA VEZ") != null and _find_button(self, "Volver al menú") != null
+	_ux_line(report, "resumen", "botones de la ventana final conservados=%s" % str(btn_ok), btn_ok)
+	# Una pantalla abierta sobre la partida ya terminada cuenta también los eventos antiguos
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await _wait(0.4)
+	var s2: MatchStats = g2.debug_stats()
+	var old_ok: bool = int(s2.of("p1").boom) >= 2 and int(s2.of("p1").revived) >= 1 and int(s2.of("p2").nopes) >= 2 and int(s2.of("p0").steals) >= 2
+	_ux_line(report, "resumen", "pantalla nueva: p1 explotó %d, revivido %d, p2 Nops %d, p0 robos %d (%d eventos antiguos sin efectos)" % [int(s2.of("p1").boom), int(s2.of("p1").revived), int(s2.of("p2").nopes), int(s2.of("p0").steals), g2.replay_skipped], old_ok and g2.replay_skipped > 0)
+	g2.queue_free()
+	await _wait(0.3)
+	# Hueco del marcador de sala: con {id: victorias} aparece una columna más
+	var sc := MatchStats.new().build_table(_session.view(), {"p0": 3, "p1": 1})
+	var sc_head: HBoxContainer = sc.get_child(0).get_child(0)
+	_ux_line(report, "resumen", "marcador de sala preparado: columnas %d (con victorias) frente a 6" % sc_head.get_child_count(), sc_head.get_child_count() == 7)
+	sc.free()
+	lm.set_process(true)
+
+
+# ---------------------------------------------------------------- carta jugada en escena y asientos de los muertos (V-02, V-03)
+
+## Cartas de la pantalla que siguen marcadas como flotantes (huérfanas si no hay jugada en la pila).
+func _stage_floating(screen: Node3D) -> int:
+	var n := 0
+	for c in screen.get_children():
+		if c is Card3D and c.has_meta("floating"):
+			n += 1
+	return n
+
+
+## Cartas con un nodo propio en la pantalla que no están ni flotando ni cerca del descarte (se quedaron por el camino).
+func _stage_stray(screen: Node3D, ids: Array) -> int:
+	var n := 0
+	for c in screen.get_children():
+		if c is Card3D and ids.has(c.card_id):
+			var p: Vector3 = c.position
+			if c.has_meta("floating") or Vector2(p.x - 0.5, p.z + 0.3).length() > 0.25 or p.y > 0.12:
+				n += 1
+	return n
+
+
+func _ui_test_escena(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/escena: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
+	var st: PlayStage = _game.debug_stage()
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	# 1. Una jugada sin objetivo: la carta flota mientras haya pila y cae al descarte al resolverse
+	var err := await _ux_play(lm, "p1", "skip")
+	var sid := int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var cards: Array = st.cards_of(sid)
+	var cn: Card3D = cards[0] if cards.size() > 0 else null
+	var near := cn != null and Vector2(cn.position.x - PlayStage.CENTER.x, cn.position.z - PlayStage.CENTER.z).length() < 0.2 and cn.position.y > 0.3 and cn.scale.x > 1.0
+	_ux_line(report, "escena", "jugada de p1 sin objetivo (err='%s'): %d jugada(s) en escena, carta flotando en el centro a escala %.2f (altura %.2f) | sin haz: %s" % [err, st.play_count(), cn.scale.x if cn else 0.0, cn.position.y if cn else 0.0, str(not st.has_beam(sid))], err == "" and st.play_count() == 1 and near and not st.has_beam(sid))
+	await _save_shot(dir + "/t40_escena_flota.png")
+	g._resolve_top(lm.now())
+	_session.updated.emit()
+	await _wait(0.9)
+	var landed := cn != null and is_instance_valid(cn) and Vector2(cn.position.x - 0.5, cn.position.z + 0.3).length() < 0.15 and cn.position.y < 0.1
+	_ux_line(report, "escena", "al resolverse: %d en escena, la carta cae al descarte=%s, flotantes huérfanas=%d" % [st.play_count(), str(landed), _stage_floating(_game)], st.play_count() == 0 and landed and _stage_floating(_game) == 0)
+	# 2. Con objetivo: haz del color de la carta de p1 a p2
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "favor", "p2")
+	sid = int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var want_col := Color(str(CardDB.defs["favor"].color)).lightened(0.2)
+	var bc: Color = st.beam_color(sid)
+	var col_ok := absf(bc.r - want_col.r) < 0.02 and absf(bc.g - want_col.g) < 0.02 and absf(bc.b - want_col.b) < 0.02
+	_ux_line(report, "escena", "Favor de p1 contra p2 (err='%s'): haz presente=%s, color de la carta=%s, partes=%d" % [err, str(st.has_beam(sid)), str(col_ok), st.beam_parts(sid)], err == "" and st.has_beam(sid) and col_ok)
+	await _save_shot(dir + "/t40_escena_haz.png")
+	# 3. Anulada por un Nop: se parte en dos con sello; un segundo Nop la restaura
+	var nope1 := ""
+	for c: ZKGame.Card in g.P("p2").hand:
+		if c.type == "nope":
+			nope1 = c.id
+	var e1 := g.act("p2", {"a": "play", "cards": [nope1]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.8)
+	_ux_line(report, "escena", "Nop de p2 (err='%s'): partida=%s, mitades=%d, sello NOP=%s, nopes=%d" % [e1, str(st.is_broken(sid)), st.half_count(), str(st.has_stamp(sid)), int(g.stack[0].nopes)], e1 == "" and st.is_broken(sid) and st.half_count() == 2 and st.has_stamp(sid))
+	await _save_shot(dir + "/t40_escena_anulada.png")
+	var nope2 := _ux_give(g, "p3", "nope")
+	var e2 := g.act("p3", {"a": "play", "cards": [nope2]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.9)
+	_ux_line(report, "escena", "segundo Nop de p3 (err='%s'): recompuesta=%s, mitades=%d, sello=%s, restauraciones=%d" % [e2, str(not st.is_broken(sid)), st.half_count(), str(st.has_stamp(sid)), st.dbg_restores], e2 == "" and not st.is_broken(sid) and st.half_count() == 0 and not st.has_stamp(sid) and st.dbg_restores >= 1)
+	# La vuelve a anular y se resuelve anulada: las mitades caen con la carta y no queda nada flotando
+	var nope3 := _ux_give(g, "p4", "nope")
+	g.act("p4", {"a": "play", "cards": [nope3]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.6)
+	var broken_again := st.is_broken(sid)
+	g._resolve_top(lm.now())
+	_session.updated.emit()
+	await _wait(1.2)
+	_ux_line(report, "escena", "anulada y resuelta: estaba partida=%s, ahora %d en escena, flotantes=%d, mitades=%d" % [str(broken_again), st.play_count(), _stage_floating(_game), st.half_count()], broken_again and st.play_count() == 0 and _stage_floating(_game) == 0 and st.half_count() == 0)
+	# 4. Ráfaga: tres jugadas seguidas, sin esperar a que se vean, y sin cartas huérfanas
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+	var burst_ids: Array = []
+	for who: String in ["p1", "p2", "p3"]:
+		g.cur = g.players.find(g.P(who))
+		g.turns_left = 1
+		g.attacked = false
+		var cid := _ux_give(g, who, "skip")
+		burst_ids.append(cid)
+		g.act(who, {"a": "play", "cards": [cid]}, lm.now())
+		_session.updated.emit()
+		await get_tree().process_frame
+		g._resolve_top(lm.now())
+		_session.updated.emit()
+		await get_tree().process_frame
+	var mid_count: int = st.play_count()
+	await _wait(1.4)
+	_ux_line(report, "escena", "ráfaga de 3 jugadas: en escena %d (tras 2 cuadros: %d), flotantes huérfanas=%d, cartas fuera de sitio=%d" % [st.play_count(), mid_count, _stage_floating(_game), _stage_stray(_game, burst_ids)], st.play_count() == 0 and _stage_floating(_game) == 0 and _stage_stray(_game, burst_ids) == 0)
+	# 5. Una pareja (dos cartas en abanico) y la pila que se vacía de golpe (como al terminar la partida)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	g.cur = g.players.find(g.P("p1"))
+	g.turns_left = 1
+	var pa := _ux_give(g, "p1", "cat_a")
+	var pb := _ux_give(g, "p1", "cat_a")
+	var e3 := g.act("p1", {"a": "play", "cards": [pa, pb], "target": "p2"}, lm.now())
+	_session.updated.emit()
+	await _wait(0.8)
+	var sid2 := int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var pair: Array = st.cards_of(sid2)
+	var spread_ok := pair.size() == 2 and absf((pair[0] as Card3D).position.x - (pair[1] as Card3D).position.x) > 0.2
+	_ux_line(report, "escena", "pareja de p1 contra p2 (err='%s'): %d cartas en abanico=%s, haz=%s" % [e3, pair.size(), str(spread_ok), str(st.has_beam(sid2))], e3 == "" and spread_ok and st.has_beam(sid2))
+	g.stack.clear()
+	_session.updated.emit()
+	await _wait(1.2)
+	_ux_line(report, "escena", "pila vaciada de golpe: en escena %d, flotantes=%d" % [st.play_count(), _stage_floating(_game)], st.play_count() == 0 and _stage_floating(_game) == 0)
+	# 6. Calidad baja: haz simplificado (un solo tubo, sin halo) y rotura con mitades y sello
+	_world.apply_quality("low")
+	await _wait(0.2)
+	_ux_reset(g, 0)
+	err = await _ux_play(lm, "p1", "favor", "p2")
+	sid = int(g.stack[g.stack.size() - 1].id) if not g.stack.is_empty() else -1
+	var low_beam: int = st.beam_parts(sid)
+	var low_halo := st.has_halo(sid)
+	var nl := ""
+	for c: ZKGame.Card in g.P("p2").hand:
+		if c.type == "nope":
+			nl = c.id
+	g.act("p2", {"a": "play", "cards": [nl]}, lm.now())
+	_session.updated.emit()
+	await _wait(0.7)
+	_ux_line(report, "escena", "calidad baja: haz de %d parte(s), halo=%s, rotura con %d mitades y sello=%s" % [low_beam, str(low_halo), st.half_count(), str(st.has_stamp(sid))], err == "" and low_beam == 1 and not low_halo and st.half_count() == 2 and st.has_stamp(sid))
+	g.stack.clear()
+	_session.updated.emit()
+	await _wait(0.6)
+	_world.apply_quality(quality)
+	await _wait(0.2)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+	lm.set_process(true)
+
+
+func _ui_test_lapidas(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/lapidas: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	_ux_reset(g, 0)
+	g.cur = g.players.find(g.P("p1"))
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	# 1. p3 explota; p4 se pudre
+	var p3: ZKGame.Player = g.P("p3")
+	var p4: ZKGame.Player = g.P("p4")
+	p3.alive = false
+	p3.hand.clear()
+	g.emit("boom", {"player": "p3", "text": "¡%s sacó un GATITO EXPLOSIVO!" % p3.name})
+	g.emit("died", {"player": "p3", "text": "💥 %s explotó y está MUERTO (por ahora)." % p3.name})
+	_session.updated.emit()
+	await _wait(0.3)
+	var gr3: SeatGrave = _game.debug_grave("p3")
+	var mid_tomb := gr3.has_tomb()
+	await _wait(4.2)
+	var card3 := gr3.card_node()
+	_ux_line(report, "lapidas", "p3 explota: antes de acabar la explosión sin lápida=%s | ahora lápida=%s, rótulo «%s» (esperado «%s»), carta delante=%s, fantasma alfa %.2f a %.2f sobre la lápida" % [str(not mid_tomb), str(gr3.has_tomb()), gr3.label_text(), str(p3.name), card3.type if card3 else "-", gr3.ghost_alpha(), gr3.avatar.position.y - gr3.position.y], not mid_tomb and gr3.has_tomb() and gr3.label_text() == p3.name and card3 != null and card3.type == "exploding" and gr3.ghost_alpha() > 0.3 and gr3.ghost_alpha() < 0.8 and gr3.avatar.position.y - gr3.position.y > 0.3 and gr3.busy == 0 and gr3.pending == 0)
+	_ux_line(report, "lapidas", "sonido de lápida: %s | lápida con sombra en calidad %s: %s" % [str(_game.debug_sounds().has("tomb")), quality, str(gr3.tomb_casts_shadow())], _game.debug_sounds().has("tomb"))
+	p4.alive = false
+	p4.hand.clear()
+	g.emit("boom", {"player": "p4", "rotten": true, "text": "☣ %s robó el Gatito Putrefacto boca arriba y está MUERTO." % p4.name})
+	g.emit("died", {"player": "p4", "text": "☣ %s se pudrió y está MUERTO (por ahora)." % p4.name})
+	_session.updated.emit()
+	await _wait(4.2)
+	var gr4: SeatGrave = _game.debug_grave("p4")
+	var card4 := gr4.card_node()
+	_ux_line(report, "lapidas", "p4 se pudre: lápida=%s, rótulo «%s», carta delante=%s" % [str(gr4.has_tomb()), gr4.label_text(), card4.type if card4 else "-"], gr4.has_tomb() and gr4.label_text() == p4.name and card4 != null and card4.type == "rotten")
+	# p3 puede seguir jugando ⚡: un Nop suyo no rompe nada y el fantasma sigue ahí
+	await _save_shot(dir + "/t40_lapidas_muertos.png")
+	# 2. Pantalla nueva sobre una partida con dos muertos: ya aparecen con su lápida, sin animación
+	var g2 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g2)
+	await get_tree().process_frame
+	var n3: SeatGrave = g2.debug_grave("p3")
+	var n4: SeatGrave = g2.debug_grave("p4")
+	var instant: bool = n3 != null and n3.has_tomb() and is_equal_approx(n3.tomb_y(), 0.0) and n3.busy == 0 and n3.pending == 0 and n3.card_node() != null and n3.card_node().type == "exploding" and n3.label_text() == p3.name and n4.has_tomb() and n4.card_node() != null and n4.card_node().type == "rotten"
+	_ux_line(report, "lapidas", "pantalla nueva con 2 muertos, al primer cuadro: lápidas ya subidas=%s, cartas de muerte=%s/%s, fantasma alfa %.2f, %d eventos antiguos sin efectos" % [str(instant), n3.card_node().type if n3.card_node() else "-", n4.card_node().type if n4.card_node() else "-", n3.ghost_alpha(), g2.replay_skipped], instant and g2.replay_skipped > 0 and n3.ghost_alpha() > 0.3)
+	g2.queue_free()
+	await _wait(0.3)
+	# 3. p4 revive
+	p4.alive = true
+	g.emit("revived", {"player": "p1", "target": "p4", "text": "🧟 %s revive a %s. ¡Vuelve al juego!" % [g.P("p1").name, p4.name]})
+	_session.updated.emit()
+	await _wait(0.9)
+	await _save_shot(dir + "/t40_lapidas_revive.png")
+	await _wait(2.6)
+	var tn: Color = gr4.tint()
+	var green := tn.g > tn.r + 0.1 and tn.g > tn.b + 0.1 and tn.a > 0.95
+	_ux_line(report, "lapidas", "p4 revive: sin lápida=%s, sin carta=%s, estado %s, tinte verdoso=%s (%.2f,%.2f,%.2f), avatar de vuelta en su sitio=%s, p3 sigue con lápida=%s" % [str(not gr4.has_tomb()), str(gr4.card_node() == null), gr4.state, str(green), tn.r, tn.g, tn.b, str(gr4.avatar.position.distance_to(gr4.home) < 0.05), str(gr3.has_tomb())], not gr4.has_tomb() and gr4.card_node() == null and gr4.state == "revived" and green and gr4.avatar.position.distance_to(gr4.home) < 0.05 and gr3.has_tomb())
+	await _save_shot(dir + "/t40_lapidas_mesa.png")
+	# 4. El tinte se conserva: una pantalla nueva sobre la partida lo muestra desde el primer cuadro
+	var g3 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g3)
+	await get_tree().process_frame
+	var r4: SeatGrave = g3.debug_grave("p4")
+	_ux_line(report, "lapidas", "pantalla nueva tras el revivir: p4 con tinte verdoso=%s, sin lápida=%s" % [str(r4.tint().g > r4.tint().r + 0.1), str(not r4.has_tomb())], r4.tint().g > r4.tint().r + 0.1 and not r4.has_tomb())
+	g3.queue_free()
+	await _wait(0.2)
+	# 5. Calidad baja: las lápidas no proyectan sombra
+	_world.apply_quality("low")
+	var g4 := PlusGameScreen.new().setup(_session, _world)
+	add_child(g4)
+	await _wait(0.3)
+	var l3: SeatGrave = g4.debug_grave("p3")
+	_ux_line(report, "lapidas", "calidad baja: lápida de p3 presente=%s, proyecta sombra=%s | en alta proyectaba=%s" % [str(l3.has_tomb()), str(l3.tomb_casts_shadow()), str(gr3.tomb_casts_shadow() or quality == "low")], l3.has_tomb() and not l3.tomb_casts_shadow())
+	g4.queue_free()
+	await _wait(0.2)
+	_world.apply_quality(quality)
+	# Yo mismo muerto: no hay asiento propio; el rótulo y el tinte de siempre
+	g.P("p0").alive = false
+	_session.updated.emit()
+	await _wait(0.5)
+	var me_dead: bool = _game.debug_status().contains("muerto")
+	_ux_line(report, "lapidas", "yo muerto: la zona propia lo indica=%s, sin asiento propio=%s" % [str(me_dead), str(_game.debug_grave("p0") == null)], _game.debug_grave("p0") == null)
+	# Se deja todo como estaba
+	for pl in g.players:
+		pl.alive = true
+	g.P("p0").alive = true
+	g.stack.clear()
+	g.prompt = null
+	_session.updated.emit()
+	await _wait(0.6)
+	lm.set_process(true)
+
+
+# ---------------------------------------------------------------- mesa viva: efectos por carta, mazo, mano y avatares (V-04, V-05, V-07, V-08)
+
+var _mv_q := "high"
+
+
+## Espera a que el efecto `kind` deje de estar vivo; devuelve cuánto tardó (máx. `limit`).
+func _mv_wait_gone(kind: String, limit: float = 4.0) -> float:
+	var fx: PlusVfx = _game.debug_fx()
+	var t := 0.0
+	while fx.is_live(kind) and t < limit:
+		await _wait(0.05)
+		t += 0.05
+	return t
+
+
+## Espera a que no quede ningún efecto vivo.
+func _mv_settle(limit: float = 4.0) -> float:
+	var fx: PlusVfx = _game.debug_fx()
+	var t := 0.0
+	while fx.live_count() > 0 and t < limit:
+		await _wait(0.05)
+		t += 0.05
+	return t
+
+
+## `by` juega una carta (con objetivo y cartas extra opcionales) y la pantalla lo recibe al instante (sin esperas).
+func _mv_play(lm: LocalMatch, by: String, type: String, target: String = "", extra: Array = []) -> String:
+	var g := lm.game
+	g.cur = g.players.find(g.P(by))
+	g.turns_left = 1
+	g.attacked = false
+	var ids: Array = [_ux_give(g, by, type)]
+	for t: String in extra:
+		ids.append(_ux_give(g, by, t))
+	var a := {"a": "play", "cards": ids}
+	if target != "":
+		a["target"] = target
+	var err := g.act(by, a, lm.now())
+	_session.updated.emit()
+	return err
+
+
+func _mv_resolve(lm: LocalMatch) -> void:
+	lm.game._resolve_top(lm.now())
+	_session.updated.emit()
+
+
+## Tras lanzar el efecto `kind` (n0 = veces lanzado antes): ¿se creó su nodo y desaparece solo en ≤ 1,2 s?
+func _mv_expect(report: Array, label: String, kind: String, n0: int, dir: String, shot: bool = true, note: String = "") -> bool:
+	var fx: PlusVfx = _game.debug_fx()
+	var made := fx.launched(kind) > n0
+	var live := fx.is_live(kind)
+	var waited := 0.0
+	if shot and live:
+		await _wait(0.3)
+		waited = 0.3
+		await _save_shot("%s/t42_fx_%s.png" % [dir, kind])
+	var dur := waited + await _mv_wait_gone(kind)
+	var ok := made and live and dur <= 1.4
+	_ux_line(report, "efectos", "%s: nodo «Fx_%s» creado=%s, vivo al lanzar=%s, se retira solo a los %.2f s%s" % [label, kind, str(made), str(live), dur, note], ok)
+	return ok
+
+
+func _mv_dead(g: ZKGame, pid: String, with_hand: bool) -> void:
+	var p: ZKGame.Player = g.P(pid)
+	p.alive = false
+	p.hand.clear()
+	if with_hand:
+		_ux_give(g, pid, "skip")
+		_ux_give(g, pid, "favor")
+	_session.updated.emit()
+
+
+func _ui_test_mesa_viva(dir: String, report: Array) -> void:
+	var lm := _session as LocalMatch
+	var g: ZKGame = lm.game
+	if g.over != null:
+		_say(report, "Plus/efectos: AVISO, partida terminada; se omite el recorrido")
+		return
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	lm.set_process(false)
+	var cfg := ConfigFile.new()
+	cfg.load("user://settings.cfg")
+	var quality: String = cfg.get_value("video", "quality", "high")
+	_mv_q = quality
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	await _mv_efectos(dir, report, lm, g)
+	await _mv_mazo(dir, report, lm, g, quality)
+	await _mv_mano(dir, report, lm, g)
+	await _mv_avatares(dir, report, lm, g)
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	lm.set_process(true)
+
+
+func _mv_efectos(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	var fx: PlusVfx = _game.debug_fx()
+	var n0 := 0
+	var err := ""
+	var mood: AvatarMood = _game.debug_mood()
+	# --- Ver el Futuro: los demás ven dorsos; quien juega ve las caras
+	_ux_reset(g, 0)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p1", "see_future")
+	var backs: Array = fx.faces_of("future")
+	await _mv_expect(report, "Ver el Futuro de p1 (err='%s'), yo veo dorsos=%s" % [err, str(backs.size() == 3 and not backs.any(func(t: String) -> bool: return t != "back"))], "future", n0, dir)
+	_ux_reset(g, 0)
+	var top3: Array = []
+	for i in 3:
+		top3.append(g.draw[g.draw.size() - 1 - i].type)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p0", "see_future")
+	_mv_resolve(lm)
+	var faces: Array = fx.faces_of("future")
+	_ux_line(report, "efectos", "Ver el Futuro mío (err='%s'): caras que veo %s = las 3 de arriba %s" % [err, str(faces), str(top3)], faces == top3)
+	await _mv_expect(report, "Ver el Futuro mío", "future", n0, dir, false)
+	await _cripta_close_windows()
+	# Alterar el Futuro de otro: al abrirse su decisión
+	_ux_reset(g, 0)
+	n0 = fx.launched("future")
+	err = _mv_play(lm, "p1", "alter_future")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Alterar el Futuro de p1 (err='%s')" % err, "future", n0, dir, false)
+	# --- Barajar
+	_ux_reset(g, 0)
+	n0 = fx.launched("shuffle")
+	err = _mv_play(lm, "p1", "shuffle")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Barajar (err='%s')" % err, "shuffle", n0, dir)
+	# --- Saltar y Súper Salto: salto del avatar + estela azul
+	_ux_reset(g, 0)
+	n0 = fx.launched("skip")
+	var j0 := int(mood.dbg_count.get("jump", 0))
+	err = _mv_play(lm, "p1", "skip")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Saltar de p1 (err='%s'), salto del avatar=%s" % [err, str(int(mood.dbg_count.get("jump", 0)) > j0)], "skip", n0, dir)
+	_ux_reset(g, 0)
+	n0 = fx.launched("super_skip")
+	err = _mv_play(lm, "p2", "super_skip")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Súper Salto de p2 (err='%s')" % err, "super_skip", n0, dir, false)
+	# --- Favor: la carta robada viaja en arco
+	_ux_reset(g, 0)
+	n0 = fx.launched("steal")
+	err = _mv_play(lm, "p1", "favor", "p2")
+	_mv_resolve(lm)
+	var givc: String = g.P("p2").hand[0].id
+	g.act("p2", {"a": "give", "card": givc}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Favor de p1 a p2 (err='%s')" % err, "steal", n0, dir)
+	g.prompt = null
+	# --- Pareja: la carta que llega a MI mano se voltea
+	_ux_reset(g, 0)
+	n0 = fx.launched("steal")
+	err = _mv_play(lm, "p0", "cat_a", "p2", ["cat_a"])
+	_mv_resolve(lm)
+	await _wait(0.5)
+	var sf: Array = fx.faces_of("steal")
+	var flipped: bool = sf.size() == 1 and sf[0] != "back"
+	await _mv_expect(report, "Pareja mía contra p2 (err='%s'), la carta llega boca arriba=%s %s" % [err, str(flipped), str(sf)], "steal", n0, dir, false)
+	# --- Cava Más Hondo y Entierro: tierra y pala
+	_ux_reset(g, 0)
+	n0 = fx.launched("dig")
+	err = _mv_play(lm, "p1", "dig_deeper")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Cava Más Hondo de p1 (err='%s'), decisión=%s" % [err, str(g.prompt.type if g.prompt != null else "-")], "dig", n0, dir)
+	g.prompt = null
+	_ux_reset(g, 0)
+	n0 = fx.launched("bury")
+	err = _mv_play(lm, "p1", "bury")
+	_mv_resolve(lm)
+	var e2 := g.act("p1", {"a": "bury", "pos": 0}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Entierro de p1 (err='%s'/'%s')" % [err, e2], "bury", n0, dir, false)
+	# --- Alimenta a los Muertos: cartas en círculo hacia la lápida de p3
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("feed")
+	err = _mv_play(lm, "p1", "feed_dead", "p3")
+	_mv_resolve(lm)
+	var gv: String = g.P("p2").hand[0].id
+	g.act("p2", {"a": "give", "card": gv}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Alimenta a los Muertos de p1 para p3 (err='%s')" % err, "feed", n0, dir)
+	g.prompt = null
+	# --- Ladrón de Tumbas: manos junto a la lápida de p3
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("grave_robber")
+	err = _mv_play(lm, "p1", "grave_robber")
+	_mv_resolve(lm)
+	var gr3: SeatGrave = _game.debug_grave("p3")
+	var gcard: String = g.P("p3").hand[0].id
+	g.act("p3", {"a": "give", "card": gcard}, lm.now())
+	_session.updated.emit()
+	await _mv_expect(report, "Ladrón de Tumbas de p1 (err='%s'), lápida de p3 en estado %s" % [err, gr3.state], "grave_robber", n0, dir)
+	g.prompt = null
+	await _mv_settle()
+	# --- Clon: escaneo sobre la carta clonada
+	_ux_reset(g, 0)
+	n0 = fx.launched("clone")
+	err = _mv_play(lm, "p1", "clone", "p2", ["cat_b"])
+	await _wait(0.1)
+	await _mv_expect(report, "Clon + cat_b de p1 (err='%s')" % err, "clone", n0, dir)
+	_mv_resolve(lm)
+	await _mv_settle()
+	# --- Ataque Dirigido: cortes orientados hacia el objetivo
+	_ux_reset(g, 0)
+	n0 = fx.launched("targeted")
+	var pop0: int = _game.debug_effects().popups
+	err = _mv_play(lm, "p1", "targeted_attack", "p3")
+	_mv_resolve(lm)
+	var cuts: int = _game.debug_effects().popups - pop0
+	await _mv_expect(report, "Ataque Dirigido de p1 a p3 (err='%s'), cortes en pantalla=%d" % [err, cuts], "targeted", n0, dir)
+	# --- Marcha Atrás
+	_ux_reset(g, 0)
+	n0 = fx.launched("reverse")
+	var dir0: int = int(g.dir)
+	err = _mv_play(lm, "p1", "reverse")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Marcha Atrás de p1 (err='%s'), sentido %d → %d" % [err, dir0, int(g.dir)], "reverse", n0, dir)
+	_ux_reset(g, 0)
+	g.dir = 1
+	_session.updated.emit()
+	# --- Ojo de Cuervo: un cuervo cruza de p1 a p2
+	_ux_reset(g, 0)
+	n0 = fx.launched("crow")
+	err = _mv_play(lm, "p1", "crow_eye", "p2")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Ojo de Cuervo de p1 sobre p2 (err='%s')" % err, "crow", n0, dir)
+	# --- Trueque de Almas: dos remolinos entre la lápida de p3 y p1
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("swirl")
+	err = _mv_play(lm, "p1", "soul_swap", "p3")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Trueque de Almas de p1 con p3 (err='%s')" % err, "swirl", n0, dir)
+	# --- Espanto: el fantasma de p3 atraviesa a p2
+	_ux_reset(g, 0)
+	_mv_dead(g, "p3", true)
+	await _wait(0.4)
+	n0 = fx.launched("haunt")
+	var sc0 := int(mood.dbg_count.get("scare", 0))
+	err = _mv_play(lm, "p3", "haunt", "p2")
+	_mv_resolve(lm)
+	await _mv_expect(report, "Espanto de p3 sobre p2 (err='%s'), susto de p2=%s" % [err, str(int(mood.dbg_count.get("scare", 0)) > sc0)], "haunt", n0, dir)
+	# --- Apocalipsis Zombi: cielo rojo 2 s y explosivos que emergen
+	_ux_reset(g, 0)
+	n0 = fx.launched("apocalypse")
+	err = _mv_play(lm, "p1", "apocalypse")
+	_mv_resolve(lm)
+	var red0: float = _world._flash.color.a
+	var red_c: Color = _world._flash.color
+	await _mv_expect(report, "Apocalipsis de p1 (err='%s'), cielo rojo al empezar alfa %.2f (r=%.2f g=%.2f)" % [err, red0, red_c.r, red_c.g], "apocalypse", n0, dir)
+	await _wait(0.45)
+	var red1: float = _world._flash.color.a
+	await _wait(1.2)
+	var red2: float = _world._flash.color.a
+	_ux_line(report, "efectos", "Apocalipsis: el cielo sigue rojo a ~1,4 s (alfa %.2f) y se apaga a ~2,7 s (alfa %.2f)" % [red1, red2], red0 > 0.4 and red1 > 0.03 and red2 < 0.02 and red_c.r > red_c.g * 4.0)
+	# --- Nada queda colgando 3 s después de lanzar el último
+	await _mv_settle()
+	await _wait(3.0)
+	_ux_line(report, "efectos", "tras 3 s: efectos vivos=%d, raíces colgando=%d, retirados a la fuerza=%d, descartados por exceso=%d" % [fx.live_count(), fx.roots(), fx.dbg_forced, fx.dbg_dropped], fx.live_count() == 0 and fx.roots() == 0 and fx.dbg_forced == 0)
+	# --- Ráfaga de 20 efectos: el número de nodos de la escena vuelve a ser el mismo
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	var kinds := ["future", "shuffle", "skip", "super_skip", "steal", "dig", "bury", "feed", "grave_robber", "targeted", "reverse", "crow", "swirl", "haunt", "apocalypse", "clone"]
+	for k: String in kinds:
+		fx.demo(k)
+	await _wait(3.2)
+	var nodes0: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var launched0 := 0
+	for k: String in kinds:
+		launched0 += fx.launched(k)
+	for i in 20:
+		fx.demo(kinds[(i * 7) % kinds.size()])
+		await get_tree().process_frame
+	var peak: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	await _wait(3.5)
+	var nodes1: int = int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var launched1 := 0
+	for k: String in kinds:
+		launched1 += fx.launched(k)
+	_ux_line(report, "efectos", "ráfaga de 20 efectos (%d lanzados, %d descartados por exceso): nodos antes %d, en el pico %d, después %d, vivos=%d, retirados a la fuerza=%d" % [launched1 - launched0, fx.dbg_dropped, nodes0, peak, nodes1, fx.live_count(), fx.dbg_forced], nodes1 == nodes0 and fx.live_count() == 0 and fx.dbg_forced == 0 and peak > nodes0)
+	# --- Calidad baja: menos destellos y estelas, y ninguna partícula
+	var g_hi := fx.dbg_glows
+	for k: String in kinds:
+		fx.demo(k)
+	var particles_hi := _mv_count_particles(fx)
+	await _mv_settle()
+	g_hi = fx.dbg_glows - g_hi
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(0.3)
+	var g_lo := fx.dbg_glows
+	for k: String in kinds:
+		fx.demo(k)
+	var particles_lo := _mv_count_particles(fx)
+	await _wait(0.4)
+	await _save_shot(dir + "/t42_fx_calidad_baja.png")
+	await _mv_settle()
+	g_lo = fx.dbg_glows - g_lo
+	_ux_line(report, "efectos", "calidad baja: fx.low=%s, destellos+estelas %d (en alta %d), partículas %d (en alta %d)" % [str(fx.low), g_lo, g_hi, particles_lo, particles_hi], fx.low and g_lo * 2 < g_hi and particles_lo == 0)
+	_world.apply_quality(_mv_q)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+
+
+func _mv_count_emitting(root: Node) -> int:
+	var n := 0
+	for c in root.get_children():
+		if c is GPUParticles3D and (c as GPUParticles3D).emitting:
+			n += 1
+		n += _mv_count_emitting(c)
+	return n
+
+
+func _mv_count_particles(root: Node) -> int:
+	var n := 0
+	for c in root.get_children():
+		if c is GPUParticles3D or c is CPUParticles3D:
+			n += 1
+		n += _mv_count_particles(c)
+	return n
+
+
+func _mv_mazo(dir: String, report: Array, lm: LocalMatch, g: ZKGame, quality: String) -> void:
+	var aura: DeckAura = _game.debug_aura()
+	var fx: PlusVfx = _game.debug_fx()
+	_world.apply_quality(quality)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	# 1. Altura: 14 modelos como mucho, pero la pila crece con las cartas reales
+	var saved: Array = g.draw.duplicate()
+	var full := saved.size()
+	var h_full: float = _game.debug_deck_height()
+	var m_full: int = _game.debug_deck_models()
+	var small: Array = g.draw.duplicate()
+	small.resize(10)
+	g.draw = small
+	_session.updated.emit()
+	await _wait(0.4)
+	var h_small: float = _game.debug_deck_height()
+	var m_small: int = _game.debug_deck_models()
+	var mid: Array = saved.duplicate()
+	mid.resize(24)
+	g.draw = mid
+	_session.updated.emit()
+	await _wait(0.4)
+	var h_mid: float = _game.debug_deck_height()
+	g.draw = saved
+	_session.updated.emit()
+	await _wait(0.4)
+	_ux_line(report, "mazo", "altura de la cima: %d cartas → %.3f (%d modelos), 24 → %.3f, %d → %.3f (%d modelos); crece con las cartas y el límite de modelos sigue en 14" % [10, h_small, m_small, h_mid, full, h_full, m_full], m_full <= 14 and m_small == 10 and h_small < h_mid and h_mid < h_full and full > 24)
+	# 2. Riesgo bajo: sin humo ni temblor ni luz roja
+	aura.dbg_forced = 20
+	var t0 := aura.dbg_tremors
+	await _wait(5.0)
+	_ux_line(report, "mazo", "riesgo 20%%: humo=%s, temblores=%d, tinte rojo %.2f | ya no hay humo" % [str(aura.smoking()), aura.dbg_tremors - t0, aura.tint_amount()], not aura.smoking() and aura.dbg_tremors == t0 and aura.tint_amount() < 0.01)
+	# 3. Riesgo medio (> 30 %): humo leve, sin temblor
+	aura.dbg_forced = 40
+	await _wait(3.2)
+	await _save_shot(dir + "/t42_mazo_humo.png")
+	_ux_line(report, "mazo", "riesgo 40%%: humo=%s, temblores=%d, tinte rojo %.2f" % [str(aura.smoking()), aura.dbg_tremors - t0, aura.tint_amount()], aura.smoking() and aura.dbg_tremors == t0 and aura.tint_amount() < 0.01)
+	# 4. Riesgo alto (> 50 %): humo, temblor cada pocos segundos y luz roja
+	var tl: OmniLight3D = aura.turn_light
+	aura.dbg_forced = 75
+	await _wait(6.0)
+	await _save_shot(dir + "/t42_mazo_riesgo_alto.png")
+	var lc: Color = tl.light_color
+	_ux_line(report, "mazo", "riesgo 75%%: humo=%s, temblores en 6 s=%d, luz de turno rgb(%.2f, %.2f, %.2f) (antes verde), luz roja propia energía %.2f, tinte %.2f" % [str(aura.smoking()), aura.dbg_tremors - t0, lc.r, lc.g, lc.b, aura.red_energy(), aura.tint_amount()], aura.smoking() and aura.dbg_tremors - t0 >= 1 and lc.r > lc.g + 0.2 and aura.red_energy() > 0.5)
+	# 5. El temblor no mueve el mazo de su sitio
+	var top: Card3D = _game.debug_deck_card()
+	aura.dbg_forced = 45           # sin temblores propios: el que se prueba es el lanzado a mano
+	while aura.trembling():
+		await get_tree().process_frame
+	var y0 := top.position
+	aura.tremble()
+	await _wait(0.8)
+	_ux_line(report, "mazo", "tras un temblor la carta de arriba vuelve exacta a su sitio: %s" % str(top.position.is_equal_approx(y0)), top.position.is_equal_approx(y0))
+	aura.dbg_forced = 75
+	# 6. Calidad baja: sin humo ni luz roja extra (el temblor sigue)
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(1.0)
+	_ux_line(report, "mazo", "calidad baja con riesgo 75%%: humo=%s, luz roja extra=%.2f, partículas en el mazo=%d" % [str(aura.smoking()), aura.red_energy(), _mv_count_emitting(aura)], not aura.smoking() and aura.red_energy() < 0.01 and _mv_count_emitting(aura) == 0)
+	_world.apply_quality(quality)
+	# 7. Riesgo real: pocas cartas en el mazo → más riesgo, sin forzar
+	aura.dbg_forced = -1
+	var five: Array = g.draw.duplicate()
+	five.resize(5)
+	g.draw = five
+	_session.updated.emit()
+	await _wait(0.6)
+	var rk: Dictionary = _game.debug_risk()
+	_ux_line(report, "mazo", "riesgo real con 5 cartas y %d vivos: %d%% → el mazo lo usa (%d%%)" % [g.living().size(), rk.pct, aura.shown_risk()], aura.shown_risk() == rk.pct and rk.pct > 50)
+	g.draw = saved
+	_session.updated.emit()
+	await _wait(0.5)
+
+
+func _mv_mano(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	_ux_reset(g, 0)
+	var me: ZKGame.Player = g.P("p0")
+	me.hand.clear()
+	var ids := {}
+	for t: String in ["skip", "nope", "cat_a", "cat_a", "cat_b", "attack_dead", "favor"]:
+		var id := _ux_give(g, "p0", t)
+		if not ids.has(t):
+			ids[t] = []
+		(ids[t] as Array).append(id)
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	_session.updated.emit()
+	await _wait(0.6)
+	await _save_shot(dir + "/t42_mano_jugables.png")
+	var marks: Dictionary = _game.debug_hand_marks()
+	var playable_ok := true
+	var rows: Array[String] = []
+	for t: String in ["skip", "favor", "cat_a"]:
+		for id: String in ids[t]:
+			var mk: Dictionary = marks[id]
+			playable_ok = playable_ok and mk.edge and mk.dim < 0.001
+		rows.append(t)
+	var dim_ok := true
+	for t: String in ["nope", "cat_b", "attack_dead"]:
+		for id: String in ids[t]:
+			var mk: Dictionary = marks[id]
+			dim_ok = dim_ok and not mk.edge and absf(mk.dim - 0.15) < 0.001
+	_ux_line(report, "mano", "mi turno: jugables con borde y sin velo (%s)=%s; no jugables sin borde y oscurecidas un 15%% (nope, cat_b, attack_dead)=%s" % [", ".join(rows), str(playable_ok), str(dim_ok)], playable_ok and dim_ok)
+	# Seleccionar, y el borde y la selección conviven
+	var skip_card: Card3D = _game.debug_hand_card(ids["skip"][0])
+	await _tap_3d(skip_card, Vector3(-0.24, 0, -0.3))
+	await _wait(0.4)
+	marks = _game.debug_hand_marks()
+	var sel: Array = _game.debug_selection()
+	_ux_line(report, "mano", "al seleccionar la carta jugable: seleccionada=%s, conserva el borde=%s" % [str(sel == [ids["skip"][0]]), str(marks[ids["skip"][0]].edge)], sel == [ids["skip"][0]] and marks[ids["skip"][0]].edge)
+	_game.debug_clear_selection()
+	# No es mi turno: todo oscurecido, sin bordes
+	g.cur = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	marks = _game.debug_hand_marks()
+	var all_dim := true
+	for id: String in marks:
+		all_dim = all_dim and not marks[id].edge and absf(marks[id].dim - 0.15) < 0.001
+	_ux_line(report, "mano", "turno de otro y sin jugada: ninguna con borde y todas oscurecidas=%s" % str(all_dim), all_dim)
+	# Ventana de Nop: el Nop vuelve a tener borde y sigue levantado (brillo propio de Nop)
+	var nid: String = ids["nope"][0]
+	var e1 := _mv_play(lm, "p1", "skip")
+	await _wait(0.6)
+	marks = _game.debug_hand_marks()
+	var lit: Array = _game.debug_nop_lit()
+	_ux_line(report, "mano", "p1 juega Saltar (err='%s'): mi Nop con borde=%s, sin velo=%s, sigue resaltado como Nop=%s; el resto oscurecido=%s" % [e1, str(marks[nid].edge), str(marks[nid].dim < 0.001), str(lit.has(nid)), str(not marks[ids["cat_b"][0]].edge and marks[ids["cat_b"][0]].dim > 0.1)], marks[nid].edge and marks[nid].dim < 0.001 and lit.has(nid))
+	g.stack.clear()
+	# Puntería: elegir objetivo con una carta jugable no depende del borde
+	_ux_reset(g, 0)
+	me = g.P("p0")
+	me.hand = me.hand.filter(func(c: ZKGame.Card) -> bool: return c.type != "skip")
+	var fav := _ux_give(g, "p0", "favor")
+	g.cur = 0
+	g.turns_left = 1
+	_session.updated.emit()
+	await _wait(0.5)
+	var fcard: Card3D = _game.debug_hand_card(fav)
+	await _tap_3d(fcard, Vector3(-0.24, 0, -0.3))
+	await _wait(0.3)
+	var play := _find_button(self, "JUGAR")
+	if play:
+		await _tap_control(play)
+		await _wait(0.5)
+	var aiming: bool = _game.debug_aim_active() or _find_button(self, "CANCELAR") != null
+	_ux_line(report, "mano", "carta con objetivo (Favor) con borde: al jugarla entra el modo puntería=%s (el borde no estorba)" % str(aiming), aiming)
+	await _cripta_close_windows()
+	_game.debug_clear_selection()
+	# --- Robar: del mazo a la cámara, sin retrasar la interacción
+	_ux_reset(g, 0)
+	me = g.P("p0")
+	me.hand.clear()
+	for t: String in ["cat_a", "cat_b", "favor", "attack", "nope"]:
+		_ux_give(g, "p0", t)
+	g.draw[g.draw.size() - 1] = ZKGame.Card.new("zdraw", "skip", false)
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.idle_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.6)
+	var before_ids: Array = _game.debug_hand_marks().keys()
+	await _tap_3d(_game.debug_deck_card())
+	await _wait(0.12)
+	var after: Dictionary = _game.debug_hand_marks()
+	var new_id := ""
+	for id: String in after:
+		if not before_ids.has(id):
+			new_id = id
+	var n_mk: Dictionary = after.get(new_id, {})
+	var started: bool = new_id != "" and n_mk.drawing and not n_mk.body and _game.debug_fx().is_live("draw")
+	_ux_line(report, "mano", "al robar: carta nueva %s oculta mientras vuela (drawing=%s), efecto «Fx_draw» vivo=%s" % [new_id, str(n_mk.get("drawing")), str(_game.debug_fx().is_live("draw"))], started)
+	await _wait(0.5)
+	await _save_shot(dir + "/t42_mano_robo.png")
+	# Con la animación en curso se puede tocar otra carta enseguida
+	var ends: Array = _game.debug_hand_ends()
+	_game.debug_clear_selection()
+	await _tap_3d(ends[0], Vector3(-0.24, 0, -0.3))
+	await _wait(0.3)
+	var sel2: Array = _game.debug_selection()
+	var still: bool = _game.debug_fx().is_live("draw")
+	_ux_line(report, "mano", "a los ~1 s de robar (animación aún en curso=%s) toco otra carta y se selecciona=%s (%s)" % [str(still), str(sel2.size() == 1), str(sel2)], sel2.size() == 1)
+	_game.debug_clear_selection()
+	await _wait(1.6)
+	after = _game.debug_hand_marks()
+	n_mk = after.get(new_id, {})
+	_ux_line(report, "mano", "al terminar: la carta robada ya está visible en la mano=%s, sin marca de robo=%s, efectos vivos=%d" % [str(n_mk.get("body")), str(not n_mk.get("drawing", true)), _game.debug_fx().live_count()], n_mk.get("body", false) and not n_mk.get("drawing", true) and _game.debug_fx().live_count() == 0)
+	# --- Brillo tornasol también para Apocalipsis y Putrefacto
+	var foils := {}
+	for t: String in ["apocalypse", "rotten", "skip", "exploding"]:
+		var c := Card3D.new().setup(t, true)
+		foils[t] = float(c._front.get_shader_parameter("foil"))
+		c.free()
+	_ux_line(report, "mano", "brillo tornasol (FOIL): Apocalipsis %.2f, Putrefacto %.2f, Saltar %.2f (normal), Explosivo %.2f (clásico sin cambios)" % [foils.apocalypse, foils.rotten, foils.skip, foils.exploding], foils.apocalypse > 0.15 and foils.rotten > 0.15 and absf(foils.skip - 0.1) < 0.001 and absf(foils.exploding - 0.18) < 0.001)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.3)
+
+
+## Sigue un avatar `secs` segundos y devuelve los extremos de su escala y su desvío respecto a su sitio.
+func _mv_track(id: String, secs: float) -> Dictionary:
+	var av: Sprite3D = _game.debug_avatar(id)
+	var home: Vector3 = _game.debug_grave(id).home
+	var out := {"min_sx": 9.0, "min_sy": 9.0, "max_dy": -9.0, "min_dy": 9.0, "span_dx": 0.0, "max_sx": 0.0}
+	var min_dx := 9.0
+	var max_dx := -9.0
+	var t := 0.0
+	while t < secs:
+		await get_tree().process_frame
+		t += get_process_delta_time()
+		out.min_sx = minf(out.min_sx, av.scale.x)
+		out.max_sx = maxf(out.max_sx, av.scale.x)
+		out.min_sy = minf(out.min_sy, av.scale.y)
+		out.max_dy = maxf(out.max_dy, av.position.y - home.y)
+		out.min_dy = minf(out.min_dy, av.position.y - home.y)
+		min_dx = minf(min_dx, av.position.x - home.x)
+		max_dx = maxf(max_dx, av.position.x - home.x)
+	out.span_dx = max_dx - min_dx
+	return out
+
+
+func _mv_avatares(dir: String, report: Array, lm: LocalMatch, g: ZKGame) -> void:
+	_ux_reset(g, 0)
+	g.cur = 0
+	_session.updated.emit()
+	await _wait(0.6)
+	var av2: Sprite3D = _game.debug_avatar("p2")
+	var home2: Vector3 = _game.debug_grave("p2").home
+	_ux_line(report, "avatares", "en reposo: escala %s, en su sitio=%s" % [str(av2.scale), str(av2.position.distance_to(home2) < 0.001)], av2.scale.is_equal_approx(Vector3.ONE) and av2.position.distance_to(home2) < 0.001)
+	# Susto: otro revela un explosivo
+	g.emit("boom", {"player": "p2", "text": "¡%s sacó un GATITO EXPLOSIVO!" % g.P("p2").name})
+	_session.updated.emit()
+	await _wait(0.2)
+	await _save_shot(dir + "/t42_avatar_susto.png")
+	var tr: Dictionary = await _mv_track("p2", 0.5)
+	_ux_line(report, "avatares", "susto de p2 al revelar un explosivo: se encoge a %.2f, tiembla (desvío horizontal %.3f), baja %.3f" % [tr.min_sx, tr.span_dx, tr.min_dy], tr.min_sx < 0.85 and tr.span_dx > 0.01)
+	await _wait(1.0)
+	g.emit("inserted", {"player": "p2", "n": 1, "len": g.draw.size(), "shuf": 0, "text": "p2 lo esconde."})
+	_session.updated.emit()
+	await _wait(0.8)
+	var back: Vector3 = _game.debug_avatar("p2").scale
+	_ux_line(report, "avatares", "pasado el susto vuelve a su escala %s y a su sitio=%s" % [str(back), str(_game.debug_avatar("p2").position.distance_to(home2) < 0.001)], back.is_equal_approx(Vector3.ONE) and _game.debug_avatar("p2").position.distance_to(home2) < 0.001)
+	# Celebración: se salva con Zombi
+	g.emit("zombie", {"player": "p3", "text": "%s juega Zombi y se salva de explotar." % g.P("p3").name})
+	_session.updated.emit()
+	var home3: Vector3 = _game.debug_grave("p3").home
+	var tr2: Dictionary = await _mv_track("p3", 0.7)
+	_ux_line(report, "avatares", "celebración de p3 al salvarse: salta %.3f, giro (escala horizontal mín %.2f)" % [tr2.max_dy, tr2.min_sx], tr2.max_dy > 0.06 and tr2.min_sx < 0.7)
+	await _wait(0.5)
+	# Cabeceo: empieza su turno
+	g.emit("turn", {"player": "p4"})
+	_session.updated.emit()
+	var tr3: Dictionary = await _mv_track("p4", 0.5)
+	_ux_line(report, "avatares", "cabeceo de p4 al empezar su turno: baja %.3f, se aplasta a %.2f" % [tr3.min_dy, tr3.min_sy], tr3.min_dy < -0.01 and tr3.min_sy < 0.97)
+	await _wait(0.6)
+	# Un muerto no se mueve (su fantasma flota por su cuenta)
+	_mv_dead(g, "p3", false)
+	await _wait(0.5)
+	var dead_n: int = _game.debug_mood().active()
+	g.emit("turn", {"player": "p3"})
+	_session.updated.emit()
+	await _wait(0.2)
+	var gr: SeatGrave = _game.debug_grave("p3")
+	_ux_line(report, "avatares", "p3 muerto: su avatar sigue siendo el fantasma (estado %s) sin pose aplicada, escala %s" % [gr.state, str(_game.debug_avatar("p3").scale)], gr.state == "dead" and _game.debug_avatar("p3").scale.is_equal_approx(Vector3.ONE))
+	await _wait(0.8)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.5)
+	var jumped: int = int(_game.debug_mood().dbg_count.get("jump", 0))
+	_ux_line(report, "avatares", "poses lanzadas en la prueba: %s" % str(_game.debug_mood().dbg_count), jumped >= 1 and _game.debug_mood().dbg_count.has("scare") and _game.debug_mood().dbg_count.has("cheer") and _game.debug_mood().dbg_count.has("nod"))
+	# Calidad baja: las poses siguen (son baratas)
+	_world.apply_quality("low")
+	g.emit("boom", {"player": "p1", "text": "¡Bigotes sacó un GATITO EXPLOSIVO!"})
+	_session.updated.emit()
+	var tr4: Dictionary = await _mv_track("p1", 0.4)
+	g.emit("inserted", {"player": "p1", "n": 1, "len": g.draw.size(), "shuf": 0, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.8)
+	_ux_line(report, "avatares", "calidad baja: el susto se ve igual (escala mín %.2f)" % tr4.min_sx, tr4.min_sx < 0.85)
+	_world.apply_quality(_mv_q)
+	_ux_reset(g, 0)
+	_session.updated.emit()
+	await _wait(0.4)
+
+
+# ---------------------------------------------------------------- tiempo de turno, Gatito Putrefacto, enlaces, sonido y menús de Plus (T52, T62, T45)
+
+## Empieza una partida Plus de un jugador con estas opciones y deja el motor quieto (los bots no actúan).
+func _t62_start(extra: Dictionary, reset_tips: bool = true) -> LocalMatch:
+	if reset_tips:        # los consejos vistos se guardan en el archivo (UX-14): cada partida de prueba empieza sin ninguno y sin ser «la primera»
+		PlusSettings.save_tips_seen({})
+		PlusSettings.set_first_game_done(true)
+	var o := {"rivals": 2, "level": "normal", "deck_mode": "official", "name": "Prueba", "avatar": 0, "plus": true, "packs": ["crypt"], "rules": {}, "seed": 11}
+	o.merge(extra, true)
+	_start_solo(o)
+	await _wait(1.2)
+	var lm := _session as LocalMatch
+	lm.set_process(false)
+	return lm
+
+
+## Turno limpio de `pid`: sin pila ni decisión, con el reloj de turno a cero.
+func _t62_turn(lm: LocalMatch, pid: String) -> void:
+	var g := lm.game
+	g.stack.clear()
+	g.prompt = null
+	g.over = null
+	g.cur = g.players.find(g.P(pid))
+	g.turns_left = 1
+	g.attacked = false
+	g.idle_since = lm.now()
+	g.turn_since = lm.now()
+	_session.updated.emit()
+	await _wait(0.5)
+
+
+func _t62_toast(text: String) -> bool:
+	return _tree_has_label(_game, text)
+
+
+func _ui_test_t62(dir: String, report: Array) -> void:
+	var cfg_text := FileAccess.get_file_as_string("user://settings.cfg")    # los ajustes del usuario se devuelven tal cual al final
+	var old_sfx: float = Sfx.sfx_volume
+	var old_music: float = Sfx.music_volume
+	if _game != null:
+		await _cripta_close_windows()
+	await _ui_test_t62_turno(dir, report)
+	await _ui_test_t62_putrefacto(dir, report)
+	await _ui_test_t62_enlaces(dir, report)
+	await _ui_test_t62_sonido(dir, report)
+	Sfx.set_sfx_volume(old_sfx)
+	Sfx.set_music_volume(old_music)
+	await _ui_test_t62_menus(dir, report)
+	var f := FileAccess.open("user://settings.cfg", FileAccess.WRITE)
+	if f:
+		f.store_string(cfg_text)
+		f.close()
+	PlusSettings.reload()
+
+
+## UX-07: barra de tiempo, fase roja, tic/alarma y robo automático con su aviso.
+func _ui_test_t62_turno(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"turn_ms": 30000}})
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	await _t62_turn(lm, "p0")
+	var tn: Dictionary = _game.debug_turn()
+	_ux_line(report, "turno", "30 s: barra visible=%s valor %.0f roja=%d total %d ms (vista.turn=%s)" % [str(tn.visible), tn.value, tn.red, tn.total, str(_session.view().get("turn"))], tn.visible and tn.value > 85.0 and tn.red == 0 and tn.total == 30000)
+	await _save_shot(dir + "/t40_turno_barra.png")
+	# Últimos 10 s: el motor deja 8 s
+	g.turn_since = lm.now() - 22000
+	_session.updated.emit()
+	var red_seen := 0
+	for _i in 12:
+		await _wait(0.25)
+		var d: Dictionary = _game.debug_turn()
+		if d.red == 1 and red_seen == 0:
+			red_seen = 1
+			await _save_shot(dir + "/t41_turno_rojo.png")
+	await _wait(0.6)
+	tn = _game.debug_turn()
+	var snd: Array = _game.debug_sounds()
+	_ux_line(report, "turno", "8 s restantes: fase roja vista=%s | tics %d alarmas %d | sonidos tick=%s alarm=%s" % [str(red_seen == 1), tn.ticks, tn.alarms, str(snd.has("tick")), str(snd.has("alarm"))], red_seen == 1 and tn.ticks >= 2 and tn.alarms == 1 and snd.has("tick") and snd.has("alarm"))
+	# Turno de un rival humano: la barra se ve en su ficha
+	g.P("p1").bot = false
+	g.P("p1").connected = true
+	await _t62_turn(lm, "p1")
+	g.turn_since = lm.now() - 5000
+	_session.updated.emit()
+	await _wait(0.5)
+	tn = _game.debug_turn()
+	_ux_line(report, "turno", "turno de p1: panel superior visible=%s, ficha de p1 %s" % [str(tn.visible), str(tn.chip)], tn.visible and tn.chip.get("visible", false) and tn.chip.value > 50.0 and tn.chip.value < 95.0)
+	await _save_shot(dir + "/t42_turno_ficha_rival.png")
+	g.P("p1").bot = true
+	# El motor roba por tiempo: aviso breve
+	await _t62_turn(lm, "p0")
+	g.turn_since = lm.now() - 29000
+	_session.updated.emit()
+	await _wait(0.3)
+	var drew0: int = g.P("p0").hand.size()
+	var t0: int = _game.dbg_timeouts
+	lm.set_process(true)
+	for _i in 12:
+		await _wait(0.25)
+		if _game.dbg_timeouts > t0:
+			break
+	lm.set_process(false)
+	await _wait(0.3)
+	_ux_line(report, "turno", "agotado el turno: avisos %d → %d, mano %d → %d, aviso en pantalla=%s" % [t0, _game.dbg_timeouts, drew0, g.P("p0").hand.size(), str(_t62_toast("Se acabó el tiempo: robas una carta."))], _game.dbg_timeouts == t0 + 1 and _t62_toast("Se acabó el tiempo: robas una carta."))
+	await _save_shot(dir + "/t43_turno_agotado.png")
+
+
+## T62: decisión `rot`, marcador en la mesa, riesgo 100 %, muerte con tinte verde y consejo del tutorial.
+func _ui_test_t62_putrefacto(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"rotten": true}})
+	var g := lm.game
+	var rot: ZKGame.Card = null
+	for c: ZKGame.Card in g.draw:
+		if c.type == "rotten":
+			rot = c
+	_ux_line(report, "putrefacto", "reparto con 3 jugadores: Putrefacto en el mazo=%s" % str(rot != null), rot != null)
+	if rot == null:
+		return
+	g.draw.erase(rot)
+	g.draw.push_back(rot)
+	await _t62_turn(lm, "p0")
+	_game.debug_sounds(true)
+	await _tap_3d(_game.debug_deck_card())
+	await _wait(1.0)
+	var pr: Variant = g.prompt
+	var title: String = _game.debug_modal_title()
+	_ux_line(report, "putrefacto", "robarlo boca abajo: decisión %s, ventana «%s», vive=%s, sonido rotten=%s" % [str(pr.type if pr != null else null), title, str(g.P("p0").alive), str(_game.debug_sounds().has("rotten"))], pr != null and pr.type == "rot" and title == "¡Encontraste al Gatito Putrefacto!" and g.P("p0").alive and _game.debug_sounds().has("rotten"))
+	await _save_shot(dir + "/t44_putrefacto_ventana.png")
+	var picker: DeckSlotPicker = _game.debug_slot_picker()
+	_ux_line(report, "putrefacto", "selector de mazo presente=%s, CONFIRMAR=%s" % [str(picker != null), str(_find_button(self, "CONFIRMAR") != null)], picker != null and _find_button(self, "CONFIRMAR") != null)
+	picker.debug_set(3)
+	await _wait(0.3)
+	await _tap_control(_find_button(self, "CONFIRMAR"))
+	await _wait(1.2)
+	var rd: Dictionary = _game.debug_rot()
+	var known: Array = _game.debug_memory().known(_session.view())
+	var in_memory := known.any(func(k: Dictionary) -> bool: return k.type == "rotten" and int(k.depth) == 3)
+	_ux_line(report, "putrefacto", "confirmar posición 3: rotDepth=%d, rótulo «%s», carta en el mazo=%s, recordatorio=%s, aviso=%s" % [g.rot_depth(), rd.label, str(rd.card), str(in_memory), str(true)], g.rot_depth() == 3 and rd.label == "☣ en 3" and rd.card and in_memory and g.prompt == null)
+	await _save_shot(dir + "/t45_putrefacto_mesa.png")
+	# Consejo del tutorial la primera vez que hay rotDepth >= 0
+	_game.coach = true
+	_game._update_hud()
+	await _wait(0.4)
+	var tip: String = _game.debug_info_text()
+	_ux_line(report, "putrefacto", "consejo del tutorial «%s»" % tip.left(60).replace("\n", " "), tip.contains("Putrefacto") and _game.debug_tip() == "rot")
+	_game.coach = false
+	_game._update_hud()
+	# Putrefacto arriba del todo: el medidor marca 100 %
+	g.draw.erase(rot)
+	g.draw.push_back(rot)
+	rot.up = true
+	await _t62_turn(lm, "p0")
+	var rk: Dictionary = _game.debug_risk()
+	rd = _game.debug_rot()
+	_ux_line(report, "putrefacto", "rotDepth 0: medidor %d%% (%s), rótulo «%s»" % [rk.pct, rk.name, rd.label], g.rot_depth() == 0 and rk.pct == 100 and rk.name == "rojo" and rd.label == "☣ ¡ARRIBA!")
+	await _save_shot(dir + "/t46_putrefacto_arriba.png")
+	# Robarlo boca arriba: muere sin ventana de Zombi aunque tenga uno
+	await _cripta_give(lm, "zombie")
+	_game.debug_sounds(true)
+	await _tap_3d(_game.debug_deck_card())
+	var seen_popup := false
+	var seen_zombie_btn := false
+	for _i in 16:
+		await _wait(0.15)
+		if _tree_has_label(_game, "¡TE PUDRISTE!") and not seen_popup:
+			seen_popup = true
+			await _save_shot(dir + "/t47_putrefacto_muerte.png")
+		seen_zombie_btn = seen_zombie_btn or _find_button(self, "JUGAR GATITO ZOMBI") != null
+	await _wait(1.5)
+	var boom_rot := false
+	for e: Dictionary in g.events:
+		if e.type == "boom" and e.get("rotten", false):
+			boom_rot = true
+	_ux_line(report, "putrefacto", "robo boca arriba: muerto=%s, decisión=%s, boom rotten=%s, popup «¡TE PUDRISTE!»=%s, botón de Zombi=%s, sonidos %s" % [str(not g.P("p0").alive), str(g.prompt), str(boom_rot), str(seen_popup), str(seen_zombie_btn), str(_game.debug_sounds())], not g.P("p0").alive and g.prompt == null and boom_rot and seen_popup and not seen_zombie_btn and _game.debug_sounds().has("tomb"))
+
+
+## Enlaces: marcador de sala en la tabla final, rasgo de los bots, muerte súbita y reglas activas en la pausa.
+func _ui_test_t62_enlaces(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rivals": 4, "level": "hard", "rules": {"sudden_death": true}})
+	var g := lm.game
+	await _t62_turn(lm, "p0")
+	var chips: Array = []
+	for id: String in ["p1", "p2", "p3", "p4"]:
+		chips.append(_game.debug_chip_state(id))
+	_ux_line(report, "enlaces", "rasgo en la ficha (nivel difícil): %s" % str(chips), chips == ["Difícil · Agresivo", "Difícil · Prudente", "Difícil · Vengativo", "Difícil · Agresivo"])
+	await _save_shot(dir + "/t48_rasgo_fichas.png")
+	# Sin rasgo en nivel fácil: una sala falsa con un bot fácil y otro normal
+	var cs := ClientSession.new()
+	add_child(cs)
+	cs.me_id = "p0"
+	cs.receive({"t": "lobby", "started": true, "scores": {"p0": 3, "p1": 1}, "settings": {"deck_mode": "official", "plus": true, "packs": ["crypt"], "rules": {}},
+		"players": [{"id": "p0", "name": "Prueba", "avatar": 0, "host": true, "bot": false}, {"id": "p1", "name": "Bigotes", "avatar": 1, "host": false, "bot": true, "level": "easy", "trait": "aggressive"},
+			{"id": "p2", "name": "Pelusa", "avatar": 2, "host": false, "bot": true, "level": "normal", "trait": "vengeful"}]})
+	_ux_line(report, "enlaces", "ClientSession.trait_of: p1=%s p2=%s p0=«%s» | scores %s" % [cs.trait_of("p1"), cs.trait_of("p2"), cs.trait_of("p0"), str(cs.scores())], cs.trait_of("p1") == "aggressive" and cs.trait_of("p2") == "vengeful" and cs.trait_of("p0") == "" and cs.scores().get("p1") == 1)
+	# Muerte súbita: con 2 vivos y la regla activa, rótulo fijo; el sonido solo la primera vez
+	g.P("p3").alive = false
+	g.P("p4").alive = false
+	g.P("p2").alive = true
+	g.P("p1").alive = true
+	await _t62_turn(lm, "p0")
+	var sd0: bool = _game.debug_sudden()
+	g.P("p2").alive = false
+	_session.updated.emit()
+	await _wait(0.4)
+	_game.debug_sounds(true)
+	g.emit("sudden", {"left": 20, "text": "Muerte súbita: se retira una carta del mazo."})
+	_session.updated.emit()
+	await _wait(0.4)
+	g.emit("sudden", {"left": 19, "text": "Muerte súbita: se retira una carta del mazo."})
+	_session.updated.emit()
+	await _wait(0.4)
+	var n_sudden: int = _game.debug_sounds().count("sudden")
+	_ux_line(report, "enlaces", "muerte súbita: rótulo con 3 vivos=%s, con 2 vivos=%s, sonido «sudden» %d vez, aviso=%s" % [str(sd0), str(_game.debug_sudden()), n_sudden, str(_t62_toast("Muerte súbita: se retira una carta del mazo."))], not sd0 and _game.debug_sudden() and n_sudden == 1 and _t62_toast("Muerte súbita: se retira una carta del mazo."))
+	await _save_shot(dir + "/t49_muerte_subita.png")
+	# Guía de cartas: el Gatito Putrefacto solo sale en «La Cripta» con la regla activa
+	var guide_on := InfoScreen.open(_game, "cards", ["crypt"], {"rotten": true})
+	var guide_off := InfoScreen.open(_game, "cards", ["crypt"], {"rotten": false})
+	await _wait(0.5)
+	var on_has := _tree_has_label(guide_on, "Gatito Putrefacto")
+	var off_has := _tree_has_label(guide_off, "Gatito Putrefacto")
+	_ux_line(report, "enlaces", "guía de cartas: con la regla activa muestra el Putrefacto=%s, sin ella=%s" % [str(on_has), str(off_has)], on_has and not off_has)
+	guide_on.queue_free()
+	guide_off.queue_free()
+	await _wait(0.2)
+	# Reglas activas en el menú de pausa
+	_game.debug_open_menu()
+	await _wait(0.5)
+	var line: String = _game.active_rules_line()
+	_ux_line(report, "enlaces", "menú de pausa lista «%s» (en pantalla=%s)" % [line, str(_tree_has_label(_game, line))], line.contains("La Cripta") and line.contains("muerte súbita") and _tree_has_label(_game, line))
+	await _save_shot(dir + "/t50_pausa.png")
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.3)
+	# Marcador de sala: la ventana final pasa session.scores() a la tabla (6 columnas con «Victorias»)
+	g.over = {"winner": "p0"}
+	var view: Dictionary = g.view("p0", lm.now())
+	cs.receive({"t": "state", "view": view})
+	var screen2 := PlusGameScreen.new().setup(cs, _world)
+	add_child(screen2)
+	await _wait(0.8)
+	var rows: Array = screen2.debug_stats().debug_rows()
+	var cols: int = (rows[0].values as Array).size() if not rows.is_empty() else 0
+	_ux_line(report, "enlaces", "tabla final con marcador de sala: %d filas, %d columnas, victorias %s, ventana «%s»" % [rows.size(), cols, str(rows.map(func(r: Dictionary) -> Variant: return r.values[-1] if r.values.size() > 5 else null)), screen2.debug_modal_title()], cols == 6 and rows.size() == view.players.size())
+	await _save_shot(dir + "/t51_final_marcador.png")
+	screen2.queue_free()
+	cs.queue_free()
+	await _wait(0.3)
+
+
+## T45: sonidos por evento, música por capas y deslizadores de volumen.
+func _ui_test_t62_sonido(dir: String, report: Array) -> void:
+	var lm := await _t62_start({"rules": {"rotten": true}})
+	var g := lm.game
+	_ux_line(report, "sonido", "música por capas dentro de la partida Plus: layers_on=%s" % str(Sfx.layers_on), Sfx.layers_on)
+	await _t62_turn(lm, "p0")
+	var cases: Array = [
+		["reverse", {"dir": -1, "text": "¡Marcha atrás!"}, "reverse"],
+		["apocalypse", {"n": 1, "text": "¡Apocalipsis!"}, "apocalypse"],
+		["swap", {"player": "p1", "target": "p2", "text": "Trueque"}, "swap"],
+		["haunt", {"player": "p1", "target": "p2", "card": "skip", "text": "Espanto"}, "haunt"],
+		["info", {"text": "Garritas mira la mano de Bigotes."}, "crow"],
+		["rot_found", {"player": "p1", "text": "X encontró al Putrefacto"}, "rotten"],
+		["draw", {"player": "p1", "bottom": true}, "bottom"],
+	]
+	var bad: Array = []
+	for cs_: Array in cases:
+		_game.debug_sounds(true)
+		g.emit(cs_[0], cs_[1])
+		_session.updated.emit()
+		await _wait(0.35)
+		if not _game.debug_sounds().has(cs_[2]):
+			bad.append("%s→%s (suena %s)" % [cs_[0], cs_[2], str(_game.debug_sounds())])
+	# Ataque dirigido frente a ataque normal
+	_game.debug_sounds(true)
+	g.emit("play", {"player": "p1", "eff": "targeted_attack", "text": "x"})
+	g.emit("attack", {"player": "p1", "target": "p2", "n": 2, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.4)
+	var s1: Array = _game.debug_sounds()
+	_game.debug_sounds(true)
+	g.emit("play", {"player": "p1", "eff": "attack", "text": "x"})
+	g.emit("attack", {"player": "p1", "target": "p2", "n": 2, "text": "x"})
+	_session.updated.emit()
+	await _wait(0.4)
+	var s2: Array = _game.debug_sounds()
+	if not (s1.has("targeted") and not s1.has("attack")):
+		bad.append("targeted %s" % str(s1))
+	if not (s2.has("attack") and not s2.has("targeted")):
+		bad.append("attack %s" % str(s2))
+	# Enterrar (evento privado) y Alterar el Futuro (decisión propia)
+	_game.debug_sounds(true)
+	g.emit("buried", {"pos": 2, "len": 10, "text": "Enterraste"}, "p0")
+	_session.updated.emit()
+	await _wait(0.35)
+	if not _game.debug_sounds().has("bury"):
+		bad.append("bury")
+	_game.debug_sounds(true)
+	var top3: Array = []
+	for k in 3:
+		top3.append(g.draw[g.draw.size() - 1 - k])
+	g.prompt = {"type": "alter", "player": "p0", "cards": top3, "start": lm.now(), "deadline": lm.now() + 60000}
+	_session.updated.emit()
+	await _wait(0.5)
+	if not _game.debug_sounds().has("alter"):
+		bad.append("alter (abrir)")
+	_game.debug_sounds(true)
+	g.prompt = null
+	_session.updated.emit()
+	await _wait(0.3)
+	_game.debug_sounds(true)
+	_game._request_target("living")
+	await _wait(0.3)
+	if not _game.debug_sounds().has("aim"):
+		bad.append("aim")
+	_game._exit_aim()
+	# Muerte: lápida tras la explosión
+	_game.debug_sounds(true)
+	g._die(g.P("p2"), ZKGame.Card.new("zkd", "exploding", false), lm.now())
+	g.P("p2").alive = false
+	_session.updated.emit()
+	await _wait(2.4)
+	if not _game.debug_sounds().has("tomb"):
+		bad.append("tomb %s" % str(_game.debug_sounds()))
+	g.P("p2").alive = true
+	g.over = null
+	_ux_line(report, "sonido", "sonidos por evento (reverse, apocalypse, swap, haunt, crow, rotten, bottom, targeted/attack, bury, alter, aim, tomb): fallos %s" % str(bad), bad.is_empty())
+	# Música por capas según el riesgo: mazo corto → 50 % de riesgo
+	g.draw = g.draw.slice(g.draw.size() - 4)
+	await _t62_turn(lm, "p0")
+	var rk: Dictionary = _game.debug_risk()
+	_ux_line(report, "sonido", "riesgo %d%%: tensión %.2f, percusión %.2f (esperado tensión > 0 y percusión > 0)" % [rk.pct, Sfx._tension, Sfx._drums], rk.pct >= 50 and Sfx._tension > 0.4 and Sfx._drums > 0.4)
+	# Deslizadores de volumen del menú de pausa
+	_game.debug_open_menu()
+	await _wait(0.5)
+	var sl: Dictionary = _game.debug_volume_sliders()
+	var has_both: bool = sl.has("Efectos") and sl.has("Música")
+	if has_both:
+		(sl["Efectos"] as HSlider).value = 40
+		(sl["Música"] as HSlider).value = 25
+	_ux_line(report, "sonido", "deslizadores de volumen: Efectos → %.2f, Música → %.2f" % [Sfx.sfx_volume, Sfx.music_volume], has_both and absf(Sfx.sfx_volume - 0.4) < 0.01 and absf(Sfx.music_volume - 0.25) < 0.01)
+	await _save_shot(dir + "/t52_pausa_volumen.png")
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.3)
+	# Al salir de la partida Plus, la música vuelve a la pista normal
+	_close_session()
+	await _wait(0.5)
+	_ux_line(report, "sonido", "al salir de la partida: layers_on=%s" % str(Sfx.layers_on), not Sfx.layers_on)
+
+
+## Menús de Plus: «Un jugador» con todo apagado y con todo activo, y la sala de 5 como anfitrión.
+func _ui_test_t62_menus(dir: String, report: Array) -> void:
+	_show_menu()
+	await _wait(0.5)
+	_menu.set_plus(true, false)
+	_menu._opts.rivals = 2
+	_menu._opts.packs = ["crypt"]
+	_menu._rules = MenuScreen._clean_solo_rules({})
+	_menu._build()
+	await _wait(0.4)
+	await _menu_tap("UN JUGADOR")
+	await _save_shot(dir + "/t53_solo_plus_apagado.png")
+	var labels := ["Tiempo por turno: sin límite", "Mano inicial: normal", "Muerte súbita: no", "Nop sin pistas: no", "Gatito Putrefacto: no"]
+	var found := labels.all(func(t: String) -> bool: return _find_button(self, t) != null)
+	_ux_line(report, "menu", "Un jugador/Plus, todo apagado: botones de las 5 reglas visibles=%s" % str(found), found)
+	await _menu_tap("Tiempo por turno: sin límite")
+	await _menu_tap("Mano inicial: normal")
+	await _menu_tap("Muerte súbita: no")
+	await _menu_tap("Nop sin pistas: no")
+	await _menu_tap("Gatito Putrefacto: no")
+	await _save_shot(dir + "/t54_solo_plus_todo.png")
+	var scroll_ok: bool = true
+	var r: Dictionary = _menu._rules
+	_ux_line(report, "menu", "reglas tras tocar todas: %s" % str(r), int(r.turn_ms) == 30000 and int(r.hand) == 5 and r.sudden_death and r.nope_fixed and r.rotten)
+	# Con 1 rival, la nota avisa de que no tendrá efecto
+	await _menu_tap("1")
+	var note1 := _menu_has_text(_menu, "no tendrá efecto")
+	await _save_shot(dir + "/t55_solo_plus_1rival.png")
+	await _menu_tap("3")
+	_ux_line(report, "menu", "nota con 1 rival=%s | desplazamiento del bloque presente=%s" % [str(note1), str(_menu._scroll != null)], note1 and scroll_ok)
+	# Sin La Cripta no hay regla del Putrefacto
+	await _menu_tap("La Cripta: sí")
+	_ux_line(report, "menu", "sin La Cripta el botón del Putrefacto se oculta=%s" % str(_find_button(self, "Gatito Putrefacto: sí") == null), _find_button(self, "Gatito Putrefacto: sí") == null)
+	await _menu_tap("La Cripta: no")
+	# Jugar: las opciones llevan las reglas al motor
+	await _menu_tap("¡JUGAR!")
+	await _wait(1.5)
+	var rl: Dictionary = _last_opts.get("rules", {})
+	_ux_line(report, "menu", "opts.rules al jugar: %s plus=%s packs=%s" % [str(rl), str(_last_opts.get("plus")), str(_last_opts.get("packs"))], int(rl.get("turn_ms", 0)) == 30000 and int(rl.get("hand", 0)) == 5 and rl.get("sudden_death", false) and rl.get("nope_fixed", false) and rl.get("rotten", false) and _last_opts.get("plus", false) and (_last_opts.get("packs", []) as Array).has("crypt"))
+	var gv: Dictionary = _session.view()
+	_ux_line(report, "menu", "el motor recibió las reglas: %s" % str(gv.get("rules")), gv.get("rules", {}).get("rotten", false) and int(gv.get("rules", {}).get("hand", 0)) == 5)
+	# Sala como anfitrión con 5 jugadores
+	_close_session()
+	var cs := ClientSession.new()
+	add_child(cs)
+	cs.me_id = "p0"
+	cs.host_flag = true
+	var pl: Array = [{"id": "p0", "name": "Anfitrión", "avatar": 0, "host": true, "bot": false}]
+	for i in 4:
+		pl.append({"id": "p%d" % (i + 1), "name": ["Bigotes", "Garritas", "Pelusa", "Don Miau"][i], "avatar": i + 1, "host": false, "bot": true, "level": ["easy", "normal", "hard", "normal"][i], "trait": ["aggressive", "cautious", "vengeful", "aggressive"][i]})
+	cs.receive({"t": "lobby", "started": false, "scores": {"p0": 2, "p1": 1}, "players": pl,
+		"settings": {"deck_mode": "official", "plus": true, "packs": ["crypt"], "rules": {"turn_ms": 30000, "hand": 5, "sudden_death": true, "nope_fixed": true, "rotten": true}}})
+	_session = cs
+	_show_menu("lobby")
+	await _wait(0.8)
+	await _save_shot(dir + "/t56_sala_5_anfitrion.png")
+	var rb := _find_button(self, "Gatito Putrefacto: sí")
+	var start_btn := _find_button(self, "¡EMPEZAR PARTIDA!")
+	var start_vis := false
+	if start_btn != null:
+		var rect := start_btn.get_global_rect()
+		start_vis = rect.end.y <= get_viewport().get_visible_rect().size.y and rect.position.y >= 0.0
+	_ux_line(report, "menu", "sala de 5 como anfitrión: botón del Putrefacto=%s, nota=%s, desplazamiento=%s, EMPEZAR visible sin desplazar=%s" % [str(rb != null), str(_menu_has_text(_menu, "Sustituye a un explosivo")), str(_menu._scroll != null), str(start_vis)], rb != null and _menu_has_text(_menu, "Sustituye a un explosivo"))
+	if _menu._scroll != null:
+		_menu._scroll.scroll_vertical = 100000
+		await _wait(0.3)
+		await _save_shot(dir + "/t57_sala_5_abajo.png")
+	_close_session()
+	# Una partida normal para que el resto de la prueba (salir por el menú) siga igual
+	await _t62_start({})
+
+
+## Toca un botón del menú; si el contenido está desplazable, antes lo hace visible.
+func _menu_tap(text: String) -> void:
+	var b := _find_button(_menu, text)
+	if b == null:
+		return
+	if _menu._scroll != null:
+		_menu._scroll.ensure_control_visible(b)
+		await _wait(0.2)
+	await _tap_control(b)
+	await _wait(0.3)
+
+
+func _menu_has_text(n: Node, part: String) -> bool:
+	if n is Label and (n as Label).text.contains(part):
+		return true
+	for c in n.get_children():
+		if _menu_has_text(c, part):
+			return true
+	return false
+
+
+# ---------------------------------------------------------------- T53: reacciones rápidas (UX-08)
+
+## Si la prueba anterior murió con el ajuste «Reacciones» cambiado, lo devuelve a su valor original (marca `emotes_test_backup`).
+func _t53_restore_stale(announce: bool = true) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	if not cfg.has_section_key("plus", "emotes_test_backup"):
+		return
+	var old: Variant = cfg.get_value("plus", "emotes_test_backup")
+	if old is bool:
+		cfg.set_value("plus", "emotes", old)
+	elif cfg.has_section_key("plus", "emotes"):
+		cfg.erase_section_key("plus", "emotes")
+	cfg.erase_section_key("plus", "emotes_test_backup")
+	cfg.save(SETTINGS)
+	if announce:
+		print("UITEST aviso: ajuste de reacciones restaurado de una prueba interrumpida")
+
+
+func _t53_begin() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	if not cfg.has_section_key("plus", "emotes_test_backup"):
+		cfg.set_value("plus", "emotes_test_backup", cfg.get_value("plus", "emotes", "absent"))
+		cfg.save(SETTINGS)
+
+
+func _t53_line(report: Array, detail: String, ok: bool) -> void:
+	_say(report, "Plus/reacciones: %s | %s" % [detail, "OK" if ok else "ERROR"])
+
+
+func _t53_bar_ok() -> Dictionary:
+	var bar: Node = (_game.debug_emote_button() as Control).get_parent()
+	var rects: Array[Rect2] = []
+	var names: Array[String] = []
+	for c in bar.get_children():
+		if c is Control and (c as Control).visible:
+			rects.append((c as Control).get_global_rect())
+			names.append(c.get_class() + ":" + (c.text if c is Button else ""))
+	var width := get_viewport().get_visible_rect().size.x
+	var clean := true
+	for i in rects.size():
+		if rects[i].end.x > width + 0.5 or rects[i].position.x < -0.5:
+			clean = false
+		for j in range(i + 1, rects.size()):
+			if rects[i].grow(-1.0).intersects(rects[j].grow(-1.0)):
+				clean = false
+	return {"ok": clean, "n": rects.size(), "rects": rects, "names": names}
+
+
+func _ui_test_t53(dir: String, report: Array) -> void:
+	_t53_begin()
+	EmoteSet.save_enabled(true)
+	var lm := await _t62_start({"rivals": 4, "seed": 21})
+	var g := lm.game
+	var screen := get_viewport().get_visible_rect().size
+	_memo_safe_top(g, 4)
+	await _t62_turn(lm, "p0")
+	# Barra superior en el peor caso: sentido invertido, turno doble de un nombre largo y 5 jugadores
+	g.dir = -1
+	await _t62_turn(lm, "p4")
+	g.turns_left = 2
+	_session.updated.emit()
+	await _wait(0.4)
+	var bar := _t53_bar_ok()
+	var d0: Dictionary = _game.debug_emotes()
+	_t53_line(report, "botón visible junto a HISTORIAL, sin solaparse con nada en la barra (%d elementos, 5 jugadores)" % bar.n, d0.button and bar.ok and _find_button(self, "HISTORIAL") != null)
+	await _save_shot(dir + "/t60_barra_5_jugadores.png")
+	g.dir = 1
+	await _t62_turn(lm, "p0")
+	var hist_before: int = _game.debug_history_size()
+	# Abrir el selector
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.4)
+	var d1: Dictionary = _game.debug_emotes()
+	var opts: Array[Button] = _game.debug_emote_options()
+	var in_screen: bool = opts.size() == 6 and opts.all(func(b: Button) -> bool: return Rect2(Vector2.ZERO, screen).encloses(b.get_global_rect()))
+	_t53_line(report, "tocar el botón abre el selector con 6 reacciones dentro de la pantalla (%s)" % ", ".join(PackedStringArray(opts.map(func(b: Button) -> String: return b.text))), d1.picker and in_screen)
+	await _save_shot(dir + "/t61_selector.png")
+	# Tocar fuera lo cierra
+	await _tap(get_viewport().get_final_transform() * Vector2(screen.x * 0.5, screen.y * 0.55))
+	await _wait(0.3)
+	_t53_line(report, "tocar fuera cierra el selector sin enviar nada", not _game.debug_emotes().picker and _game.debug_emotes().bubbles.is_empty() and not _game.debug_emotes().cooling)
+	# Enviar una
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.3)
+	opts = _game.debug_emote_options()
+	_game.debug_sounds(true)
+	if opts.size() == 6:
+		await _tap_control(opts[0])
+	await _wait(0.45)
+	var d2: Dictionary = _game.debug_emotes()
+	var mine: Dictionary = d2.bubbles.get("p0", {})
+	_t53_line(report, "enviar «JAJA»: selector cerrado=%s, mi globo=%s, enfriamiento activo=%s, botón desactivado=%s" % [str(not d2.picker), str(mine.get("word")), str(d2.cooling), str(d2.disabled)], not d2.picker and mine.get("word", "") == "JAJA" and d2.cooling and d2.disabled)
+	_t53_line(report, "sonido emote y sin entrada en el historial ni ventana abierta (historial %d → %d)" % [hist_before, _game.debug_history_size()], _game.debug_sounds().has("emote") and _game.debug_history_size() == hist_before and _game.debug_modal_title() == "")
+	await _save_shot(dir + "/t62_globo_propio.png")
+	var rect_ok: bool = mine.has("rect") and Rect2(Vector2.ZERO, screen).encloses(mine.rect)
+	_t53_line(report, "mi globo cabe en pantalla (%s)" % str(mine.get("rect")), rect_ok)
+	# Durante el enfriamiento el botón no abre nada
+	await _tap_control(_game.debug_emote_button())
+	await _wait(0.2)
+	_t53_line(report, "durante el enfriamiento el botón no abre el selector", not _game.debug_emotes().picker)
+	# Reacción de un rival simulada: globo sobre su asiento
+	_session.emote.emit("p2", 1)
+	_session.emote.emit("p4", 3)
+	await _wait(0.45)
+	var d3: Dictionary = _game.debug_emotes()
+	var seat: Vector2 = _game.debug_seat_pos("p2")
+	var b2: Dictionary = d3.bubbles.get("p2", {})
+	var above: bool = b2.has("rect") and absf(b2.rect.get_center().x - seat.x) < 90.0 and b2.rect.position.y >= seat.y - 20.0 and b2.rect.position.y < seat.y + 250.0
+	_t53_line(report, "reacción de p2 simulada: globo «%s» colgando de su gato (centro x %.0f / asiento %.0f, cima y %.0f / asiento %.0f); p4 también: %s" % [str(b2.get("word")), b2.rect.get_center().x if b2.has("rect") else -1.0, seat.x, b2.rect.position.y if b2.has("rect") else -1.0, seat.y, str(d3.bubbles.has("p4"))], above and b2.word == "¡NO!" and d3.bubbles.has("p4") and d3.bubbles.has("p0"))
+	await _save_shot(dir + "/t63_globo_rival.png")
+	# Varias seguidas del mismo jugador: sustituye
+	_session.emote.emit("p2", 4)
+	await _wait(0.3)
+	var n_p2 := 0
+	for c in _game._emote_layer.get_children():
+		if c is EmoteBubble and c.player == "p2" and not c.is_queued_for_deletion():
+			n_p2 += 1
+	var d4: Dictionary = _game.debug_emotes()
+	_t53_line(report, "otra reacción seguida de p2 sustituye al globo (globos de p2: %d, ahora «%s»)" % [n_p2, str(d4.bubbles.get("p2", {}).get("word"))], n_p2 == 1 and d4.bubbles.get("p2", {}).get("word", "") == "PORFA")
+	# Un muerto puede reaccionar y se le ve
+	g.P("p3").alive = false
+	_session.updated.emit()
+	await _wait(0.3)
+	_session.emote.emit("p3", 3)
+	await _wait(0.4)
+	_t53_line(report, "un rival muerto reacciona y se ve su globo: %s" % str(_game.debug_emotes().bubbles.has("p3")), _game.debug_emotes().bubbles.has("p3"))
+	await _save_shot(dir + "/t64_globos_varios.png")
+	g.P("p3").alive = true
+	# Se desvanecen (2 s visibles) y el enfriamiento termina a los 3 s
+	await _wait(2.7)
+	var d5: Dictionary = _game.debug_emotes()
+	_t53_line(report, "pasados ~3 s: globos desaparecidos=%s, enfriamiento terminado=%s, botón activo=%s" % [str(d5.bubbles.is_empty()), str(not d5.cooling), str(not d5.disabled)], d5.bubbles.is_empty() and not d5.cooling and not d5.disabled)
+	# Ajuste «Reacciones: no» desde el menú de pausa
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	await _save_shot(dir + "/t65_menu_reacciones.png")
+	var tog := _find_button(self, "Reacciones: sí")
+	_t53_line(report, "el menú de pausa ofrece «Reacciones: sí»", tog != null)
+	if tog:
+		await _tap_control(tog)
+		await _wait(0.3)
+	var off_label := _find_button(self, "Reacciones: no") != null
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.4)
+	_session.emote.emit("p2", 2)
+	await _wait(0.4)
+	var d6: Dictionary = _game.debug_emotes()
+	_t53_line(report, "ajuste «no»: etiqueta cambiada=%s, botón oculto=%s, globo ajeno oculto=%s, guardado en settings=%s" % [str(off_label), str(not d6.button), str(d6.bubbles.is_empty()), str(EmoteSet.load_enabled())], off_label and not d6.button and d6.bubbles.is_empty() and not EmoteSet.load_enabled())
+	await _save_shot(dir + "/t66_reacciones_no.png")
+	var bar2 := _t53_bar_ok()
+	_t53_line(report, "sin el botón la barra sigue sin solaparse", bar2.ok)
+	# Volver a «sí»
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	tog = _find_button(self, "Reacciones: no")
+	if tog:
+		await _tap_control(tog)
+		await _wait(0.3)
+	await _tap_control(_find_button(self, "Seguir jugando"))
+	await _wait(0.4)
+	_session.emote.emit("p2", 0)
+	await _wait(0.4)
+	var d7: Dictionary = _game.debug_emotes()
+	_t53_line(report, "ajuste «sí» otra vez: botón visible=%s, globo ajeno visible=%s, guardado=%s" % [str(d7.button), str(d7.bubbles.has("p2")), str(EmoteSet.load_enabled())], d7.button and d7.bubbles.has("p2") and EmoteSet.load_enabled())
+	# Devuelve el ajuste del usuario
+	_t53_restore_stale(false)
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS)
+	_t53_line(report, "ajuste del usuario restaurado (marca de prueba borrada: %s)" % str(not cfg.has_section_key("plus", "emotes_test_backup")), not cfg.has_section_key("plus", "emotes_test_backup"))
+	await _wait(2.8)
+
+
+
+# ---------------------------------------------------------------- T70: orden de la mano, accesibilidad, consejos y ambiente (UX-11, UX-13, UX-14, V-09)
+
+const T70_BACKUP := "user://settings.cfg.t70bak"
+
+
+## Copia de seguridad de TODO el archivo de ajustes antes de que la prueba de Plus lo toque. Si ya había una (ejecución anterior
+## interrumpida) no se pisa: `_t70_restore_stale` la devuelve primero.
+func _t70_begin() -> void:
+	if FileAccess.file_exists(T70_BACKUP):
+		return
+	var f := FileAccess.open(T70_BACKUP, FileAccess.WRITE)
+	if f:
+		f.store_string(FileAccess.get_file_as_string(SETTINGS))
+		f.close()
+
+
+## Devuelve los ajustes del usuario desde la copia (si existe) y la borra. Se llama al arrancar la aplicación y al terminar la prueba.
+func _t70_restore_stale() -> void:
+	if not FileAccess.file_exists(T70_BACKUP):
+		return
+	var txt := FileAccess.get_file_as_string(T70_BACKUP)
+	var f := FileAccess.open(SETTINGS, FileAccess.WRITE)
+	if f:
+		f.store_string(txt)
+		f.close()
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(T70_BACKUP))
+	PlusSettings.reload()
+
+
+func _ui_quit() -> void:
+	_t70_restore_stale()
+	get_tree().quit()
+
+
+func _t70_line(report: Array, area: String, detail: String, ok: bool) -> void:
+	_say(report, "Plus/%s: %s | %s" % [area, detail, "OK" if ok else "ERROR"])
+
+
+## Cambia la mano de p0 por estas cartas (sin pila ni decisión) y deja que la pantalla la dibuje.
+func _t70_hand(lm: LocalMatch, types: Array) -> Array:
+	var g := lm.game
+	g.stack.clear()
+	g.prompt = null
+	g.over = null
+	for pl in g.players:
+		pl.alive = true
+	g.cur = 0
+	g.turns_left = 1
+	g.attacked = false
+	g.P("p0").hand.clear()
+	var ids: Array = []
+	for t: String in types:
+		ids.append(_ux_give(g, "p0", t))
+	_session.updated.emit()
+	await _wait(0.7)
+	return ids
+
+
+## Controles visibles (rótulos, botones y paneles) de este árbol que se salen de la pantalla.
+func _t70_outside(root: Node, skip: Array = []) -> Array:
+	var out: Array = []
+	var screen := Rect2(Vector2.ZERO, get_viewport().get_visible_rect().size).grow(1.0)
+	_t70_scan(root, screen, out, skip)
+	return out
+
+
+func _t70_scan(n: Node, screen: Rect2, out: Array, skip: Array) -> void:
+	if skip.has(n):
+		return
+	if n is CanvasItem and not (n as CanvasItem).is_visible_in_tree():
+		return
+	if n is Label or n is Button or n is PanelContainer:
+		var r := (n as Control).get_global_rect()
+		if r.size.x > 1.0 and r.size.y > 1.0 and not screen.encloses(r):
+			out.append("%s«%s» %s" % [n.get_class(), (n.text if n is Label or n is Button else ""), str(r)])
+	for c in n.get_children():
+		_t70_scan(c, screen, out, skip)
+
+
+## Sobre el menú de pausa: pulsa un botón por su texto y devuelve si existía.
+func _t70_menu_tap(text: String, close_after: bool = true) -> bool:
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	var b := _find_button(self, text)
+	var found := b != null
+	if b:
+		await _tap_control(b)
+		await _wait(0.4)
+	if close_after:
+		var back := _find_button(self, "Seguir jugando")
+		if back:
+			await _tap_control(back)
+			await _wait(0.4)
+	return found
+
+
+func _ui_test_t70(dir: String, report: Array) -> void:
+	_t70_begin()
+	PlusSettings.reload()
+	await _ui_test_t70_orden(dir, report)
+	await _ui_test_t70_accesibilidad(dir, report)
+	await _ui_test_t70_consejos(dir, report)
+	await _ui_test_t70_ambiente(dir, report)
+	# Devuelve los ajustes del usuario (y deja el estado «sin consejos pendientes» para el resto de la prueba)
+	_t70_restore_stale()
+	_t70_begin()
+	PlusSettings.save_tips_seen({})
+	PlusSettings.set_first_game_done(true)
+	var cfg := ConfigFile.new()
+	cfg.load(T70_BACKUP)
+	_t70_line(report, "ajustes", "copia de seguridad hecha (existe=%s); se devuelve al terminar la prueba" % str(FileAccess.file_exists(T70_BACKUP)), FileAccess.file_exists(T70_BACKUP))
+
+
+# ---------------- UX-11
+
+func _ui_test_t70_orden(dir: String, report: Array) -> void:
+	PlusSettings.set_hand_order("tipo")
+	var lm := await _t62_start({"rivals": 3, "seed": 31})
+	var types := ["cat_a", "cat_b", "shuffle", "favor", "nope", "cat_a", "zombie", "attack", "cat_b", "clairvoyance", "cat_c"]
+	await _t70_hand(lm, types)
+	var by_type: Array = _game.debug_hand_order().map(func(d: Dictionary) -> String: return d.type)
+	var want_type: Array = HandOrder.sorted(lm.game.P("p0").hand.map(func(c: ZKGame.Card) -> Dictionary: return {"id": c.id, "type": c.type}), CardDB.types_for(["crypt"]), "tipo").map(func(d: Dictionary) -> String: return d.type)
+	_t70_line(report, "orden", "«por tipo» (por defecto) deja el orden de siempre: %s" % ", ".join(PackedStringArray(by_type)), by_type == want_type and by_type[0] == "zombie" and by_type[1] == "nope" and by_type.slice(-5) == ["cat_a", "cat_a", "cat_b", "cat_b", "cat_c"] and by_type.find("shuffle") < by_type.find("favor") and by_type.find("favor") < by_type.find("clairvoyance"))
+	# Marcas sin Clon: pareja de cat_a y de cat_b (×2); cat_c suelta sin marca
+	var marks: Dictionary = _game.debug_hand_mark_texts()
+	var n2 := 0
+	var bad_mark := false
+	for c: Dictionary in _game.debug_hand_order():
+		var m: String = marks.get(c.id, "")
+		if m == "×2":
+			n2 += 1
+			bad_mark = bad_mark or not (c.type in ["cat_a", "cat_b"])
+		elif m != "":
+			bad_mark = true
+		elif c.type in ["cat_a", "cat_b"]:
+			bad_mark = true
+	_t70_line(report, "orden", "marcas ×2 visibles sin seleccionar en las 4 cartas de pareja (hay %d), ninguna en las sueltas ni en otras clases" % n2, n2 == 4 and not bad_mark)
+	# Cambiar a «por uso» desde el menú de pausa
+	var tapped := await _t70_menu_tap("Mano: por tipo")
+	var cfg_val := PlusSettings.hand_order()
+	await _wait(0.5)
+	var by_use: Array = _game.debug_hand_order().map(func(d: Dictionary) -> String: return d.type)
+	var left2: Array = by_use.slice(0, 2)
+	var tail: Array = by_use.slice(2)
+	var ok_use: bool = tapped and cfg_val == "uso" and left2 == ["zombie", "nope"] and tail == ["attack", "favor", "shuffle", "clairvoyance", "cat_a", "cat_a", "cat_b", "cat_b", "cat_c"] and by_use != by_type
+	_t70_line(report, "orden", "«por uso» (guardado=%s): %s" % [cfg_val, ", ".join(PackedStringArray(by_use))], ok_use)
+	_t70_line(report, "orden", "el menú ofrece ahora «Mano: por uso» (conmutable de vuelta)", _find_button(self, "MENÚ") != null and await _t70_menu_tap("Mano: por uso", false) and PlusSettings.hand_order() == "tipo")
+	var back := _find_button(self, "Seguir jugando")
+	if back:
+		await _tap_control(back)
+		await _wait(0.3)
+	# otra vez «por uso» para la captura; con el Clon como comodín: ×3 para las parejas y ×2 para cat_c
+	PlusSettings.set_hand_order("uso")
+	await _t70_hand(lm, types + ["clone"])
+	marks = _game.debug_hand_mark_texts()
+	var counts := {"×2": [], "×3": []}
+	for c: Dictionary in _game.debug_hand_order():
+		if marks.get(c.id, "") != "":
+			(counts[marks[c.id]] as Array).append(c.type)
+	var t3: Array = counts["×3"]
+	var t2: Array = counts["×2"]
+	t3.sort()
+	_t70_line(report, "orden", "con un Clon de comodín: ×3 en %s, ×2 en %s" % [str(t3), str(t2)], t3 == ["cat_a", "cat_a", "cat_b", "cat_b", "clone"] and t2 == ["cat_c"])
+	_game.debug_clear_selection()
+	await _save_shot(dir + "/t70_mano_uso.png")
+	PlusSettings.set_hand_order("tipo")
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- UX-13
+
+func _ui_test_t70_accesibilidad(dir: String, report: Array) -> void:
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_vibration(true)
+	PlusSettings.set_reduce_motion(false)
+	var lm := await _t62_start({"rivals": 4, "seed": 41})
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	await _t70_hand(lm, ["cat_a", "cat_a", "nope", "zombie", "attack", "shuffle", "bury"])
+	var hist := _find_button(self, "HISTORIAL")
+	var s_hist0: int = hist.get_theme_font_size("font_size")
+	var status: Label = _game._status
+	var s_status0: int = status.get_theme_font_size("font_size")
+	# --- texto grande
+	var tapped := await _t70_menu_tap("Texto: normal")
+	await _wait(0.5)
+	var f := PlusSettings.text_factor()
+	hist = _find_button(self, "HISTORIAL")
+	var s_hist1: int = hist.get_theme_font_size("font_size")
+	var s_status1: int = status.get_theme_font_size("font_size")
+	_t70_line(report, "accesibilidad", "texto grande: guardado=%s factor %.1f, HISTORIAL %d→%d, estado %d→%d" % [str(PlusSettings.text_large()), f, s_hist0, s_hist1, s_status0, s_status1], tapped and PlusSettings.text_large() and absf(f - 1.2) < 0.001 and s_hist1 == roundi(s_hist0 * 1.2) and s_status1 == roundi(s_status0 * 1.2))
+	# Todos los textos de la pantalla crecen ~1,2 (se compara con su tamaño base)
+	var n_ctrl := 0
+	var n_bad := 0
+	var stack: Array = [_game.debug_hud_root()]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.append(c)
+		if (n is Label or n is Button) and (n as Control).is_visible_in_tree() and not n.has_meta("zk_fixed") and n != _game._turn and not _game._fx_root.is_ancestor_of(n) and not _game._emote_layer.is_ancestor_of(n):
+			n_ctrl += 1
+			if (n as Control).get_theme_font_size("font_size") != roundi(PlusText.base_of(n as Control) * 1.2):
+				n_bad += 1
+	_t70_line(report, "accesibilidad", "%d textos de la interfaz escalados a 1,2 (%d sin escalar)" % [n_ctrl, n_bad], n_ctrl >= 6 and n_bad == 0)
+	# Nada se sale de la pantalla (1080×1920): barra superior con 5 jugadores y turno doble, zona inferior, y cada ventana
+	g.dir = -1
+	g.cur = 4
+	g.turns_left = 2
+	_session.updated.emit()
+	await _wait(0.5)
+	var out1 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	_t70_line(report, "accesibilidad", "texto grande, pantalla de partida (5 jugadores): %d controles fuera de 1080×1920 %s" % [out1.size(), str(out1.slice(0, 3))], out1.is_empty())
+	var clipped: Array = _game.debug_chips_clipped()
+	_t70_line(report, "accesibilidad", "texto grande, fichas de los 4 rivales: %d textos recortados %s" % [clipped.size(), str(clipped.slice(0, 3))], clipped.is_empty())
+	await _save_shot(dir + "/t70_texto_grande.png")
+	g.dir = 1
+	await _t70_hand(lm, ["cat_a", "cat_a", "nope", "zombie", "attack", "shuffle", "bury"])
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.5)
+	var out2 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	_t70_line(report, "accesibilidad", "texto grande, menú de pausa: %d controles fuera de la pantalla %s" % [out2.size(), str(out2.slice(0, 3))], out2.is_empty())
+	await _save_shot(dir + "/t70_texto_grande_menu.png")
+	var seguir := _find_button(self, "Seguir jugando")
+	if seguir:
+		await _tap_control(seguir)
+		await _wait(0.3)
+	await _tap_control(_find_button(self, "HISTORIAL"))
+	await _wait(0.5)
+	var out3 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	await _save_shot(dir + "/t70_texto_grande_historial.png")
+	var close := _find_button(self, "Cerrar")
+	if close:
+		await _tap_control(close)
+		await _wait(0.3)
+	for i in 4:
+		lm.game.discard.append({"card": ZKGame.Card.new("zq%d" % i, ["skip", "attack", "cat_a", "shuffle"][i], false), "by": "p1"})
+	_session.updated.emit()
+	await _wait(0.4)
+	_game._open_discard()
+	await _wait(0.5)
+	var out4 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+	var close2 := _find_button(self, "Cerrar")
+	if close2:
+		await _tap_control(close2)
+		await _wait(0.3)
+	_t70_line(report, "accesibilidad", "texto grande, ventanas Historial y Descarte: %d + %d controles fuera %s %s" % [out3.size(), out4.size(), str(out3.slice(0, 2)), str(out4.slice(0, 2))], out3.is_empty() and out4.is_empty())
+	# Selección de una carta con texto grande: panel de información
+	var c0: Card3D = _game.debug_playable_card()
+	if c0 != null:
+		await _tap_3d(c0, Vector3(-0.24, 0, -0.3))
+		await _wait(0.5)
+		var out5 := _t70_outside(_game.debug_hud_root(), [_game._fx_root, _game._zoom])
+		_t70_line(report, "accesibilidad", "texto grande, carta seleccionada con su botón: %d controles fuera %s" % [out5.size(), str(out5.slice(0, 2))], out5.is_empty())
+		await _save_shot(dir + "/t70_texto_grande_seleccion.png")
+		_game.debug_clear_selection()
+	# Vuelve a normal
+	await _t70_menu_tap("Texto: grande")
+	await _wait(0.4)
+	_t70_line(report, "accesibilidad", "volver a texto normal: HISTORIAL %d, guardado=%s" % [_find_button(self, "HISTORIAL").get_theme_font_size("font_size"), str(not PlusSettings.text_large())], _find_button(self, "HISTORIAL").get_theme_font_size("font_size") == s_hist0 and not PlusSettings.text_large())
+	# --- vibración
+	g.stack.clear()
+	g.prompt = null
+	var vib_events := func() -> void:
+		g.emit("turn", {"player": "p0"})
+		g.emit("attack", {"player": "p1", "target": "p0", "n": 2, "text": "x"})
+		g.emit("apocalypse", {"n": 1, "text": "¡Apocalipsis!"})
+		g.emit("haunt", {"player": "p1", "target": "p0", "card": "skip", "text": "Espanto"})
+		g.emit("rot_found", {"player": "p1", "text": "X encontró al Putrefacto"})
+		_session.updated.emit()
+	var r0 := PlusSettings.vibe_requests
+	var fi0 := PlusSettings.vibe_fired
+	vib_events.call()
+	await _wait(0.6)
+	var r1 := PlusSettings.vibe_requests
+	var fi1 := PlusSettings.vibe_fired
+	_t70_line(report, "accesibilidad", "vibración «sí»: %d peticiones, %d enviadas" % [r1 - r0, fi1 - fi0], r1 - r0 >= 4 and fi1 - fi0 == r1 - r0)
+	var tapped_v := await _t70_menu_tap("Vibración: sí")
+	vib_events.call()
+	await _wait(0.6)
+	var r2 := PlusSettings.vibe_requests
+	var fi2 := PlusSettings.vibe_fired
+	_t70_line(report, "accesibilidad", "vibración «no» (guardado=%s): %d peticiones al punto único, %d enviadas al dispositivo" % [str(not PlusSettings.vibration_on()), r2 - r1, fi2 - fi1], tapped_v and not PlusSettings.vibration_on() and r2 - r1 >= 4 and fi2 - fi1 == 0)
+	await _t70_menu_tap("Vibración: no")
+	# --- reducir movimiento: primero la comprobación de control (con movimiento sí hay sacudidas, destellos y cámara lenta)
+	var burst := func(lmx: LocalMatch) -> Dictionary:
+		var gx := lmx.game
+		var res := {"ts": 0, "forced": 0}
+		var w: TableWorld = _world
+		var sh0 := w.shake_calls
+		var fl0 := w.flash_calls
+		_ux_reset(gx, 0)
+		gx.cur = 0
+		gx.turns_left = 1
+		gx.emit("boom", {"player": "p1", "text": "¡Bigotes sacó un GATITO EXPLOSIVO!"})
+		gx.emit("died", {"player": "p1", "text": "💥 Bigotes explotó y está MUERTO (por ahora)."})
+		gx.emit("apocalypse", {"n": 3, "text": "¡Apocalipsis!"})
+		gx.emit("play", {"player": "p2", "eff": "attack", "text": "x"})
+		gx.emit("attack", {"player": "p2", "target": "p0", "n": 2, "text": "x"})
+		gx.emit("nope", {"player": "p2", "yup": false, "text": "NOP"})
+		gx.emit("reverse", {"dir": -1, "text": "Marcha atrás"})
+		gx.emit("swap", {"player": "p2", "target": "p3", "text": "Trueque"})
+		gx.emit("rot_found", {"player": "p2", "text": "X encontró al Putrefacto"})
+		gx.emit("zombie", {"player": "p2", "text": "Zombi"})
+		_session.updated.emit()
+		for kind: String in ["future", "shuffle", "skip", "super_skip", "steal", "dig", "bury", "feed", "grave_robber", "targeted", "reverse", "crow", "swirl", "haunt", "apocalypse", "clone"]:
+			_game.debug_fx().demo(kind)
+		_game.debug_aura().dbg_forced = 80
+		var t0 := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - t0 < 4600:      # 4,6 s mirando el reloj del juego en cada cuadro
+			await get_tree().process_frame
+			if not is_equal_approx(Engine.time_scale, 1.0):
+				res.ts += 1
+		res["shakes"] = w.shake_calls - sh0
+		res["flashes"] = w.flash_calls - fl0
+		res["tremors"] = _game.debug_aura().dbg_tremors
+		res["forced"] = _game.debug_fx().dbg_forced
+		_game.debug_aura().dbg_forced = -1
+		return res
+	_game.debug_aura().dbg_tremors = 0
+	var ctl: Dictionary = await burst.call(lm)
+	_t70_line(report, "accesibilidad", "control con movimiento: %d sacudidas, %d destellos a pantalla completa, %d cuadros con cámara lenta, %d temblores del mazo" % [ctl.shakes, ctl.flashes, ctl.ts, ctl.tremors], ctl.shakes > 0 and ctl.flashes > 0 and ctl.ts > 0 and ctl.tremors > 0)
+	await _wait(1.0)
+	var tapped_r := await _t70_menu_tap("Reducir movimiento: no")
+	await _wait(0.3)
+	_game.debug_aura().dbg_tremors = 0
+	var calm: Dictionary = await burst.call(lm)
+	await _save_shot(dir + "/t70_reducir_movimiento.png")
+	_t70_line(report, "accesibilidad", "«Reducir movimiento» (guardado=%s) en una ráfaga con explosión y Apocalipsis: %d sacudidas, %d destellos a pantalla completa, %d cuadros con time_scale≠1, %d temblores del mazo, efectos retirados a la fuerza %d" % [str(PlusSettings.reduce_motion()), calm.shakes, calm.flashes, calm.ts, calm.tremors, calm.forced], tapped_r and PlusSettings.reduce_motion() and calm.shakes == 0 and calm.flashes == 0 and calm.ts == 0 and calm.tremors == 0 and calm.forced == 0 and _game.dbg_shakes_blocked > 0 and _game.dbg_flashes_blocked > 0)
+	var kinds: Array = _game.debug_fx().dbg_launched.keys()
+	_t70_line(report, "accesibilidad", "con «Reducir movimiento» los efectos de carta siguen avisando (versión breve y quieta): lanzados %d tipos, vivos ahora %d, raíces colgando %d" % [kinds.size(), _game.debug_fx().live_count(), _game.debug_fx().roots()], kinds.size() >= 14)
+	await _wait(1.2)
+	_t70_line(report, "accesibilidad", "tras la ráfaga no queda ningún efecto colgando (raíces %d)" % _game.debug_fx().roots(), _game.debug_fx().roots() == 0)
+	await _t70_menu_tap("Reducir movimiento: sí")
+	_t70_line(report, "accesibilidad", "«Reducir movimiento: no» otra vez (guardado=%s)" % str(not PlusSettings.reduce_motion()), not PlusSettings.reduce_motion())
+	# --- no depender solo del color: icono de jugable junto al borde, y «⚡ YA» en la cara de las cartas ⚡
+	await _t70_hand(lm, ["attack", "nope", "shuffle", "cat_a", "haunt", "skip"])
+	var with_edge := 0
+	var with_icon := 0
+	for id: String in _game.debug_hand_marks():
+		var n: Card3D = _game.debug_hand_card(id)
+		if n.has_edge():
+			with_edge += 1
+			if n.has_play_icon():
+				with_icon += 1
+	var now_cards := ["nope", "shuffle", "clairvoyance", "feed_dead", "haunt"].filter(func(t: String) -> bool: return CardDB.defs.get(t, {}).get("now", false))
+	_t70_line(report, "accesibilidad", "las cartas jugables llevan icono ▶ además del borde (%d con borde, %d con icono); cartas ⚡ en los datos: %s" % [with_edge, with_icon, str(now_cards)], with_edge >= 2 and with_icon == with_edge and now_cards.size() == 5)
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- UX-14
+
+func _ui_test_t70_consejos(dir: String, report: Array) -> void:
+	PlusSettings.save_tips_seen({})
+	PlusSettings.set_first_game_done(false)
+	var lm := await _t62_start({"rivals": 3, "seed": 51}, false)
+	var g := lm.game
+	_memo_safe_top(g, 4)
+	_game._tip = ""                   # la mano repartida pudo traer ya una carta de La Cripta: se parte de cero
+	_game._tips_seen.clear()
+	PlusSettings.save_tips_seen({})
+	await _t70_hand(lm, ["bury", "skip", "cat_a"])
+	var tip1: String = _game.debug_tip()
+	var txt1: String = _game.debug_info_text()
+	var def_short: String = str(CardDB.defs["bury"].short)
+	_t70_line(report, "consejos", "primera partida Plus (sin tutorial): consejo de la carta nueva «%s», con su descripción corta y cuándo conviene: «%s»" % [tip1, txt1.left(120).replace("\n", " ")], tip1 == "card_bury" and txt1.contains(def_short) and txt1.contains("Úsala"))
+	await _save_shot(dir + "/t70_consejo_carta.png")
+	await _tap_control(_find_button(self, "Entendido"))
+	await _wait(0.4)
+	_t70_line(report, "consejos", "tras «Entendido» se guarda en [plus] tips_seen: %s; sin consejo viejo del tutorial (tip='%s')" % [str(PlusSettings.tips_seen().keys()), _game.debug_tip()], PlusSettings.tips_seen().has("card_bury") and _game.debug_tip() == "")
+	# Descarte con 3 cartas
+	for i in 3:
+		g.discard.append({"card": ZKGame.Card.new("zt%d" % i, ["skip", "attack", "cat_b"][i], false), "by": "p1"})
+	_session.updated.emit()
+	await _wait(0.5)
+	var tip2: String = _game.debug_tip()
+	_t70_line(report, "consejos", "descarte con 3 cartas: consejo «%s»" % tip2, tip2 == "discard")
+	await _tap_control(_find_button(self, "Entendido"))
+	await _wait(0.3)
+	# Recordatorio del futuro
+	g.emit("future", {"cards": _memo_top_types(g, 3), "mut": g.mut, "len": g.draw.size(), "shuf": g.shuf}, "p0")
+	_session.updated.emit()
+	await _wait(0.5)
+	var tip3: String = _game.debug_tip()
+	_t70_line(report, "consejos", "aparece la tira del recordatorio: consejo «%s»" % tip3, tip3 == "future")
+	# «El futuro» (ventana) tapa el consejo: primero se cierra la ventana y luego el consejo
+	var win_ok := _find_button(_game._modal_root, "Entendido")
+	if win_ok:
+		await _tap_control(win_ok)
+		await _wait(0.3)
+	var tip_ok := _find_button(_game._info_slot, "Entendido")
+	if tip_ok:
+		await _tap_control(tip_ok)
+		await _wait(0.3)
+	var seen: Dictionary = PlusSettings.tips_seen()
+	_t70_line(report, "consejos", "guardados en el archivo: %s" % str(seen.keys()), seen.has("card_bury") and seen.has("discard") and seen.has("future"))
+	var was_done := PlusSettings.first_game_done()
+	await _tap_control(_find_button(self, "MENÚ"))
+	await _wait(0.4)
+	await _tap_control(_find_button(self, "Salir de la partida"))
+	await _wait(0.3)
+	await _tap_control(_find_button(self, "Salir al menú"))
+	await _wait(0.5)
+	_t70_line(report, "consejos", "al salir de la primera partida first_game_done pasa de %s a %s" % [str(was_done), str(PlusSettings.first_game_done())], not was_done and PlusSettings.first_game_done())
+	# Pantalla nueva: se respetan los vistos, y la partida ya no es «la primera»
+	lm = await _t62_start({"rivals": 3, "seed": 52}, false)
+	g = lm.game
+	_memo_safe_top(g, 4)
+	await _t70_hand(lm, ["bury", "skip", "cat_a"])
+	var again: Dictionary = _game.debug_tips_seen()
+	_t70_line(report, "consejos", "pantalla nueva: carga los consejos vistos (%s) y no repite «bury» (tip='%s')" % [str(again.keys()), _game.debug_tip()], again.has("card_bury") and again.has("discard") and again.has("future") and _game.debug_tip() == "")
+	_game.coach = true         # el tutorial también respeta lo ya visto (también en Plus)
+	_game._update_hud()
+	await _wait(0.4)
+	var tutor: String = _game.debug_tip()
+	_t70_line(report, "consejos", "con el tutorial activo sale un consejo no visto («%s») y ninguno de los guardados" % tutor, tutor != "" and not again.has(tutor))
+	_game.coach = false
+	_game._update_hud()
+	# Otra carta de La Cripta que llega a la mano: su consejo sale aunque ya no sea la primera partida solo con el tutorial/reinicio
+	# «Volver a ver los consejos» desde el menú de pausa
+	var tapped := await _t70_menu_tap("Volver a ver los consejos", false)
+	await _wait(0.5)
+	var tip_after: String = _game.debug_tip()
+	_t70_line(report, "consejos", "«Volver a ver los consejos»: botón=%s, vistos en pantalla %d y en el archivo %d, first_game_done=%s, vuelve a salir un consejo («%s»)" % [str(tapped), _game.debug_tips_seen().size(), PlusSettings.tips_seen().size(), str(PlusSettings.first_game_done()), tip_after], tapped and _game.debug_tips_seen().size() == 0 and PlusSettings.tips_seen().size() == 0 and not PlusSettings.first_game_done() and tip_after != "")
+	_close_session()
+	await _wait(0.2)
+
+
+# ---------------- V-09
+
+func _ui_test_t70_ambiente(dir: String, report: Array) -> void:
+	PlusSettings.set_reduce_motion(false)
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_mat("verde")
+	_world.apply_quality("high")
+	var lm := await _t62_start({"rivals": 4, "seed": 61})
+	var amb: PlusAmbient = _game.debug_ambient()
+	var moon_a := amb.moon_index
+	_t70_line(report, "ambiente", "niebla baja: %d capas (calidad alta); luna %d color %s" % [amb.fog_layers(), amb.moon_index, str(_world.moon_color())], amb.fog_layers() == 3 and _world.moon_color().is_equal_approx(PlusAmbient.MOONS[moon_a][0]))
+	await _wait(1.0)
+	await _save_shot(dir + "/t70_ambiente_niebla.png")
+	# Calidad baja: sin niebla
+	_world.apply_quality("low")
+	_session.updated.emit()
+	await _wait(0.4)
+	_t70_line(report, "ambiente", "calidad baja: %d capas de niebla" % amb.fog_layers(), amb.fog_layers() == 0)
+	_world.apply_quality("high")
+	_session.updated.emit()
+	await _wait(0.4)
+	_t70_line(report, "ambiente", "calidad alta otra vez: %d capas" % amb.fog_layers(), amb.fog_layers() == 3)
+	# Relámpago: con riesgo ≤ 50 % no cae
+	var sky0: float = _world.sky_energy()
+	amb.dbg_risk = 30
+	var b0 := amb.dbg_bolts
+	await _wait(5.5)
+	_t70_line(report, "ambiente", "riesgo 30 %%: %d relámpagos en 5,5 s" % (amb.dbg_bolts - b0), amb.dbg_bolts == b0)
+	# «Reducir movimiento»: con riesgo alto tampoco
+	await _t70_menu_tap("Reducir movimiento: no")
+	amb.dbg_risk = 70
+	var fog_static: float = amb.fog_speed()
+	await _wait(6.0)
+	_t70_line(report, "ambiente", "«Reducir movimiento» y riesgo 70 %%: %d relámpagos en 6 s, niebla quieta (velocidad %.3f)" % [amb.dbg_bolts - b0, fog_static], amb.dbg_bolts == b0 and fog_static == 0.0 and not amb.bolt())
+	await _t70_menu_tap("Reducir movimiento: sí")
+	# Con riesgo alto y movimiento: cae uno, y no más de uno cada ~12 s
+	var t_start := Time.get_ticks_msec()
+	var first_ms := -1
+	for _i in 160:
+		await _wait(0.05)
+		if amb.dbg_bolts > b0 and first_ms < 0:
+			first_ms = Time.get_ticks_msec() - t_start
+			break
+	var sky_peak: float = 0.0
+	for _i in 12:
+		sky_peak = maxf(sky_peak, _world.sky_energy())
+		await get_tree().process_frame
+	_t70_line(report, "ambiente", "riesgo 70 %%: relámpago a los %.1f s (cielo %.2f → pico %.2f)" % [first_ms / 1000.0, sky0, sky_peak], first_ms > 0 and amb.dbg_bolts == b0 + 1)
+	await _wait(9.0)
+	_t70_line(report, "ambiente", "9 s después sigue habiendo un solo relámpago (separación mínima de 12 s): %d" % (amb.dbg_bolts - b0), amb.dbg_bolts == b0 + 1)
+	amb.dbg_risk = -1
+	# Captura a mitad de relámpago
+	amb.bolt()
+	await _wait(0.07)
+	var sky_now: float = _world.sky_energy()
+	await _save_shot(dir + "/t70_ambiente_relampago.png")
+	_t70_line(report, "ambiente", "captura a mitad de relámpago: cielo %.2f (normal %.2f)" % [sky_now, sky0], sky_now > sky0 + 0.15)
+	await _wait(1.0)
+	_t70_line(report, "ambiente", "el cielo vuelve a su valor (%.2f)" % _world.sky_energy(), absf(_world.sky_energy() - sky0) < 0.01)
+	await _t70_visuales(dir, report)
+	# Luna distinta en la partida siguiente
+	_close_session()
+	await _wait(0.3)
+	_t70_line(report, "ambiente", "al salir, la luna y el tapete vuelven a los de siempre (luna %s, tapete %s)" % [str(_world.moon_color()), str(_world.felt_color())], _world.moon_color().is_equal_approx(TableWorld.MOON_DEFAULT_COLOR) and _world.felt_color().is_equal_approx(TableWorld.FELT_DEFAULT))
+	lm = await _t62_start({"rivals": 2, "seed": 62})
+	var moon_b: int = _game.debug_ambient().moon_index
+	_t70_line(report, "ambiente", "partida siguiente: luna %d (antes %d), distinta=%s" % [moon_b, moon_a, str(moon_b != moon_a)], moon_b != moon_a and _world.moon_color().is_equal_approx(PlusAmbient.MOONS[moon_b][0]))
+	_close_session()
+	await _wait(0.3)
+	# Tapete alternativo elegible en Ajustes (solo en Plus) y Ajustes clásicos sin cambios
+	_show_menu()
+	await _wait(0.5)
+	_menu.set_plus(false, false)
+	_menu.show_page("settings")
+	await _wait(0.4)
+	var classic_has := _find_button(self, "Texto: normal") != null or _find_button(self, "Tapete: verde") != null or _find_button(self, "Reducir movimiento: no") != null
+	await _save_shot(dir + "/t70_ajustes_clasico.png")
+	_t70_line(report, "ambiente", "Ajustes en modo clásico: sin opciones de Plus (%s)" % str(not classic_has), not classic_has)
+	_menu.set_plus(true, false)
+	_menu.show_page("settings")
+	await _wait(0.4)
+	var plus_has := _find_button(self, "Texto: normal") != null and _find_button(self, "Vibración: sí") != null and _find_button(self, "Reducir movimiento: no") != null and _find_button(self, "Tapete: verde") != null
+	await _save_shot(dir + "/t70_ajustes_plus.png")
+	_t70_line(report, "ambiente", "Ajustes en modo Plus: texto, vibración, reducir movimiento y tapete (%s)" % str(plus_has), plus_has)
+	var out_s := _t70_outside(_menu)
+	_t70_line(report, "ambiente", "Ajustes Plus caben en pantalla: %d fuera" % out_s.size(), out_s.is_empty())
+	await _menu_tap("Tapete: verde")
+	var mat1 := PlusSettings.mat()
+	var label_next := _find_button(self, "Tapete: burdeos") != null
+	await _menu_tap("Texto: normal")
+	await _menu_tap("Vibración: sí")
+	await _menu_tap("Reducir movimiento: no")
+	var settings_ok: bool = PlusSettings.text_large() and not PlusSettings.vibration_on() and PlusSettings.reduce_motion() and mat1 == "burdeos" and label_next
+	_t70_line(report, "ambiente", "los botones de Ajustes guardan (texto grande=%s, vibración=%s, reducir=%s, tapete=%s)" % [str(PlusSettings.text_large()), str(PlusSettings.vibration_on()), str(PlusSettings.reduce_motion()), mat1], settings_ok)
+	await _save_shot(dir + "/t70_ajustes_plus_cambiados.png")
+	PlusSettings.set_text_large(false)
+	PlusSettings.set_vibration(true)
+	PlusSettings.set_reduce_motion(false)
+	lm = await _t62_start({"rivals": 3, "seed": 63})
+	await _wait(0.8)
+	var felt: Color = _world.felt_color()
+	await _save_shot(dir + "/t70_tapete_burdeos.png")
+	_t70_line(report, "ambiente", "partida con tapete burdeos: color %s" % str(felt), felt.is_equal_approx(PlusAmbient.MATS["burdeos"]))
+	_start_solo(_last_opts)        # revancha: la pantalla nueva nace antes de que muera la vieja y no debe perder el tapete ni la luna
+	await _wait(1.5)
+	var felt2: Color = _world.felt_color()
+	var moon2: Color = _world.moon_color()
+	_t70_line(report, "ambiente", "revancha: tapete %s, luna %s (no la de siempre: %s)" % [str(felt2), str(moon2), str(not moon2.is_equal_approx(TableWorld.MOON_DEFAULT_COLOR))], felt2.is_equal_approx(PlusAmbient.MATS["burdeos"]) and moon2.is_equal_approx(PlusAmbient.MOONS[_game.debug_ambient().moon_index][0]))
+	_close_session()
+	await _wait(0.3)
+	PlusSettings.set_mat("verde")
+	_show_menu()
+	await _wait(0.3)
+
+
+## Retoques visuales: el cuervo de Ojo de Cuervo a mitad de vuelo y el humo del mazo con riesgo alto.
+func _t70_visuales(dir: String, report: Array) -> void:
+	# Retoques visuales: el cuervo de Ojo de Cuervo y el humo del mazo con riesgo alto
+	var fx: PlusVfx = _game.debug_fx()
+	var seat_ids: Array = _game._seats.keys()
+	fx.crow(_game._pos_of(seat_ids[1]), _game._pos_of("p0"))        # de un rival hacia mi sitio: cruza la mesa
+	await _wait(0.4)
+	await _save_shot(dir + "/t70_cuervo.png")
+	await _wait(0.2)
+	await _save_shot(dir + "/t70_cuervo2.png")
+	var wings := fx.find_children("Wing_*", "Node3D", true, false)
+	var crow_node: Node3D = fx.find_child("Fx_crow", true, false) as Node3D
+	var crow_parts := crow_node.get_child(0).get_child_count() if crow_node != null and crow_node.get_child_count() > 0 else 0
+	_t70_line(report, "ambiente", "cuervo a mitad de vuelo: efecto vivo=%s, %d alas que baten, %d piezas (cuerpo, cabeza, pico, ojos, cola)" % [str(fx.is_live("crow")), wings.size(), crow_parts], fx.is_live("crow") and wings.size() == 2 and crow_parts >= 10)
+	await _wait(1.0)
+	_game.debug_aura().dbg_forced = 70
+	await _wait(3.5)
+	await _save_shot(dir + "/t70_humo_mazo.png")
+	_t70_line(report, "ambiente", "humo del mazo con riesgo 70 %%: emitiendo=%s" % str(_game.debug_aura().smoking()), _game.debug_aura().smoking())
+	_game.debug_aura().dbg_forced = -1

@@ -5,6 +5,8 @@ extends Node
 
 signal updated
 signal error(message: String)
+## Reacción rápida de un jugador (solo Plus, UX-08): índice 0-5 de EmoteSet. No forma parte de la partida.
+signal emote(player_id: String, index: int)
 
 var me_id := ""
 
@@ -28,9 +30,29 @@ func level_of(_id: String) -> String:
 	return ""
 
 
+## ¿La partida es de Zombie Kittens Plus? (decide qué pantalla de juego se abre)
+func is_plus() -> bool:
+	return false
+
+
 func is_network() -> bool:
 	return false
 
 
 func is_host() -> bool:
 	return true
+
+
+## Envía una reacción rápida (índice 0-5). Solo hace algo en partidas Plus; el resto la ignora en silencio.
+func send_emote(_index: int) -> void:
+	pass
+
+
+## Victorias por jugador en la sala ({id: n}); vacío fuera de salas Plus.
+func scores() -> Dictionary:
+	return {}
+
+
+## Rasgo de personalidad del bot ("" si no tiene o no es Plus). Ver ZKBots.TRAIT_LABELS.
+func trait_of(_id: String) -> String:
+	return ""
